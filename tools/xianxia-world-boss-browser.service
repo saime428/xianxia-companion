@@ -1,0 +1,28 @@
+[Unit]
+Description=Xianxia World Boss browser verification worker
+After=network-online.target
+Wants=network-online.target
+PartOf=xianxia-companion.service
+
+[Service]
+Type=simple
+User=xianxia
+Group=xianxia
+WorkingDirectory=/opt/xianxia-companion
+Environment=HOME=/opt/xianxia-companion/data/world_boss
+Environment=PYTHONPATH=/opt/xianxia-companion/app/src
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/xianxia-companion/.venv/bin/python -B -m tg_game.features.world_boss.world_boss_browser --queue-dir /opt/xianxia-companion/data/world_boss/turnstile
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/xianxia-companion/data/world_boss
+
+[Install]
+WantedBy=multi-user.target

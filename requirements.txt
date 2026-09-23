@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+jinja2
+pydantic
+python-multipart
+python-dotenv
+telethon
+python-socks[asyncio]
+httpx
+websocket-client>=1.8,<2

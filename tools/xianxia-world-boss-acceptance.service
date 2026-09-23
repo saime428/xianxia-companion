@@ -1,0 +1,20 @@
+[Unit]
+Description=Check the 2026-09-15 Qing Yuanzi world boss result
+After=xianxia-companion.service
+
+[Service]
+Type=oneshot
+User=xianxia
+Group=xianxia
+WorkingDirectory=/opt/xianxia-companion
+Environment=TZ=UTC
+ExecStart=/opt/xianxia-companion/.venv/bin/python -B /opt/xianxia-companion/tools/check_world_boss_event.py --profile 2 --event-at 2026-09-15T05:40:00+00:00 --wait-seconds 300 --output-dir /opt/xianxia-companion/data/world_boss/acceptance
+TimeoutStartSec=360
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+# SQLite read-only connections still need the database's WAL/SHM coordination files.
+ReadWritePaths=/opt/xianxia-companion/data
