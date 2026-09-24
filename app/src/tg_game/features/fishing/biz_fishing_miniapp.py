@@ -55,6 +55,8 @@ DWELLING_FISHING_ENDPOINTS = {
     "buy_bait": f"{DWELLING_FISHING_API_PATH_PREFIX}buy-bait",
     "cancel": f"{DWELLING_FISHING_API_PATH_PREFIX}cancel",
     "state": f"{DWELLING_FISHING_API_PATH_PREFIX}state",
+    "checkpoint": f"{DWELLING_FISHING_API_PATH_PREFIX}checkpoint",
+    "fight": f"{DWELLING_FISHING_API_PATH_PREFIX}fight",
 }
 FISHING_MINIAPP_ALLOWED_WEB_HOSTS = {"t.me", "telegram.me", "asc.aiopenai.app"}
 FISHING_MINIAPP_ALLOWED_API_HOSTS = {"asc.aiopenai.app"}
@@ -72,6 +74,11 @@ DWELLING_FISHING_MAX_BITE_WAIT_SEC = FISHING_MINIAPP_BITE_WAIT_CAP_MS / 1000.0
 # 提竿后 session.status 可能是 settling（结果还没出）；前端每 2.5 秒轮询一次 state
 DWELLING_FISHING_SETTLE_POLL_SEC = 2.5
 DWELLING_FISHING_SETTLE_POLL_LIMIT = 6
+# 遛鱼按线余量，见 simulate_fishing_fight
+FISHING_FIGHT_MARGIN_LOW = 3.0
+FISHING_FIGHT_MARGIN_HIGH = 3.0
+FISHING_FIGHT_LOOKAHEAD_STEPS = 400  # 往后看 8 秒
+FISHING_FIGHT_RELEASE_DRIFT = 0.9
 # 前端 dwelling-companion.js 只有两个模型：ngw 是人人都有的默认；nangongwan 标着 privateTalent，
 # 要走 talent-model 接口单独授权。写死 nangongwan 等于替没授权的号谎报模型。
 DWELLING_FISHING_MODEL_ID = "ngw"
@@ -567,65 +574,139 @@ def extract_public_fishing_launch(data: object) -> dict:
     return {}
 
 
-def build_fishing_proof(challenge: object, *, rng=None) -> dict:
-    challenge_data = challenge if isinstance(challenge, dict) else {}
-    target_low = _number(challenge_data.get("targetLow"), 41.0)
-    target_high = max(target_low + 1.0, _number(challenge_data.get("targetHigh"), 68.0))
-    fish_power = max(0.1, _number(challenge_data.get("fishPower"), 1.7))
-    min_duration = max(0.0, _number(challenge_data.get("minDurationMs"), 5200.0))
-    max_duration = max(min_duration, _number(challenge_data.get("maxDurationMs"), 70000.0))
-    duration_limit = min(max_duration, float(FISHING_MINIAPP_PROOF_DURATION_CAP_MS))
-    seed_text = str(challenge_data.get("fishSeed") or "seed")
-    seed_offset = sum(ord(ch) for ch in seed_text) / 19.0
+def _js_number(value: object, default: float) -> float:
+    # 前端写法 Number(x)||默认值：0、NaN、缺失都退回默认
+    number = _number(value, 0.0)
+    return number if number and math.isfinite(number) else default
 
-    elapsed_ms = 0
+
+def simulate_fishing_fight(challenge: object) -> dict:
+    """遛鱼（持竿力度）：逐 20ms 复刻前端 dwelling-fishing-controller.js（fishing-v14）的 stepFight()，
+    按住/松开由我们决定，返回要交的 proof 和沿途每个 checkpoint 的快照。
+
+    按线策略（离线试验 fight_lab.py 定的）：张力守在 [下沿+3, 上沿-3-松线后 8 秒内还会涨的量-每次松线 0.9]。
+    松线事件记在「开始松线的那一步」（旧版一直这么记、当年都能上鱼）；前端记在上一步，
+    服务器按哪种复算看不到，那 0.9/次 就是给「晚一步生效」留的余量。预览参数下两种复算都 0 脱钩、金区外≈0%。
+    """
+    c = challenge if isinstance(challenge, dict) else {}
+    low = _js_number(c.get("targetLow"), 41.0)
+    high = _js_number(c.get("targetHigh"), 68.0)
+    power = _js_number(c.get("fishPower"), 1.7)
+    seed_offset = sum(ord(ch) for ch in str(c.get("fishSeed") or "seed")) / 19.0
+    version = _js_number(c.get("behaviorVersion"), 1.0)
+    behavior = c.get("behavior") if c.get("behavior") in ("steady", "leap", "surge") else "steady"
+    struggles = []
+    for item in c.get("struggles") if isinstance(c.get("struggles"), list) else []:
+        item = item if isinstance(item, dict) else {}
+        values = [_number(item.get(key), math.nan) for key in ("startMs", "durationMs", "strength")]
+        if all(math.isfinite(value) for value in values):
+            struggles.append(values)
+    min_ms = _js_number(c.get("minDurationMs"), 5200.0)
+    max_ms = min(_js_number(c.get("maxDurationMs"), 70000.0), float(FISHING_MINIAPP_PROOF_DURATION_CAP_MS))
+    interval = _js_number(c.get("checkpointIntervalMs"), 2500.0)
+    max_events = int(_js_number(c.get("maxInputEvents"), 1000.0))
+
+    def pull_at(t: int) -> float:
+        pulse = math.sin(t * 0.0027 * power + seed_offset)
+        surge = max(0.0, math.sin(t * 0.0041 + seed_offset * 1.7))
+        pull = power * (0.72 + pulse * 0.24 + surge * 0.42)
+        if version >= 2:
+            for start, duration, strength in struggles:
+                elapsed = t - start
+                if elapsed < 0 or elapsed >= duration:
+                    continue
+                portion = elapsed / duration
+                wave = math.sin(math.pi * portion)
+                if behavior == "steady":
+                    pull += power * strength * 0.18 * wave
+                elif behavior == "leap":
+                    pull *= 1 + strength * 0.48 * wave
+                else:
+                    pull += power * strength * 0.72 * (0.55 + 0.45 * math.sin(portion * math.pi * 2))
+                break
+        return pull
+
+    # 鱼的拉力只跟时间有关，先整场算好；release[i] = 第 i 步松线时张力的变化
+    steps = int(max_ms // 20) + FISHING_FIGHT_LOOKAHEAD_STEPS
+    pulls = [pull_at((i + 1) * 20) for i in range(steps)]
+    noise = [math.sin((i + 1) * 20 * 0.012 + seed_offset) * 0.24 for i in range(steps)]
+    release = [(pulls[i] * 4.8 - 24.0) * 0.02 + noise[i] for i in range(steps)]
+
+    tension = (low + high) / 2.0 - 8.0
     progress = 0.0
-    tension = (target_low + target_high) / 2.0 - 8.0
     holding = False
-    events = []
-    hold_at = target_low
-    release_at = max(target_low + 3.0, target_high - 24.0)
+    releases = danger_ms = slack_ms = samples = stable_samples = 0
+    elapsed = last_checkpoint = 0
+    events, checkpoints = [], []
+    while True:
+        i = elapsed // 20
+        rise = peak = 0.0
+        for delta in release[i + 1 : i + 1 + FISHING_FIGHT_LOOKAHEAD_STEPS]:
+            rise += delta
+            peak = max(peak, rise)
+        upper = high - FISHING_FIGHT_MARGIN_HIGH - FISHING_FIGHT_RELEASE_DRIFT * releases - peak
+        lower = low + FISHING_FIGHT_MARGIN_LOW
+        if_hold = tension + (24.0 + pulls[i] * 3.1) * 0.02 + noise[i]
+        if_release = tension + release[i]
+        want = (if_hold <= upper or if_release < lower) if holding else if_release < lower
+        elapsed += 20
+        if want != holding:
+            holding = want
+            releases += not want
+            events.append({"t": elapsed, "holding": want})
 
-    while elapsed_ms < duration_limit:
-        if not holding and tension < hold_at:
-            holding = True
-            events.append({"t": elapsed_ms + 20, "holding": True})
-        elif holding and tension > release_at:
-            holding = False
-            events.append({"t": elapsed_ms + 20, "holding": False})
-
-        elapsed_ms += 20
+        # 以下与前端 stepFight() 一致
         dt = 0.02
-        pulse = math.sin(elapsed_ms * 0.0027 * fish_power + seed_offset)
-        surge = max(0.0, math.sin(elapsed_ms * 0.0041 + seed_offset * 1.7))
-        fish_pull = fish_power * (0.72 + pulse * 0.24 + surge * 0.42)
-        if holding:
-            tension += (24.0 + fish_pull * 3.1) * dt
-        else:
-            tension += (fish_pull * 4.8 - 24.0) * dt
-        tension += math.sin(elapsed_ms * 0.012 + seed_offset) * 0.24
+        tension += (24.0 + pulls[i] * 3.1) * dt if holding else (pulls[i] * 4.8 - 24.0) * dt
+        tension += noise[i]
         tension = max(0.0, min(100.0, tension))
-
-        if target_low <= tension <= target_high:
-            progress += (8.2 + fish_power * 0.7 + (2.2 if holding else 0.5)) * dt
-        elif tension > target_high:
-            progress -= (1.5 + fish_power * 0.25) * dt
+        if low <= tension <= high:
+            stable_samples += 1
+            progress += (8.2 + power * 0.7 + (2.2 if holding else 0.5)) * dt
+        elif tension > high:
+            danger_ms += 20
+            progress -= (1.5 + power * 0.25) * dt
         else:
+            slack_ms += 20
             progress -= 0.9 * dt
-        if holding and tension < target_low:
+        if holding and tension < low:
             progress += 1.1 * dt
         progress = max(0.0, min(100.0, progress))
-        if progress >= 100.0 and elapsed_ms >= min_duration:
+        samples += 1
+        state = {
+            "progress": progress,
+            "tension": tension,
+            "holding": holding,
+            "danger_ms": danger_ms,
+            "slack_ms": slack_ms,
+            "samples": samples,
+            "stable_samples": stable_samples,
+        }
+        if (progress >= 100.0 and elapsed >= min_ms) or elapsed >= max_ms:
             break
+        if elapsed - last_checkpoint >= interval:
+            last_checkpoint = elapsed
+            checkpoints.append({"durationMs": elapsed, "events": list(events[:max_events]), "state": state})
 
-    if progress < 100.0:
-        raise ValueError("fishing_not_landed")
     return {
-        "mode": "xianxiaFishingV2",
-        "challengeId": str(challenge_data.get("challengeId") or ""),
-        "durationMs": int(elapsed_ms),
-        "events": events,
+        "proof": {
+            "mode": "xianxiaFishingV2",
+            "challengeId": str(c.get("challengeId") or ""),
+            "durationMs": int(elapsed),
+            "landed": progress >= 100.0,
+            "events": events[:max_events],
+        },
+        "checkpoints": checkpoints,
+        "state": state,
     }
+
+
+def build_fishing_proof(challenge: object, *, rng=None) -> dict:
+    # 旧私聊 fish_ 入口的交卷格式（不带 landed）
+    proof = simulate_fishing_fight(challenge)["proof"]
+    if not proof["landed"]:
+        raise ValueError("fishing_not_landed")
+    return {key: proof[key] for key in ("mode", "challengeId", "durationMs", "events")}
 
 
 def _flow_result(ok: bool, status: str, *, error: object = "", data: Optional[dict] = None, events: Optional[list] = None, proof: Optional[dict] = None) -> dict:
@@ -774,6 +855,7 @@ def _extract_dwelling_session(data: object) -> dict:
     # 键名取自前端 dwelling-fishing-controller.js（v9）：cast/hook/state 都回 {"context", "session"}，
     # session = {sessionId, siteId, status: active|settling|…, startedAt, biteAt, expiresAt, serverNow, result}
     # result = {ready, caught, fish: {name, weight}, rarityLabel, bonusLoot: [{name, qty}], reason}
+    # 09-24 起（fishing-v14）提竿后 phase=fighting + fight（遛鱼题目），交 fight 才出 result
     session = _nested_dict(_unwrap_data(data), "session")
     session_id = str(session.get("sessionId") or "").strip()
     if not session_id:
@@ -781,6 +863,8 @@ def _extract_dwelling_session(data: object) -> dict:
     return {
         "sessionId": session_id,
         "status": str(session.get("status") or ""),
+        "phase": str(session.get("phase") or ""),
+        "fight": _nested_dict(session, "fight"),
         "serverNow": _number(session.get("serverNow"), 0),
         "startedAt": _number(session.get("startedAt"), 0),
         "biteAt": _number(session.get("biteAt"), 0),
@@ -1300,6 +1384,33 @@ def run_dwelling_fishing_loop_flow(
             events=events,
         )
 
+    def play_fight(session_id: str, plan: dict) -> dict:
+        # 跟前端一样边遛边报：每个 checkpoint 按真实时间发，最后交 fight；一口气秒交服务器可能不认。
+        # checkpoint 失败前端也是吞掉，fight 才算数
+        proof = plan["proof"]
+        clock = 0
+        for checkpoint in plan["checkpoints"]:
+            if sleeper is not None:
+                sleeper((checkpoint["durationMs"] - clock) / 1000.0)
+            clock = checkpoint["durationMs"]
+            call(
+                "checkpoint",
+                {
+                    **site_meta,
+                    "sessionId": session_id,
+                    "fishingProof": {
+                        "mode": proof["mode"],
+                        "challengeId": proof["challengeId"],
+                        "durationMs": clock,
+                        "events": checkpoint["events"],
+                    },
+                    "checkpointState": checkpoint["state"],
+                },
+            )
+        if sleeper is not None:
+            sleeper((proof["durationMs"] - clock) / 1000.0)
+        return call("fight", {**site_meta, "sessionId": session_id, "fishingProof": proof})
+
     while settled_count < max_rounds:
         context_result = call("context", {"siteId": site_id})
         if not context_result.get("ok"):
@@ -1391,22 +1502,41 @@ def run_dwelling_fishing_loop_flow(
         )
         if not hook_result.get("ok"):
             return fail(hook_result.get("error"), retryable=True)
-        result = _extract_dwelling_session(hook_result.get("data") or {}).get("result") or {}
-        for _ in range(DWELLING_FISHING_SETTLE_POLL_LIMIT):
-            if result.get("ready"):
+        hooked = _extract_dwelling_session(hook_result.get("data") or {})
+        challenge, plan, polls = {}, None, 0
+        while not (hooked.get("result") or {}).get("ready"):
+            if plan is None and hooked.get("phase") == "fighting" and hooked.get("fight"):
+                # 遛鱼题目一般跟着 hook 回来；前端断线恢复时也会从 state 里接上，两处都认
+                challenge = hooked["fight"]
+                plan = simulate_fishing_fight(challenge)
+                fight_result = play_fight(session["sessionId"], plan)
+                if not fight_result.get("ok"):
+                    # 4xx = 服务器不收这份 proof，重跑只会再烧一竿；网络/5xx 才值得续
+                    status_code = int(fight_result.get("status_code") or 0)
+                    return fail(fight_result.get("error"), retryable=not 400 <= status_code < 500)
+                hooked = _extract_dwelling_session(fight_result.get("data") or {})
+                continue
+            if polls >= DWELLING_FISHING_SETTLE_POLL_LIMIT:
                 break
+            polls += 1
             if sleeper is not None:
                 sleeper(DWELLING_FISHING_SETTLE_POLL_SEC)
             state_result = call("state", {"siteId": site_id, "sessionId": session["sessionId"], "refreshContext": False})
             if not state_result.get("ok"):
                 return fail(state_result.get("error"), retryable=True)
-            result = _extract_dwelling_session(state_result.get("data") or {}).get("result") or {}
+            hooked = _extract_dwelling_session(state_result.get("data") or {})
+        result = hooked.get("result") or {}
         if not result.get("ready"):
             # 竿已经用掉但结果没等到；别当成空竿接着钓，也别算成功
             return fail("fishing_result_not_ready")
         round_catch = _dwelling_catch_from_result(result)
         reason = str(result.get("reason") or "")
-        rounds.append({"index": settled_count + 1, "ok": True, "status": "settled", "catch": round_catch, "reason": reason})
+        stored = result
+        if plan:
+            # 题目 + 我们交的卷 + 我们算的终局，日后拿服务器的 gameProgress/gameHighTensionMs 对账
+            stored = {**result, "_fight": {"challenge": challenge, "proof": plan["proof"], "state": plan["state"]}}
+        # at / result 给 executors 写逐竿记录（fishing_casts）用
+        rounds.append({"index": settled_count + 1, "ok": True, "status": "settled", "catch": round_catch, "reason": reason, "at": time.time(), "result": stored})
         if round_catch:
             catches.append(round_catch)
         settled_count += 1
@@ -1415,6 +1545,9 @@ def run_dwelling_fishing_loop_flow(
             # 没带 reason 的空竿是正常玩法（「灵影擦钩而过」），接着钓；
             # early/timeout 说明我们的提竿时机错了，再钓也是一竿一竿白扔，停下来看抓包
             return fail(f"fishing_hook_{reason}")
+        if plan and plan["proof"]["landed"] and not result.get("caught"):
+            # 我们算着收满了、服务器复算却判脱钩：两边对不上，接着钓只会一竿竿白扔
+            return fail(f"fishing_fight_rejected(progress={result.get('gameProgress')})")
         if settled_count >= max_rounds or server_today >= server_limit:
             break
         if sleeper is not None:

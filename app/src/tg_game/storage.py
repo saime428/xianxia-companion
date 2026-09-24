@@ -599,6 +599,24 @@ class Storage:
                     FOREIGN KEY (profile_id) REFERENCES profiles(id)
                 );
 
+                -- 逐竿垂钓记录，一竿一行。fishing_sessions.catches_json 是鱼篓存量（.鱼篓 面板会覆盖），
+                -- 成功率、渔获看这张；result_json 是服务器原样的 session.result（含 bonusLoot、遛鱼评分），
+                -- 遛鱼的竿另带 _fight：题目、我们交的卷、我们算的终局，用来跟服务器复算对账。
+                CREATE TABLE IF NOT EXISTS fishing_casts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER NOT NULL,
+                    pond TEXT NOT NULL DEFAULT '',
+                    bait TEXT NOT NULL DEFAULT '',
+                    caught INTEGER NOT NULL DEFAULT 0,
+                    fish TEXT NOT NULL DEFAULT '',
+                    grade TEXT NOT NULL DEFAULT '',
+                    weight TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_fishing_casts_profile_created ON fishing_casts(profile_id, created_at DESC);
+
                 CREATE TABLE IF NOT EXISTS companion_auto_tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     profile_id INTEGER NOT NULL,
@@ -3927,6 +3945,41 @@ class Storage:
                 row,
             )
             return bool(cursor.rowcount)
+
+    def add_fishing_casts(self, profile_id: int, rounds: object, *, pond: str = "", bait: str = "") -> int:
+        """逐竿记一行（rounds 取自 run_dwelling_fishing_loop_flow 的 data.rounds），返回写了几行。"""
+        rows = []
+        for item in rounds if isinstance(rounds, list) else []:
+            if not isinstance(item, dict):
+                continue
+            catch = item.get("catch") if isinstance(item.get("catch"), dict) else {}
+            rows.append(
+                (
+                    int(profile_id),
+                    str(pond or "")[:40],
+                    str(bait or "")[:40],
+                    1 if catch else 0,
+                    str(catch.get("fish") or "")[:64],
+                    str(catch.get("grade") or "")[:40],
+                    str(catch.get("weight") or "")[:40],
+                    str(item.get("reason") or "")[:40],
+                    json.dumps(item.get("result") or {}, ensure_ascii=False)[:16000],
+                    float(item.get("at") or time.time()),
+                )
+            )
+        if not rows:
+            return 0
+        with self.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO fishing_casts (
+                    profile_id, pond, bait, caught, fish, grade, weight,
+                    reason, result_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return len(rows)
 
     def list_dual_cultivation_logs(self, limit: int = 5000) -> list[dict]:
         with self.connect() as conn:

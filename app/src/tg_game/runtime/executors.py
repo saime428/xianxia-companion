@@ -7715,6 +7715,19 @@ async def _run_companion_auto_scheduler(
                         )
                         continue
 
+                    if _fishing_holds_voyage(
+                        storage,
+                        profile_id=int(profile_id),
+                        payload=payload if isinstance(payload, dict) else {},
+                        now=now,
+                    ):
+                        storage.update_companion_auto_task(
+                            task_id,
+                            next_run_at=now + FISHING_VOYAGE_HOLD_RECHECK_SECONDS,
+                            last_error="今天的垂钓还没钓完，等钓完再出航。",
+                        )
+                        continue
+
                     commands_to_send = [
                         start_command,
                         COMPANION_VOYAGE_STATUS_COMMAND,
@@ -8609,6 +8622,32 @@ def _fishing_voyage_resume_at(storage: Storage, *, profile_id: int, now: float) 
     return now + FISHING_COMPANION_SAILING_RETRY_SECONDS
 
 
+FISHING_VOYAGE_HOLD_RECHECK_SECONDS = 300
+FISHING_VOYAGE_HOLD_RUNNING_GRACE_SECONDS = 25 * 60
+
+
+def _fishing_holds_voyage(storage: Storage, *, profile_id: int, payload: dict, now: float) -> bool:
+    """洞府里只剩这一位没出海、当天还有竿正要钓或正在钓 → 先别让她出航，钓完再走。
+
+    服务端所有侍妾都在海上就拒垂钓：09-24 大号 09:50 莎儿归航、09:54 又被派出海，15 竿只钓了 3 竿。
+    正在跑的批量最多挡 25 分钟（15 竿满打满算约 20 分钟）：服务重启丢了线程、状态卡在 running 也不会一直挡。
+    """
+    if sum(1 for companion in list_companions(payload) if voyage_end_ts(companion) <= now) > 1:
+        return False  # 另一位也在家，这位走了照样能钓
+    for session in storage.list_active_fishing_sessions(int(profile_id)):
+        if int(session.get("daily_count") or 0) >= int(session.get("daily_limit") or 0):
+            continue
+        state = str(session.get("state") or "")
+        if state in {"miniapp_canary_running", "miniapp_batch_running"}:
+            if now - float(session.get("last_action_at") or 0) < FISHING_VOYAGE_HOLD_RUNNING_GRACE_SECONDS:
+                return True
+        elif state in {"miniapp_canary", "miniapp_batch"} and (
+            float(session.get("next_action_at") or 0) <= now + FISHING_VOYAGE_HOLD_RECHECK_SECONDS
+        ):
+            return True
+    return False
+
+
 FISHING_BAIT_CRAFT_WAIT_SECONDS = 90
 FISHING_BAIT_CRAFT_STATE_KEY = "fishing_bait_craft_at:{profile_id}:{chat_id}"
 
@@ -9002,6 +9041,13 @@ async def _run_fishing_auto_scheduler(
                             workflow_state=str(updates.get("state") or ""),
                             last_error=task_error,
                         )
+                    # 放在会话更新之后：记录写失败也不影响续钓/收尾
+                    storage.add_fishing_casts(
+                        int(profile_id),
+                        (result.get("data") or {}).get("rounds"),
+                        pond=str(session.get("pond") or biz_fishing_game.FISHING_DEFAULT_POND),
+                        bait=str(session.get("bait") or biz_fishing_game.FISHING_DEFAULT_BAIT),
+                    )
                     continue
                 command_info = biz_fishing_game.build_next_auto_command(session)
                 if not command_info:

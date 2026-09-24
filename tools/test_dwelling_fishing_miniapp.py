@@ -6,6 +6,7 @@
 """
 import datetime
 import json
+import math
 import re
 import sys
 import threading
@@ -42,11 +43,13 @@ def _assert_write_payload(payload):
     assert UUID_RE.match(str(payload.get("operationId") or "")), payload
 
 
-def _scripted(context=None, *, cast=None, hook=None, states=(), errors=None):
-    """context/cast/hook 可覆盖；states 是 state 轮询依次返回的 result；errors = {action: (status, body)}。"""
+def _scripted(context=None, *, cast=None, hook=None, states=(), errors=None, fight=None):
+    """context/cast/hook 可覆盖；states 是 state 轮询依次返回的 result（写 "fighting" 表示这次回遛鱼题目）；
+    errors = {action: (status, body)}。fight = 遛鱼题目：给了就让 hook 进入 fighting，交 fight 时才回 hook 那份结果。"""
     log = []
     context = GOOD_CONTEXT if context is None else context
     pending_states = list(states)
+    fighting = {"sessionId": "s1", "status": "active", "phase": "fighting", "fight": fight, "result": {"ready": False}}
 
     def transport(request):
         action = urlsplit(request["url"]).path.rsplit("/", 1)[-1]
@@ -64,14 +67,25 @@ def _scripted(context=None, *, cast=None, hook=None, states=(), errors=None):
             _assert_write_payload(payload)
             session = cast or {"sessionId": "s1", "siteId": "west-shore", "status": "active", "serverNow": now_ms, "startedAt": now_ms, "biteAt": now_ms + 4600, "expiresAt": now_ms + 7600}
             return 200, {"ok": True, "context": context, "session": session}
-        if action == "hook":
-            _assert_write_payload(payload)
+        if action in ("hook", "fight"):
+            if action == "hook":
+                _assert_write_payload(payload)
+            else:  # 前端 submitFight：{...placement, sessionId, fishingProof}，不带 operationId
+                assert all(payload.get(key) == value for key, value in WEST_PLACEMENT.items()), payload
+                assert payload["fishingProof"]["mode"] == "xianxiaFishingV2", payload
             assert payload["sessionId"] == "s1", payload
-            result = CAUGHT if hook is None else hook
+            if action == "hook" and fight and "fighting" not in pending_states:
+                return 200, {"ok": True, "context": context, "session": fighting}
+            result = CAUGHT if hook is None else (hook.pop(0) if isinstance(hook, list) else hook)
             return 200, {"ok": True, "context": context, "session": {"sessionId": "s1", "status": "settled" if result.get("ready") else "settling", "result": result}}
+        if action == "checkpoint":
+            return 200, {"ok": True, "session": fighting}
         if action == "state":
             assert payload["sessionId"] == "s1" and payload["siteId"] == "west-shore", payload
-            return 200, {"ok": True, "session": {"sessionId": "s1", "status": "settled", "result": pending_states.pop(0)}}
+            item = pending_states.pop(0)
+            if item == "fighting":
+                return 200, {"ok": True, "session": fighting}
+            return 200, {"ok": True, "session": {"sessionId": "s1", "status": "settled", "result": item}}
         if action == "cancel":
             return 200, {"ok": True}
         raise AssertionError(f"unexpected action: {action}")
@@ -410,6 +424,41 @@ def test_companion_sailing_retries_after_voyage_instead_of_giving_up():
         assert got > now, (attending, got)   # 绝不能排到过去，否则每轮立刻重跑
 
 
+def test_voyage_waits_until_todays_fishing_is_done():
+    """只剩这一位在家、当天还有竿要钓：先别出航（09-24 大号 15 竿只钓了 3 竿就被派出海）。"""
+    try:
+        from tg_game.runtime import executors
+    except Exception as exc:
+        print(f"  (skipped voyage hold: {type(exc).__name__})")
+        return
+
+    now = time.time()
+    home = {"name": "莎儿"}
+    at_sea = {"name": "南宫婉", "voyage": {"status": "sailing", "end_time": datetime.datetime.fromtimestamp(now + 3600, datetime.timezone.utc).isoformat()}}
+
+    class FakeStorage:
+        def __init__(self, *sessions):
+            self.sessions = sessions
+
+        def list_active_fishing_sessions(self, profile_id):
+            return list(self.sessions)
+
+    def hold(sessions, attending, *residents):
+        payload = {"companion": attending, "dongfu": {"companion_residence": list(residents)}}
+        return executors._fishing_holds_voyage(FakeStorage(*sessions), profile_id=2, payload=payload, now=now)
+
+    armed = {"state": "miniapp_batch", "daily_count": 3, "daily_limit": 15, "next_action_at": now + 60}
+    running = {**armed, "state": "miniapp_batch_running", "last_action_at": now - 120}
+    assert hold([armed], home, at_sea) is True                      # 这位一走就都在海上了
+    assert hold([armed], home) is True                              # 只有一位侍妾
+    assert hold([running], home, at_sea) is True                    # 正在钓
+    assert hold([armed], home, {"name": "凌玉灵"}) is False          # 另一位也在家，照样能钓
+    assert hold([], home, at_sea) is False                          # 今天钓完了/关了（会话不在 active 里）
+    assert hold([{**armed, "daily_count": 15}], home, at_sea) is False
+    assert hold([{**armed, "next_action_at": now + 3600}], home, at_sea) is False   # 离开钓还早
+    assert hold([{**running, "last_action_at": now - 3600}], home, at_sea) is False  # 卡死的 running 不一直挡
+
+
 def test_executor_glue_crafts_once_then_falls_back_to_buying():
     """调度器那段胶水：排 .制饵、当天只排一次、保持武装。"""
     try:
@@ -455,6 +504,166 @@ def test_executor_glue_crafts_once_then_falls_back_to_buying():
     storage.latest = None
     bad = executors._request_fishing_bait_craft(storage, {"status": "need_bait", "data": {"baitName": "凡饵 .离开洞府"}}, **kw)
     assert len(storage.queued) == 1 and bad["enabled"] is False, (storage.queued, bad)
+
+
+def _preview_fight(difficulty, behavior, rare, seed):
+    """形状和数值取自前端 dwelling-fishing-preview.js（本地预览的假服务器）。"""
+    duration = {"steady": 900, "leap": 760, "surge": 1200}[behavior]
+    struggles = [{"startMs": 3200 + (seed % 5) * 180, "durationMs": duration, "strength": 0.85}]
+    if rare:
+        struggles.append({"startMs": 8200 + (seed % 7) * 170, "durationMs": duration, "strength": 0.95})
+    return {
+        "challengeId": f"c{seed}", "mode": "xianxiaFishingV2", "targetLow": 43 - difficulty,
+        "targetHigh": 73 - difficulty * 3, "fishPower": 1.7 + difficulty * 0.55, "fishSeed": f"seed-{seed:04x}",
+        "difficulty": difficulty, "behaviorVersion": 2, "behavior": behavior, "struggles": struggles,
+        "minDurationMs": 5200 + difficulty * 700, "maxDurationMs": 70000, "checkpointIntervalMs": 2500, "maxInputEvents": 1000,
+    }
+
+
+def _replay_fight(challenge, proof, *, late_release=False):
+    """照前端 stepFight() 独立重写的复算：服务器拿到的只有题目 + 事件，它能算出的就是这些。
+    late_release=True：松线晚一步生效（前端把松线记在上一步，服务器若按那种口径复算就是这样）。"""
+    low, high, power = challenge["targetLow"], challenge["targetHigh"], challenge["fishPower"]
+    offset = sum(ord(ch) for ch in challenge["fishSeed"]) / 19
+    marks = {event["t"]: event["holding"] for event in proof["events"]}
+    tension, progress, holding, release_next, out_ms = (low + high) / 2 - 8, 0.0, False, False, 0
+    for t in range(20, proof["durationMs"] + 1, 20):
+        if release_next:
+            holding, release_next = False, False
+        if marks.get(t) is True:
+            holding = True
+        elif marks.get(t) is False:
+            release_next = late_release
+            holding = holding and late_release
+        pull = power * (0.72 + math.sin(t * 0.0027 * power + offset) * 0.24 + max(0, math.sin(t * 0.0041 + offset * 1.7)) * 0.42)
+        for s in challenge["struggles"]:
+            if 0 <= t - s["startMs"] < s["durationMs"]:
+                portion = (t - s["startMs"]) / s["durationMs"]
+                wave = math.sin(math.pi * portion)
+                if challenge["behavior"] == "steady":
+                    pull += power * s["strength"] * 0.18 * wave
+                elif challenge["behavior"] == "leap":
+                    pull *= 1 + s["strength"] * 0.48 * wave
+                else:
+                    pull += power * s["strength"] * 0.72 * (0.55 + 0.45 * math.sin(portion * math.pi * 2))
+                break
+        tension += ((24 + pull * 3.1) if holding else (pull * 4.8 - 24)) * 0.02 + math.sin(t * 0.012 + offset) * 0.24
+        tension = max(0.0, min(100.0, tension))
+        if low <= tension <= high:
+            progress += (8.2 + power * 0.7 + (2.2 if holding else 0.5)) * 0.02
+        else:
+            out_ms += 20
+            progress -= ((1.5 + power * 0.25) if tension > high else 0.9) * 0.02
+        if holding and tension < low:
+            progress += 1.1 * 0.02
+        progress = max(0.0, min(100.0, progress))
+    return progress, out_ms
+
+
+def test_fight_proof_replays_to_a_landed_fish():
+    """交上去的事件照前端规则重放必须上鱼；松线晚一步生效（另一种复算口径）也得过 99.5%。"""
+    for difficulty in (1, 2, 3):
+        for behavior in ("steady", "leap", "surge"):
+            for seed in range(12):
+                challenge = _preview_fight(difficulty, behavior, seed % 2 == 0, seed * 37 + difficulty)
+                plan = fishing.simulate_fishing_fight(challenge)
+                proof = plan["proof"]
+                assert proof["landed"] and proof["challengeId"] == challenge["challengeId"], proof
+                assert proof["durationMs"] % 20 == 0 and proof["durationMs"] >= challenge["minDurationMs"], proof
+                times = [event["t"] for event in proof["events"]]
+                assert times == sorted(set(times)) and all(t % 20 == 0 and t <= proof["durationMs"] for t in times), times
+                assert [event["holding"] for event in proof["events"]] == [i % 2 == 0 for i in range(len(times))], proof
+                assert len(times) < 60, len(times)  # 一秒按放两三次，像人手
+                progress, out_ms = _replay_fight(challenge, proof)
+                assert progress >= 100 and out_ms == 0, (challenge, progress, out_ms)
+                assert abs(progress - plan["state"]["progress"]) < 1e-6, (progress, plan["state"])
+                late, _ = _replay_fight(challenge, proof, late_release=True)
+                assert late >= 99.5, (challenge, late)
+                # 前端每 2.5 秒报一次，快照里的事件不超过当时的进度
+                assert [cp["durationMs"] for cp in plan["checkpoints"]] == list(range(2500, proof["durationMs"], 2500)), plan["checkpoints"]
+                for cp in plan["checkpoints"]:
+                    assert all(event["t"] <= cp["durationMs"] for event in cp["events"]), cp
+                    assert set(cp["state"]) == {"progress", "tension", "holding", "danger_ms", "slack_ms", "samples", "stable_samples"}, cp
+    # 旧私聊入口的交卷格式不变
+    assert set(fishing.build_fishing_proof(_preview_fight(1, "steady", False, 1))) == {"mode", "challengeId", "durationMs", "events"}
+
+
+def test_fighting_hook_plays_the_fight_then_records_the_catch():
+    challenge = _preview_fight(2, "leap", True, 5)
+    transport, log = _scripted(fight=challenge)
+    result, sleeps = _run(transport, max_rounds=1)
+    assert result["ok"] is True and result["data"]["catches"][0]["fish"] == "青鳞小鲫", result
+    actions = _actions(log)
+    assert actions[:3] == ["context", "cast", "hook"] and actions[-1] == "fight", actions
+    assert "state" not in actions and actions.count("checkpoint") >= 2, actions
+    fight_payload = log[-1][1]
+    plan = fishing.simulate_fishing_fight(challenge)
+    assert fight_payload["fishingProof"] == plan["proof"], fight_payload
+    # 按真实节奏：等咬钩之后，checkpoint/交卷的间隔加起来正好是遛鱼时长
+    assert abs(sum(sleeps[1:]) - plan["proof"]["durationMs"] / 1000) < 1e-6, sleeps
+    stored = result["data"]["rounds"][0]["result"]
+    assert stored["caught"] is True and stored["_fight"]["challenge"] == challenge, stored
+
+    # 题目没跟着 hook 回来、轮询 state 才出现（前端断线恢复那条路）：一样接着遛
+    transport, log = _scripted(fight=challenge, hook=[{"ready": False}, CAUGHT], states=["fighting"])
+    result, _ = _run(transport, max_rounds=1)
+    assert result["ok"] is True and _actions(log)[2:4] == ["hook", "state"] and _actions(log)[-1] == "fight", _actions(log)
+
+
+def test_fight_judged_escaped_although_we_landed_stops():
+    # 我们算着收满了、服务器却判脱钩 → 复算口径对不上，停下，别把整天的竿烧光
+    transport, log = _scripted(fight=_preview_fight(1, "steady", False, 3), hook={"ready": True, "caught": False, "reason": "greedy", "gameProgress": 97.2})
+    result, _ = _run(transport, max_rounds=5)
+    assert result["ok"] is False and result["error"] == "fishing_fight_rejected(progress=97.2)", result
+    assert _actions(log).count("cast") == 1 and len(result["data"]["rounds"]) == 1, log
+    # 交卷被 4xx 拒：同样停下，不当成可续的瞬时错误
+    transport, log = _scripted(fight=_preview_fight(1, "steady", False, 3), errors={"fight": (409, {"ok": False, "error": "fishing_proof_invalid"})})
+    result, _ = _run(transport, max_rounds=5)
+    assert result["ok"] is False and "fishing_proof_invalid" in result["error"], result
+
+
+def test_scheduler_records_every_cast():
+    """逐竿记录：调度器跑完一批，钓上、空竿各落一行 fishing_casts，原始 result 原样留着。"""
+    try:
+        import asyncio
+        import tempfile
+        from types import SimpleNamespace
+
+        from tg_game.runtime import executors
+        from tg_game.storage import Storage
+    except Exception as exc:
+        print(f"  (skipped fishing_casts: {type(exc).__name__})")
+        return
+
+    loot = {**CAUGHT, "bonusLoot": [{"name": "灵石", "qty": 3}]}
+    transport, _ = _scripted(hook=[loot, {"ready": True, "caught": False}])
+
+    async def fake_flow(client, **kwargs):
+        return _run(transport, max_rounds=2)[0]
+
+    real_flow = executors.fishing_miniapp.run_fishing_miniapp_public_production_flow
+    executors.fishing_miniapp.run_fishing_miniapp_public_production_flow = fake_flow
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "t.db")
+            storage.init_schema()
+            pid = storage.create_profile("甲真人").id
+            storage.upsert_fishing_session(profile_id=pid, chat_id=-100123, enabled=True, state="miniapp_batch", daily_limit=5)
+            client = SimpleNamespace(_tg_game_profile_id=pid)
+            asyncio.run(executors._run_fishing_auto_scheduler(client, storage, run_once=True))
+            with storage.connect() as conn:
+                rows = [dict(row) for row in conn.execute("SELECT * FROM fishing_casts ORDER BY id")]
+            session = storage.get_fishing_session(pid, -100123)
+    finally:
+        executors.fishing_miniapp.run_fishing_miniapp_public_production_flow = real_flow
+
+    assert [(r["profile_id"], r["pond"], r["bait"], r["caught"], r["fish"], r["grade"], r["weight"]) for r in rows] == [
+        (pid, "青溪浅滩", "凡饵", 1, "青鳞小鲫", "凡品", "1.2"),
+        (pid, "青溪浅滩", "凡饵", 0, "", "", ""),
+    ], rows
+    assert json.loads(rows[0]["result_json"])["bonusLoot"] == [{"name": "灵石", "qty": 3}], rows[0]
+    assert all(abs(r["created_at"] - time.time()) < 60 for r in rows), rows
+    assert session["catches"] == {"青鳞小鲫": 1}, session  # 会话照常更新
 
 
 def test_private_fish_token_path_stays_off_dwelling_api():
