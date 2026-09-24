@@ -21,6 +21,11 @@ from tg_game.features.estate.biz_estate_miniapp import (
 from tg_game.features.pagoda import biz_pagoda_state as pagoda_state
 from tg_game.features.tianji_trial import queue_tianji_trial_request
 from tg_game.features.tianji_trial import biz_tianji_trial_daily_auto
+from tg_game.features.tianxing.biz_tianxing_runtime import (
+    get_profile_record as get_tianxing_record,
+    is_tianxing_profile,
+    normalize_config as normalize_tianxing_config,
+)
 from tg_game.features.wild_experience import (
     biz_wild_experience_miniapp as wild_experience_miniapp,
 )
@@ -431,6 +436,15 @@ def wild_experience_batch_due(
     return any(ready is not None and float(ready) <= float(now) for ready in ready_times)
 
 
+def wild_experience_strategy(storage: Storage, profile_id: int, default: str) -> str:
+    """天星宗号开着自动改命时，gate 保证每场前都挂着改命兜底，打深入；其余号用全局策略。"""
+    if is_tianxing_profile(storage, profile_id) and normalize_tianxing_config(
+        get_tianxing_record(storage, int(profile_id)).get("config")
+    ).get("auto_change_fate_enabled"):
+        return "深入"
+    return default
+
+
 def _start_wild_experience_item(
     storage: Storage,
     profile,
@@ -453,6 +467,7 @@ def _start_wild_experience_item(
         item["status"] = "skipped"
         item["reward"] = wild_experience_miniapp.build_reward_summary(payload)
         return
+    strategy = wild_experience_strategy(storage, profile.id, strategy)
     queued_payload = storage.update_external_account_payload(
         int(profile.id),
         "asc_aiopenai",

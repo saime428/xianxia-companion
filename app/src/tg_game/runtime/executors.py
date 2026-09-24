@@ -782,9 +782,15 @@ async def _run_pending_wild_experience(
     # the MiniApp settlement never hits the group as a reply, so hand its 司命盘 notes to the
     # Tianxing state here or the consumed 推命 探索 would look pending for 8 hours
     for attempt in result.get("attempts") or []:
-        notes = "\n".join(str(note) for note in (attempt.get("notes") or []) if note)
+        notes = [str(note) for note in (attempt.get("notes") or []) if note]
+        # 被改命兜住的那场（fateProtected）notes 仍写「改命待发」，不补这句状态就以为改命还在、
+        # 下一场不再改命：09-24 第 1 场用掉了改命，第 5 场裸打输了扣 10 万修为
+        if attempt.get("fate_protected"):
+            notes.append("【改命回天】")
         if notes:
-            apply_tianxing_settlement_text(storage, int(profile_id), "【野外历练】\n" + notes)
+            apply_tianxing_settlement_text(
+                storage, int(profile_id), "【野外历练】\n" + "\n".join(notes)
+            )
     _update_external_payload(
         storage,
         int(profile_id),

@@ -227,6 +227,7 @@ def test_tianxing_profile_predicts_before_every_fight():
     from tg_game.runtime import executors
 
     fights = []
+    next_attempt = {"notes": [HIT_NOTE]}
 
     async def fake_flow(client, *, discovery_storage, strategy, transport=None):
         fights.append(strategy)
@@ -234,7 +235,7 @@ def test_tianxing_profile_predicts_before_every_fight():
             "ok": False,
             "status": "retry_pending",
             "failure_kind": "remaining_not_finished",
-            "attempts": [{"notes": [HIT_NOTE]}],
+            "attempts": [dict(next_attempt)],
         }
 
     original = wild.run_public_production_flow
@@ -307,6 +308,31 @@ def test_tianxing_profile_predicts_before_every_fight():
             # 还有次数：马上续，但下一场要重新推命（改命还在，不重复改）
             assert run(star.id) is False and fights == ["均衡"], fights
             assert _outgoing(storage, star.id)[2:] == [".推命 探索"], _outgoing(storage, star.id)
+            # 这场被改命兜住（fateProtected），notes 却写「改命待发」（09-24 实况）：
+            # 要记成改命已用掉，下一场推命、改命都补
+            _confirm_outgoing(storage)
+            tx.save_profile_record(
+                storage,
+                star.id,
+                state={
+                    **fixed,
+                    "current_prediction": "探索",
+                    "current_prediction_until": time.time() + 3600,
+                    "current_change": "探索",
+                    "current_change_until": time.time() + 3600,
+                },
+            )
+            storage.update_external_account_payload(
+                star.id, "asc_aiopenai", lambda payload: wild.defer_request(payload, 0)
+            )
+            next_attempt.update(
+                {"notes": [HIT_NOTE, "【改命待发】此道改命尚可维持 24分钟"], "fate_protected": True}
+            )
+            assert run(star.id) is True and fights == ["均衡", "均衡"], fights
+            state = tx.normalize_state(tx.get_profile_record(storage, star.id)["state"])
+            assert state["current_change"] == "", state
+            assert run(star.id) is False and fights == ["均衡", "均衡"], fights
+            assert _outgoing(storage, star.id)[3:] == [".推命 探索", ".改命 探索"], _outgoing(storage, star.id)
             # 别路推命未应验（斗法 crontab 那几分钟）：等着，不排探索，免得落空
             _confirm_outgoing(storage)
             tx.save_profile_record(
@@ -323,13 +349,27 @@ def test_tianxing_profile_predicts_before_every_fight():
             storage.update_external_account_payload(
                 star.id, "asc_aiopenai", lambda payload: wild.defer_request(payload, 0)
             )
-            assert run(star.id) is False and fights == ["均衡"], fights
-            assert _outgoing(storage, star.id)[3:] == [], _outgoing(storage, star.id)
+            assert run(star.id) is False and fights == ["均衡", "均衡"], fights
+            assert _outgoing(storage, star.id)[5:] == [], _outgoing(storage, star.id)
             # 非天星宗号不受影响，直接开打，不发任何天星指令
-            assert run(plain.id) is True and fights == ["均衡", "均衡"], fights
+            assert run(plain.id) is True and fights == ["均衡", "均衡", "均衡"], fights
             assert _outgoing(storage, plain.id) == [], _outgoing(storage, plain.id)
     finally:
         wild.run_public_production_flow = original
+
+
+def test_protected_tianxing_profile_goes_deep():
+    with tempfile.TemporaryDirectory() as tmp:
+        storage = Storage(Path(tmp) / "t.db")
+        storage.init_schema()
+        star, unprotected, plain = (storage.create_profile(n) for n in ("star", "off", "plain"))
+        for profile, change_fate in ((star, True), (unprotected, False)):
+            storage.update_profile_sect_info(profile.id, sect_name="天星宗")
+            tx.set_profile_config(storage, profile.id, {"auto_change_fate_enabled": change_fate})
+        # 每场前有改命兜底才打深入；关了自动改命、或不是天星宗，都跟全局策略
+        assert age.wild_experience_strategy(storage, star.id, "谨慎") == "深入"
+        assert age.wild_experience_strategy(storage, unprotected.id, "谨慎") == "谨慎"
+        assert age.wild_experience_strategy(storage, plain.id, "谨慎") == "谨慎"
 
 
 def main():
