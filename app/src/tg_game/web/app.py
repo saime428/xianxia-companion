@@ -1786,6 +1786,11 @@ def create_app() -> FastAPI:
                 module.key != "artifact"
                 or _is_artifact_module_available(active_profile)
             )
+            # 背包没钓竿时点进钓鱼页会被静默跳回角色页，新装还没同步天机阁时最像「坏了」，和导航一样藏起来
+            and (
+                module.key != "fishing"
+                or _is_fishing_module_available(active_profile)
+            )
         ]
         chats = page_state["chats"]
         profile_state = page_state["profile_state"]

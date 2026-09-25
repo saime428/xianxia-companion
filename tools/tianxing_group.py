@@ -18,8 +18,9 @@ import time
 from tg_game.config import get_settings
 from tg_game.storage import Storage
 
-CHAT_ID = -1001000000001
-THREAD_ID = 1000003
+# 绑定群/话题读 .env（TG_GAME_BOUND_CHAT_ID / TG_GAME_BOUND_THREAD_ID），别写死：公开版会把写死的号换成占位值
+CHAT_ID = int(get_settings().bound_chat_id or 0)
+THREAD_ID = get_settings().bound_thread_id or None
 BOT_USERNAME = "fanrenxiuxian_bot"
 SEND_TIMEOUT = 120
 REPLY_TIMEOUT = 240
@@ -96,6 +97,8 @@ def send_and_wait(storage, settings, profile_id, sender_id, text):
 
 def run_group(profile_id, commands):
     """Send the group; returns (exit code, replies). 0 ok, 3 timeout, 4 hard stop, 5 other route pending."""
+    if not CHAT_ID:
+        raise SystemExit("先在 .env 填 TG_GAME_BOUND_CHAT_ID（群开了话题再填 TG_GAME_BOUND_THREAD_ID）")
     settings = get_settings()
     storage = Storage(settings.database_path)
     profile = storage.get_profile(profile_id)

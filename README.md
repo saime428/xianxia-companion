@@ -1,5 +1,9 @@
 # 🚀 Xianxia Companion 部署
 
+> 基于 [jiven303toto/xianxia-companion](https://github.com/jiven303toto/xianxia-companion)（MIT）继续修改。测试里的账号、群号都是占位值。
+
+> 第一次部署，或者拉下来发现很多功能不正常（钓鱼、洞府小程序、天机阁人物卡……），先看 **[SETUP.md](SETUP.md)**：从零部署的每一步、怎么确认做对了、出问题对照哪一行排错，都在里面。下面是最简版。
+
 ## 1. ✅ 准备
 
 - Python 3.10+
@@ -51,12 +55,13 @@ TG_GAME_HOST= 127.0.0.1
 # 示例端口；可改成任意未占用端口
 TG_GAME_PORT= 8787
 
-# --- 管理员（建议填上） ---
+# --- 管理员（必填：你自己 TG 的数字 ID；不填就没有管理员，天机阁 Cookie 贴不进去，钓鱼等功能都用不了） ---
 AUTHORIZED_USER_ID= 
 
 TG_GAME_BOUND_THREAD_ID=
 TG_GAME_ALLOWED_BOT_IDS=
 
+# 留空。填了之后网页会监听 0.0.0.0，/login 会把任何访问者直接当成已登录的账号（见 SETUP.md 第 10 步）
 TG_GAME_DOMAIN=
 TG_GAME_SSL_CERTFILE=
 TG_GAME_SSL_KEYFILE=
@@ -83,7 +88,7 @@ macOS / Linux：
 .venv/bin/python run_services.py all
 ```
 
-首次启动 Telegram runtime 时，按终端提示输入手机号、验证码和二步验证密码。
+启动后终端不会提示输入手机号：在浏览器打开下面的地址，进 `/login` 页用手机号、验证码（和二步验证密码）登录。然后按 [SETUP.md](SETUP.md) 第 6、7 步连天机阁、设洞府入口，钓鱼和各个小程序才能用。
 
 打开，端口按 `TG_GAME_PORT` 替换：
 

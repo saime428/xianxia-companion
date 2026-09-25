@@ -471,6 +471,98 @@ def check_preflight_waits_for_imminent():
         assert ok is False and "即将就绪" in note and 0 < wake - time.time() < 60, (ok, note, wake - time.time())
 
 
+async def check_chart_puzzle():
+    """随行那位残图四种残纹齐了就 .拼图（09-24 实测远航途中也能拼、只认随行那位）。
+    拼成了半小时内、「仍缺」/没回包 6 小时内不重发；和入梦/代卜错开，免得被游戏吞。"""
+    full = {"cangkun_chart_mulan": 1, "cangkun_chart_gate": 3, "cangkun_chart_jade": 1, "cangkun_chart_taimiao": 1}
+    short = {**full, "cangkun_chart_jade": 0}  # 甲真人 09-24：苍坤 3/4 缺玉匣
+    xutian = {"xutian_chart_north": 1, "xutian_chart_south": 2, "xutian_chart_east": 1, "xutian_chart_west": 1}
+    wan = {"name": "南宫婉·月影", "affection": 674}
+    assert roster.attending_has_complete_chart(payload_for({**wan, "cangkun_fragment_bag": full}, []))
+    assert not roster.attending_has_complete_chart(payload_for({**wan, "cangkun_fragment_bag": short}, []))
+    assert roster.attending_has_complete_chart(payload_for({**wan, "xutian_fragment_bag": json.dumps(xutian)}, []))
+    assert not roster.attending_has_complete_chart(payload_for({"name": "银月"}, []))  # 新侍妾整个碎片袋都没有
+    assert not roster.attending_has_complete_chart(payload_for(wan, [{"name": "莎儿", "cangkun_fragment_bag": full}]))  # 藏娇阁那位齐了不算
+    assert not roster.attending_has_complete_chart(
+        {"companion": {**wan, "cangkun_fragment_bag": full}, "companion_status": "居于藏娇阁", "dongfu": {}}
+    )
+
+    success = "【苍坤残图·拼合成功】\n侍妾【南宫婉·月影】为你拼齐残图，锁定出苍坤上人洞府外层太妙神禁的薄弱方位。\n你获得：苍坤残图 x1、修为 +505。"
+    missing = "虚天残图仍缺：东离残纹、西极残纹。\n苍坤残图仍缺：玉匣残纹。\n请继续使用 .入梦寻图。"
+
+    async def round_with(bag, *, puzzle=None, others=()):
+        """puzzle = (上一条 .拼图 几秒前发的, 回包文本或 None)；others = 之前发过的 (指令, 几秒前, 状态)。
+        返回这两轮新发的指令。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "t.db")
+            storage.init_schema()
+            pid = storage.create_profile("甲真人").id
+            storage.create_chat_binding(pid, CHAT, bot_username="fanrenxiuxian_bot")
+            storage.upsert_companion_auto_task(profile_id=pid, chat_id=CHAT, feature_key="dream_seek", enabled=True, bot_username="fanrenxiuxian_bot")
+            payload = payload_for({
+                **wan, "cangkun_fragment_bag": bag, "last_dream_map_seek_time": iso(NOW - 3600),
+                "voyage": sailing(NOW + 5 * 3600, "月殿寻痕"),
+            }, [])
+            storage.upsert_external_account(pid, ASC_EXTERNAL_PROVIDER, "", "", "connected", "", payload, "")
+            say(storage, pid, 700, ".我的侍妾")  # 南宫婉在海上：入梦走不到，拼图照样发
+            say(storage, pid, 701, block(
+                1, "南宫婉·月影", "随行中", kind="红尘道侣", dream="420分钟", heart="500分钟", divination="600分钟",
+                voyage_line="远航状态: 月殿寻痕航线进行中，剩余约 300 分钟。",
+            ) + FOOTER, reply_to=700, bot=True)
+            if puzzle:
+                age, reply = puzzle
+                storage.enqueue_outgoing_command(profile_id=pid, chat_id=CHAT, text=".拼图", bot_username="fanrenxiuxian_bot")
+                with storage.connect() as conn:
+                    conn.execute("update outgoing_commands set status='confirmed', created_at=?, updated_at=?", (time.time() - age, time.time() - age))
+                if reply:
+                    say(storage, pid, 702, ".拼图")
+                    say(storage, pid, 703, reply, reply_to=702, bot=True)
+            for text, age, status in others:
+                storage.enqueue_outgoing_command(profile_id=pid, chat_id=CHAT, text=text, bot_username="fanrenxiuxian_bot")
+                with storage.connect() as conn:
+                    conn.execute(
+                        "update outgoing_commands set status=?, created_at=?, updated_at=? where text=?",
+                        (status, time.time() - age, time.time() - age, text),
+                    )
+            before = len(queued(storage, pid))
+            client = SimpleNamespace(_tg_game_profile_id=pid, _tg_game_storage=storage)
+            for _ in range(2):  # 两轮：第二轮那条还没回包，不能再发
+                await ex._run_companion_auto_scheduler(client, storage, run_once=True, include_tianxing=False)
+            return queued(storage, pid)[before:]
+
+    assert await round_with(full) == [".拼图"]
+    assert await round_with(short) == []
+    assert await round_with(full, puzzle=(600, success)) == []  # 刚拼成，等天机阁刷新
+    assert await round_with(full, puzzle=(1900, success)) == [".拼图"]  # 刷新后还齐（重复藏本够）：接着拼
+    assert await round_with(full, puzzle=(3600, missing)) == []  # 天机阁说齐、游戏说缺：6 小时后再试
+    assert await round_with(full, puzzle=(2 * 3600, None)) == []  # 没回包，同上
+    assert await round_with(full, puzzle=(7 * 3600, missing)) == [".拼图"]
+    assert await round_with(full, others=[(".入梦寻图", 5, "awaiting_confirm")]) == []  # 入梦还在等回包：先不发
+    # 复审指出：刚换过人时天机阁缓存里的随行者可能还是上一位，拼到别人身上只换来「仍缺」和 6 小时退避
+    assert await round_with(full, others=[(".召回侍妾 莎儿", 300, "confirmed")]) == []
+    assert await round_with(full, others=[(".召回侍妾 莎儿", 25 * 60, "confirmed")]) == [".拼图"]
+    # 起航刚发：挨着发游戏会吞一条
+    assert await round_with(full, others=[(".侍妾远航 月殿寻痕", 30, "awaiting_confirm")]) == []
+    assert await round_with(full, others=[(".侍妾远航 月殿寻痕", 600, "confirmed")]) == [".拼图"]
+
+    # 反过来：.拼图 在等回包时，入梦/代卜、远航任务（召回/起航/归来）都要等它
+    with tempfile.TemporaryDirectory() as tmp:
+        storage = Storage(Path(tmp) / "t.db")
+        storage.init_schema()
+        pid = storage.create_profile("甲真人").id
+        storage.create_chat_binding(pid, CHAT, bot_username="fanrenxiuxian_bot")
+        storage.upsert_companion_auto_task(profile_id=pid, chat_id=CHAT, feature_key=ex.COMPANION_VOYAGE_FEATURE_KEY, enabled=True, strategy="月殿寻痕", bot_username="fanrenxiuxian_bot")
+        storage.upsert_external_account(pid, ASC_EXTERNAL_PROVIDER, "", "", "connected", "", payload_for(wan, []), "")
+        storage.enqueue_outgoing_command(profile_id=pid, chat_id=CHAT, text=".拼图", bot_username="fanrenxiuxian_bot")
+        with storage.connect() as conn:
+            conn.execute("update outgoing_commands set status='awaiting_confirm'")
+        assert ex._companion_sibling_command_in_flight(storage, profile_id=pid, chat_id=CHAT, thread_id=None, feature_key="dream_seek", now=time.time())
+        client = SimpleNamespace(_tg_game_profile_id=pid, _tg_game_storage=storage)
+        await ex._run_companion_auto_scheduler(client, storage, run_once=True, include_tianxing=False)
+        assert queued(storage, pid) == [".拼图"], queued(storage, pid)
+        assert voyage_task(storage, pid)["last_error"] == "已有远航命令待发送，稍后复查。", voyage_task(storage, pid)["last_error"]
+
+
 def main() -> None:
     logging.disable(logging.CRITICAL)
     check_panel_parsing()
@@ -482,6 +574,7 @@ def main() -> None:
     check_zero_minute_cooldown()
     asyncio.run(check_paired_commands_staggered())
     check_preflight_waits_for_imminent()
+    asyncio.run(check_chart_puzzle())
 
 
 if __name__ == "__main__":

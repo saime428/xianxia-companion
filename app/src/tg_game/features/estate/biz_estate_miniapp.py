@@ -8,7 +8,7 @@ from typing import Optional
 from urllib.parse import parse_qsl, quote, unquote, urljoin, urlsplit
 import urllib.request
 
-from telethon import functions
+from telethon import functions, types
 from .biz_estate_constants import (
     ESTATE_MINIAPP_ALLOWED_API_HOSTS,
     ESTATE_MINIAPP_ALLOWED_WEB_HOSTS,
@@ -517,7 +517,12 @@ async def discover_estate_public_miniapp_launch(
     source_chat_id = _estate_public_entry_chat_id(client, storage)
     previous_channel = str(discovery_state.get("channel") or "")
     source_channel = str(source_chat_id)
-    channel = await client.get_entity(source_chat_id)
+    try:
+        channel = await client.get_entity(source_chat_id)
+    except ValueError:
+        # 新登录的 session 还没缓存这个群（没收到过它的消息）：拉一遍会话列表再取；账号不在群里照样报错
+        await client.get_dialogs()
+        channel = await client.get_entity(source_chat_id)
     current_message_id = int(discovery_state["current_message_id"])
     current_message = (
         await client.get_messages(channel, ids=current_message_id)
@@ -566,6 +571,18 @@ async def discover_estate_public_miniapp_launch(
                         discovered_launch = candidate
                         discovered_message_id = message_id
                 if discovered_launch:
+                    break
+        if not discovered_launch:
+            # 入口是管理员置顶的老消息：新装的库没缓存它的 id，最近 200 条和关键词搜索都可能够不着
+            async for message in client.iter_messages(
+                channel,
+                limit=10,
+                filter=types.InputMessagesFilterPinned(),
+            ):
+                candidate = _extract_public_estate_launch(message)
+                if candidate:
+                    discovered_launch = candidate
+                    discovered_message_id = _message_id(message)
                     break
     discovery_state["channel"] = source_channel
     discovery_state["last_scanned_message_id"] = latest_message_id

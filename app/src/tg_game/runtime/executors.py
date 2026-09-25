@@ -61,6 +61,7 @@ from tg_game.features.companion.biz_companion_cooldown import (
     resolve_simple_cooldown_next_run_at,
 )
 from tg_game.features.companion.biz_companion_roster import (
+    attending_has_complete_chart,
     list_companions,
     plan_companion_rotation,
     voyage_end_ts,
@@ -84,6 +85,7 @@ from tg_game.features.companion.biz_companion_voyage import (
 from tg_game.features.beast_merge import biz_beast_merge_daily_auto
 from tg_game.features.beast_merge import biz_beast_merge_miniapp as beast_merge_miniapp
 from tg_game.features.beast_merge import biz_beast_merge_state
+from tg_game.features.fate_cards import biz_fate_cards_miniapp as fate_cards_miniapp
 from tg_game.features.battle import biz_battle_schedule
 from tg_game.features.world_boss import world_boss_runtime
 from tg_game.features.estate import biz_estate_miniapp as estate_miniapp
@@ -242,6 +244,16 @@ COMPANION_VOYAGE_RECHECK_SECONDS = 60
 # 情缘值之类的硬门槛不满足时的退避（靠日常互动慢慢涨，重试再密也没用）
 COMPANION_VOYAGE_REQUIREMENT_RETRY_SECONDS = 6 * 3600
 COMPANION_RECALL_COMMAND = ".召回侍妾"
+COMPANION_CHART_PUZZLE_COMMAND = ".拼图"
+# 天机命脉：逆势改命（4 残痕）要在选完之后再打一局噬金虫才算，而噬金虫每日自动 00:05/01:05 就把局数打满，
+# 所以 00:01 就来选；一天最多失败这么多次就放弃到明天
+FATE_CARDS_EARLIEST_TIME = "00:01"
+FATE_CARDS_RETRY_SECONDS = 1800
+FATE_CARDS_MAX_FAILURES = 5
+FATE_CARDS_HISTORY_LIMIT = 60
+FATE_CARDS_DONE_STATUSES = {"settled", "expired", "gave_up"}
+# 换过人之后天机阁缓存里的随行者可能还是上一位（约 15 分钟同步一次），这么久内不拼图
+COMPANION_CHART_PUZZLE_AFTER_RECALL_SECONDS = 20 * 60
 # 两名侍妾轮着远航，正常一天换五六次；比这还密一定是判断出了岔子
 COMPANION_RECALL_MIN_INTERVAL_SECONDS = 10 * 60
 # 召回发出去这么久，面板上随行的还不是她，就当游戏不让换
@@ -934,6 +946,100 @@ async def _run_pending_beast_merge_public(
             result,
             execution_owner=execution_owner,
         ),
+    )
+    return True
+
+
+async def _run_pending_fate_cards(
+    client: object,
+    storage: Storage,
+    profile_id: int,
+    payload: Optional[dict] = None,
+) -> bool:
+    """天机命脉每天一次。runtime_state fate_cards:<pid> 里 enabled 才跑，choice/question 可改。
+    命择奖励写在 start 回包里：逆势改命 4 残痕 > 顺势承命 2 > 藏锋避劫 1（启牌另 +1）。逆势改命要选完再打
+    一局噬金虫，做不成时退回藏锋避劫；状态、上次结果、历次奖励都写回同一个键。
+    ponytail: 开关先放在 runtime_state，没做网页按钮；要在网页上开关再照噬金虫加四处注册。
+    """
+    _ = payload
+    key = f"fate_cards:{int(profile_id)}"
+    try:
+        state = json.loads(storage.get_runtime_state(key) or "{}")
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(state, dict) or not state.get("enabled"):
+        return False
+    now = time.time()
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    if state.get("date") != today:
+        state = {**state, "date": today, "status": "", "failures": 0, "next_at": 0}
+    if state.get("status") in FATE_CARDS_DONE_STATUSES or float(state.get("next_at") or 0) > now:
+        return False
+    # 游戏按北京日期换日（服务进程就是北京时间），别掐着零点跑
+    if time.strftime("%H:%M", time.localtime(now)) < FATE_CARDS_EARLIEST_TIME:
+        return False
+    choice = str(state.get("choice") or "hide")
+    beast_task = next(
+        (
+            task
+            for task in storage.list_active_companion_auto_tasks(int(profile_id))
+            if task.get("feature_key") == biz_beast_merge_daily_auto.FEATURE_KEY
+        ),
+        None,
+    )
+    if choice == "defy" and (
+        beast_task is None
+        or biz_beast_merge_daily_auto.is_same_local_day(float(beast_task.get("last_run_at") or 0), now)
+    ):
+        # 逆势改命只认选完之后的那一局（09-25 实测 progress 从 0 起）：今天虫巢打过了或没开自动就做不成，退回藏锋避劫
+        choice = "hide"
+    try:
+        launch = await fate_cards_miniapp.resolve_fate_cards_launch(client, storage)
+        if launch.get("ok"):
+            result = await asyncio.to_thread(
+                fate_cards_miniapp.run_fate_cards_flow,
+                token=launch["token"],
+                init_data=launch["init_data"],
+                transport=estate_miniapp._urllib_transport,
+                question_key=str(state.get("question") or "cultivation"),
+                choice_key=choice,
+            )
+        else:
+            result = {"ok": False, "status": "failed", "error": launch.get("error")}
+    except Exception as exc:
+        result = {
+            "ok": False,
+            "status": "failed",
+            "error": estate_miniapp.sanitize_estate_miniapp_secret_text(exc),
+        }
+    status = str(result.get("status") or "failed")
+    failures = int(state.get("failures") or 0) + (status == "failed")
+    if status == "failed" and failures >= FATE_CARDS_MAX_FAILURES:
+        status = "gave_up"
+    history = list(state.get("history") or [])
+    if status == "settled" and not result.get("already_settled"):
+        history = (history + [{
+            "date": today,
+            "question": result.get("question"),
+            "choice": result.get("choice"),
+            "cards": result.get("cards"),
+            "reward": result.get("reward"),
+        }])[-FATE_CARDS_HISTORY_LIMIT:]
+    storage.set_runtime_state(key, json.dumps({
+        **state,
+        "status": status,
+        "failures": failures,
+        "next_at": now + float(result.get("next_check_seconds") or FATE_CARDS_RETRY_SECONDS),
+        "updated_at": now,
+        "last": result,
+        "history": history,
+    }, ensure_ascii=False))
+    logger.info(
+        "Fate cards profile=%s status=%s reward=%s error=%s",
+        profile_id,
+        status,
+        result.get("reward"),
+        result.get("error"),
     )
     return True
 
@@ -3177,13 +3283,14 @@ def _companion_sibling_command_in_flight(
     无回包 67~75%，单发 0~2%，无回包又会让那一项退避 1 小时。另一条还在路上
     （排队/发送中/等回包）就先不发，等它回了下一轮再发。
     只看 5 分钟内的：卡住的旧指令不该把这一条永远堵住（等回包超时会自己转 needs_manual_confirm）。
+    .拼图 也动侍妾身上的东西，一起错开（09-24 召回后 3 秒发的 .拼图 游戏没回）。
     """
-    for other_key in COMPANION_VOYAGE_PREFLIGHT_SIMPLE_FEATURES:
-        if other_key == feature_key:
-            continue
-        other_text = str(
-            (COMPANION_AUTO_FEATURES.get(other_key) or {}).get("command") or ""
-        ).strip()
+    other_texts = [
+        str((COMPANION_AUTO_FEATURES.get(other_key) or {}).get("command") or "").strip()
+        for other_key in COMPANION_VOYAGE_PREFLIGHT_SIMPLE_FEATURES
+        if other_key != feature_key
+    ] + [COMPANION_CHART_PUZZLE_COMMAND]
+    for other_text in other_texts:
         if not other_text:
             continue
         latest = storage.get_latest_outgoing_command(
@@ -3197,6 +3304,87 @@ def _companion_sibling_command_in_flight(
         ):
             return True
     return False
+
+
+def _maybe_queue_chart_puzzle(
+    storage: Storage,
+    task: dict,
+    payload: dict,
+    *,
+    chat_id: int,
+    thread_id: Optional[int],
+    now: float,
+) -> bool:
+    """随行那位哪张残图四种残纹齐了就 .拼图（跟着自动入梦开关走）。发了返回 True。
+
+    远航途中也能拼：09-24 丙真人召回还在航线上的凌玉灵，14 秒后拼成虚天。集齐了不拼会拖低入梦掉率
+    （回包「进度衰减」3/4 −18%、4/4 −22%，4/4 的线路照样会被抽中）。
+    ponytail: 碎片只有随行时入梦才掉，集齐那一刻她一定在随行，所以只看随行那位；藏娇阁那位集齐了
+    等她下次被换出来再拼。要更快就在 _resolve_resident_cooldown_ready_at 里把她那段「4/4」也算成有活。
+    """
+    if not attending_has_complete_chart(payload):
+        return False
+    profile_id = int(task.get("profile_id") or 0)
+    last_command = storage.get_latest_outgoing_command(
+        chat_id,
+        profile_id=profile_id,
+        text=COMPANION_CHART_PUZZLE_COMMAND,
+        thread_id=thread_id,
+    ) or {}
+    last_at = float(last_command.get("created_at") or 0)
+    if last_at:
+        reply = _get_latest_profile_command_reply(
+            storage,
+            profile_id=profile_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            command_text=COMPANION_CHART_PUZZLE_COMMAND,
+            since_ts=last_at,
+        )
+        # 拼成了：等天机阁刷新（约 15 分钟）再看还齐不齐，重复藏本够就接着拼下一张。
+        # 「仍缺」、没回包、还在等回包：天机阁和游戏对不上，6 小时后再试，别每半小时白发一条
+        retry_after = (
+            COMPANION_AUTO_POST_SEND_GRACE_SECONDS
+            if "拼合成功" in str((reply or {}).get("text") or "")
+            else COMPANION_VOYAGE_REQUIREMENT_RETRY_SECONDS
+        )
+        if now - last_at < retry_after:
+            return False
+    for command in storage.list_outgoing_commands(
+        profile_id, chat_id, limit=20, thread_id=thread_id
+    ) or []:
+        text = str(command.get("text") or "").strip()
+        age = now - float(command.get("created_at") or 0)
+        # 刚换过人：天机阁缓存里的随行者可能还是上一位，拼到别人身上只换来「仍缺」和 6 小时退避
+        if text.startswith(COMPANION_RECALL_COMMAND) and age < COMPANION_CHART_PUZZLE_AFTER_RECALL_SECONDS:
+            return False
+        # 起航/归来/坠魔心劫刚发：侍妾指令挨着发，游戏常吞掉后一条（吞了召回会让轮换停 6 小时）
+        if text.startswith(
+            (".侍妾远航", COMPANION_VOYAGE_RETURN_COMMAND, ZHUIMO_GUARD_COMMAND)
+        ) and age < OUTGOING_CONFIRM_TIMEOUT_SECONDS:
+            return False
+    if _companion_sibling_command_in_flight(
+        storage,
+        profile_id=profile_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        feature_key="chart_puzzle",
+        now=now,
+    ) or _is_companion_heart_tribulation_active(
+        storage.get_companion_heart_tribulation_task(
+            profile_id, chat_id, thread_id=thread_id
+        )
+    ):
+        return False
+    storage.enqueue_outgoing_command(
+        profile_id=profile_id,
+        chat_id=chat_id,
+        text=COMPANION_CHART_PUZZLE_COMMAND,
+        thread_id=thread_id,
+        chat_type=str(task.get("chat_type") or "group"),
+        bot_username=str(task.get("bot_username") or ""),
+    )
+    return True
 
 
 def _run_companion_voyage_preflight(
@@ -7440,6 +7628,8 @@ async def _run_companion_auto_scheduler(
                     command_texts = {
                         COMPANION_VOYAGE_STATUS_COMMAND,
                         COMPANION_VOYAGE_RETURN_COMMAND,
+                        # .拼图 还在路上时召回/起航挨着发，游戏会吞掉一条
+                        COMPANION_CHART_PUZZLE_COMMAND,
                         *companion_voyage_start_commands(strategy),
                     }
                     if recall_name:
@@ -7772,6 +7962,16 @@ async def _run_companion_auto_scheduler(
                     thread_id = (
                         int(task.get("thread_id")) if task.get("thread_id") else None
                     )
+                    # 拼图不看远航，排在远航门前面（这一支每 5 秒整个重算，读的是缓存的天机阁数据）
+                    if feature_key == "dream_seek" and _maybe_queue_chart_puzzle(
+                        storage,
+                        task,
+                        payload if isinstance(payload, dict) else {},
+                        chat_id=chat_id,
+                        thread_id=thread_id,
+                        now=now,
+                    ):
+                        continue
                     # 远航门前置：远航期间不进面板查询逻辑，直接睡到归航，
                     # 避免反复发 .我的侍妾（也减少与其他流程的查询撞车）
                     early_voyage_target = _resolve_active_companion_voyage_target(
@@ -8103,6 +8303,7 @@ async def _run_miniapp_pending_scheduler(client: object, storage: Storage) -> No
                 _run_pending_xinggong_public_starboard,
                 _run_pending_luoyun_spirit_tree,
                 biz_stock_miniapp.run_pending_stock_market_snapshot,
+                _run_pending_fate_cards,
             ):
                 if await runner(client, storage, int(profile_id), payload):
                     payload = read_cached_external_payload(storage, int(profile_id))

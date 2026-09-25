@@ -19,12 +19,15 @@ REQUIRED_ENV_KEYS = (
     ("TELEGRAM_API_HASH", "Telegram API hash"),
     ("TG_GAME_BOUND_CHAT_ID", "target group/chat id"),
     ("TG_GAME_BOUND_BOT_ID", "game bot numeric id"),
+    # 不填就没有管理员：天机阁 Cookie 贴不进去，人物卡同步不了，钓鱼等依赖人物卡的功能全挂
+    ("AUTHORIZED_USER_ID", "your own Telegram numeric user id (admin), e.g. from @userinfobot"),
 )
 
 OPTIONAL_ENV_KEYS = (
     ("TG_GAME_BOUND_THREAD_ID", "required only when the target group uses topics"),
     ("TG_GAME_ALLOWED_BOT_IDS", "comma-separated extra bot ids, optional"),
-    ("AUTHORIZED_USER_ID", "admin user id, optional"),
+    ("TELEGRAM_PROXY", "socks5://127.0.0.1:<port>, required in mainland China"),
+    ("TG_GAME_ESTATE_MINIAPP_FALLBACK_URL", "t.me/<bot>?startapp=df_... backup MiniApp entry"),
 )
 
 
