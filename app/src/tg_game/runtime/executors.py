@@ -222,9 +222,7 @@ COMPANION_AUTO_LONG_RESUME_DEFER_SECONDS = 15 * 60
 ARTIFACT_TOUCH_FEATURE_KEY = "artifact_touch"
 ARTIFACT_TOUCH_COOLDOWN_BUFFER_SECONDS = 10
 ARTIFACT_TOUCH_REPLY_WAIT_SECONDS = 180
-ARTIFACT_TOUCH_PROBE_DELAY_SECONDS = 10
 ARTIFACT_TOUCH_AWAIT_REPLY_STATE = "artifact_touch_await_reply"
-ARTIFACT_TOUCH_PROBE_PENDING_STATE = "artifact_touch_probe_pending"
 ARTIFACT_TOUCH_BOT_COOLDOWN_STATE = "artifact_touch_bot_cooldown"
 ARTIFACT_TOUCH_INTERNAL_WAIT_STATE = "artifact_touch_internal_wait"
 ARTIFACT_TRIAL_FEATURE_KEY = "artifact_trial"
@@ -3880,6 +3878,32 @@ def _claim_companion_heart_tribulation_round(storage: Storage, task: dict, next_
     return True
 
 
+def _claim_companion_heart_tribulation_command(storage: Storage, task: dict) -> bool:
+    """.共历心劫 同理：别的流程几秒内也查了 .我的侍妾，两张面板都过得了面板兜底，后到的在限速里
+    排着队照发（09-26 20:31 丁真人发了两遍，第二遍回「已有一场心劫抉择正在进行」又被当成第一轮，
+    心劫其实成了 +667 却记成失败）。last_tribulation_command_at 在开跑、结算、中止时都清零。
+    """
+    raw_thread = task.get("thread_id")
+    fresh = storage.get_companion_heart_tribulation_task(
+        int(task.get("profile_id") or 0),
+        int(task.get("chat_id") or 0),
+        thread_id=int(raw_thread) if raw_thread not in (None, "") else None,
+    ) or task
+    if float(fresh.get("last_tribulation_command_at") or 0) > 0:
+        _append_companion_heart_tribulation_log(
+            storage,
+            fresh,
+            step="send_tribulation_command",
+            event_type="tribulation_command_already_sent",
+            text=".共历心劫已由另一张面板发出，跳过",
+        )
+        return False
+    storage.update_companion_heart_tribulation_task(
+        int(task["id"]), last_tribulation_command_at=time.time()
+    )
+    return True
+
+
 async def _send_companion_heart_tribulation_command(
     client: object,
     storage: Storage,
@@ -4617,42 +4641,6 @@ def _artifact_nurture_parent_matches_profile(
     return bool(expected_user_id) and str(parent.get("sender_id") or "") == expected_user_id
 
 
-def _enqueue_artifact_touch_cooldown_probe(
-    storage: Storage, task: dict, command_text: str, current_ts: float
-) -> bool:
-    chat_id = int(task.get("chat_id") or 0)
-    if not chat_id:
-        return False
-    thread_id = int(task.get("thread_id")) if task.get("thread_id") else None
-    if not _has_pending_outgoing_command(
-        storage,
-        profile_id=int(task.get("profile_id") or 0),
-        chat_id=chat_id,
-        text=command_text,
-        thread_id=thread_id,
-    ):
-        storage.enqueue_outgoing_command(
-            profile_id=int(task.get("profile_id") or 0),
-            chat_id=chat_id,
-            text=command_text,
-            thread_id=thread_id,
-            chat_type=str(task.get("chat_type") or "group"),
-            bot_username=str(task.get("bot_username") or ""),
-            delay_seconds=ARTIFACT_TOUCH_PROBE_DELAY_SECONDS,
-        )
-    storage.update_companion_auto_task(
-        int(task["id"]),
-        next_run_at=(
-            current_ts
-            + ARTIFACT_TOUCH_PROBE_DELAY_SECONDS
-            + ARTIFACT_TOUCH_REPLY_WAIT_SECONDS
-        ),
-        workflow_state=ARTIFACT_TOUCH_PROBE_PENDING_STATE,
-        last_error="bot回包未提供冷却，已安排10秒后补发一次获取冷却。",
-    )
-    return True
-
-
 def _reschedule_artifact_touch_task_from_reply(
     storage: Storage,
     task: dict,
@@ -4663,7 +4651,7 @@ def _reschedule_artifact_touch_task_from_reply(
     reply_created_at: float = 0,
     now: Optional[float] = None,
 ) -> bool:
-    command_text, _interval_seconds = _unpack_artifact_touch_strategy(
+    command_text, interval_seconds = _unpack_artifact_touch_strategy(
         task.get("strategy") or ""
     )
     if not _artifact_touch_parent_matches_profile(parent, profile, command_text):
@@ -4674,19 +4662,11 @@ def _reschedule_artifact_touch_task_from_reply(
     current_ts = float(now if now is not None else time.time())
     cooldown_seconds = int(parsed.get("cooldown_seconds") or 0)
     if cooldown_seconds <= 0:
-        workflow_state = str(task.get("workflow_state") or "").strip()
-        last_error = str(task.get("last_error") or "").strip()
-        if workflow_state == ARTIFACT_TOUCH_AWAIT_REPLY_STATE or (
-            workflow_state == ARTIFACT_TOUCH_INTERNAL_WAIT_STATE
-            and "bot回包未提供冷却" in last_error
-        ):
-            return _enqueue_artifact_touch_cooldown_probe(
-                storage,
-                task,
-                command_text,
-                current_ts,
-            )
-        return False
+        # 成功回包不带冷却，就按设置的间隔从回包时刻算。以前这里 10 秒后补发一次想问出冷却，
+        # 可游戏不理几秒内的重复指令：09-25~26 补发 7 次一次都没回，纯多发一条。
+        if str(task.get("workflow_state") or "").strip() != ARTIFACT_TOUCH_AWAIT_REPLY_STATE:
+            return False
+        cooldown_seconds = interval_seconds
     base_ts = float(reply_created_at or current_ts)
     target_ts = base_ts + cooldown_seconds + ARTIFACT_TOUCH_COOLDOWN_BUFFER_SECONDS
     if target_ts <= current_ts:
@@ -6409,17 +6389,6 @@ async def _run_companion_auto_scheduler(
                             storage, int(profile_id), task, now=now
                         )
                     ):
-                        continue
-                    if (
-                        workflow_state == ARTIFACT_TOUCH_PROBE_PENDING_STATE
-                        and next_run_at <= now
-                    ):
-                        storage.update_companion_auto_task(
-                            task_id,
-                            next_run_at=now + interval_seconds,
-                            workflow_state=ARTIFACT_TOUCH_INTERNAL_WAIT_STATE,
-                            last_error="补发抚摸仍未提供冷却，按设置间隔等待下次尝试。",
-                        )
                         continue
                     if (
                         workflow_state == ARTIFACT_TOUCH_AWAIT_REPLY_STATE
@@ -10793,6 +10762,8 @@ class GeneralGameExecutor(BaseExecutor):
                     step_deadline_at=0,
                     last_error="",
                 )
+                return True
+            if not _claim_companion_heart_tribulation_command(storage, task):
                 return True
             try:
                 command_message = await _send_companion_heart_tribulation_command(

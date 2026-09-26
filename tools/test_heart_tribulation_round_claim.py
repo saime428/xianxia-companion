@@ -10,7 +10,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app" / "src"))
-from tg_game.runtime.executors import _claim_companion_heart_tribulation_round  # noqa: E402
+from tg_game.runtime.executors import (  # noqa: E402
+    _claim_companion_heart_tribulation_command,
+    _claim_companion_heart_tribulation_round,
+)
 
 TASK = {"id": 7, "profile_id": 2, "chat_id": -100, "thread_id": "1000003", "last_action_round_sent": 2}
 
@@ -49,5 +52,15 @@ assert [log["event_type"] for log in storage.logs] == ["round_already_sent"], st
 # abort 把计数重置回 0 之后允许重新认领（发送失败后的重试）
 storage.row["last_action_round_sent"] = 0
 assert _claim_companion_heart_tribulation_round(storage, dict(TASK), 3) is True
+
+# .共历心劫：09-26 20:31 两张面板 4 秒内先后到，都过了面板兜底，发了两遍
+storage = _FakeStorage(round_sent=0)
+storage.row["last_tribulation_command_at"] = 0
+assert _claim_companion_heart_tribulation_command(storage, dict(TASK)) is True
+assert storage.row["last_tribulation_command_at"] > 0
+assert _claim_companion_heart_tribulation_command(storage, dict(TASK)) is False, "第二张面板不能再发"
+assert [log["event_type"] for log in storage.logs] == ["tribulation_command_already_sent"], storage.logs
+storage.row["last_tribulation_command_at"] = 0  # 开跑/中止清零后下一轮照常
+assert _claim_companion_heart_tribulation_command(storage, dict(TASK)) is True
 
 print("test_heart_tribulation_round_claim: ok")

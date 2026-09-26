@@ -19,6 +19,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app" / "src"))
 
 import biz_fanren_game as g  # noqa: E402
+from tg_game.runtime.context import EventContext  # noqa: E402
 from tg_game.storage import Storage  # noqa: E402
 from tg_game.telegram import send_utils  # noqa: E402
 
@@ -91,6 +92,23 @@ def alt(tmp, username="demo_alt", **session):
     return storage, profile.id, db
 
 
+class NoUsernameClient:
+    """丁真人：TG 账号没设用户名，游戏按库里的 @demo_alt2 点名。"""
+
+    async def get_me(self):
+        return SimpleNamespace(id=1000000014, username=None)
+
+
+async def gate(tmp, text, username):
+    """执行器先过 bot_message_targets_profile 才走到 handle_bot_message；run() 直接调后者，绕过了这道门。"""
+    storage, pid, db = alt(tmp, username)
+    db.close()
+    event = offer_event(text)
+    event.sender = SimpleNamespace(id=7001, username="fanrenxiuxian_bot")
+    binding = storage.get_chat_binding(pid, CHAT, thread_id=TOPIC_ROOT)
+    return await EventContext(NoUsernameClient(), event, storage.get_profile(pid), binding).bot_message_targets_profile()
+
+
 async def run(tmp, text, *, username="demo_alt", fail_times=0, deliveries=1, **session):
     storage, pid, db = alt(tmp, username, **session)
     client = Client(storage, fail_times)
@@ -129,6 +147,11 @@ async def main() -> None:
         with tempfile.TemporaryDirectory() as tmp:
             sent, _ = await run(tmp, text, username=username, **session)
             assert sent == [], (text[:20], username, sent)
+
+    # 09-25 13:39 丁真人被南陇侯点名：get_me().username 是 None，门只认它，点名进不来，银月被掳
+    for text, expected in ((NANLONG.replace("@demo_alt", "@demo_alt2"), True), (NANLONG.replace("@demo_alt", "@demo_alt22"), False)):
+        with tempfile.TemporaryDirectory() as tmp:
+            assert await gate(tmp, text, "demo_alt2") is expected, text[:12]
     print("special event reply: ok")
 
 

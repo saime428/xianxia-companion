@@ -169,8 +169,14 @@ class EventContext:
             me = await self.client.get_me()
         except Exception:
             me = None
-        my_username = (getattr(me, "username", "") or "").lower()
-        if my_username and f"@{my_username}" in self.text.lower():
-            return True
-
-        return False
+        # 丁真人的 TG 账号没有用户名（get_me().username=None），游戏却按库里的 @demo_alt2 点名：
+        # 只认 get_me 时南陇侯点名过不了这道门，09-25 13:39 没人回，侍妾银月被掳。库里记的名字一起认。
+        names = {
+            str(name or "").strip().lstrip("@").lower()
+            for name in (
+                getattr(me, "username", ""),
+                getattr(self.profile, "telegram_username", ""),
+            )
+        } - {""}
+        mentioned = {token.lower() for token in re.findall(r"@([A-Za-z0-9_]+)", self.text)}
+        return bool(names & mentioned)

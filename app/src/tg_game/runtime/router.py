@@ -547,8 +547,8 @@ class Router:
                             (stored_message or {}).get("created_at") or time.time()
                         ),
                     ):
-                        logger.warning(
-                            "Rescheduled artifact touch auto for profile=%s chat=%s reason=bot cooldown reply",
+                        logger.info(
+                            "Rescheduled artifact touch auto for profile=%s chat=%s from bot reply",
                             context.profile.id,
                             context.chat_id,
                         )
