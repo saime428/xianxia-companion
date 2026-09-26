@@ -51,11 +51,28 @@ def main() -> None:
         assert result["allowed"] is False, result
         assert queued(storage, profile.id) == [".推命 探索", ".改命 探索"], queued(storage, profile.id)
 
-        # 3. both confirmed: released without extra commands
-        tx.save_profile_record(storage, profile.id, state={**base, "current_prediction": "探索", "current_prediction_until": now + 3600, "current_change": "探索", "current_change_until": now + 3600})
+        # 3. both confirmed and the 天机盘 was checked recently: released without extra commands
+        armed = {**base, "current_prediction": "探索", "current_prediction_until": now + 3600, "current_change": "探索", "current_change_until": now + 3600}
+        tx.save_profile_record(storage, profile.id, state={**armed, "last_panel_checked_at": now - 60})
         result = gate(storage, profile.id, now)
         assert result["allowed"] is True, result
         assert len(queued(storage, profile.id)) == 2
+
+        # 3b. 09-26: 本地记着改命还在，其实 09-25 12:47 裂缝败局「改命回天」已经用掉了（回包没认领上），
+        # 零点 8 场深入全裸打。本地说在、但半小时内没对过天机盘 → 先查盘，不放行
+        tx.save_profile_record(storage, profile.id, state={**armed, "last_panel_checked_at": now - 11 * 3600})
+        result = gate(storage, profile.id, now)
+        assert result["allowed"] is False and queued(storage, profile.id)[-1] == ".天机盘", (result, queued(storage, profile.id))
+        # 盘上写「当前改命: 无」→ 本地清掉，下一轮补挂改命
+        panel = "【天机盘】\n今日可选命星: 【贪狼】\n今日已定命星: 【贪狼】\n当前推命: 探索（剩余 7小时50分钟）\n当前改命: 无\n天机值: 121\n逆命劫: 0"
+        record = tx.get_profile_record(storage, profile.id)
+        after = tx.apply_parsed_to_state(record["state"], tx.parse_tianxing_text(panel, now=now), now=now)
+        assert after["current_change"] == "" and after["last_panel_checked_at"] == now, after
+        tx.save_profile_record(storage, profile.id, state=after)
+        with storage.connect() as conn:  # 盘的回包到了 = 这条指令已确认
+            conn.execute("update outgoing_commands set status='confirmed'")
+        result = gate(storage, profile.id, now + 5)
+        assert result["allowed"] is False and queued(storage, profile.id)[-1] == ".改命 探索", (result, queued(storage, profile.id))
 
         # 4. a duel settlement consumes the pending 斗法 推命 (not only 炼制 any more)
         state = tx.normalize_state({"current_prediction": "斗法", "current_prediction_until": now + 3600})

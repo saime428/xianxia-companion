@@ -296,7 +296,7 @@ def test_tianxing_profile_predicts_before_every_fight():
                     "current_prediction": "探索",
                     "current_prediction_until": now + 3600,
                     "current_change": "探索",
-                    "current_change_until": now + 3600,
+                    "current_change_until": now + tx.TIANXING_CHANGE_FATE_SECONDS,  # 刚挂上的改命
                 },
             )
             storage.update_external_account_payload(
@@ -319,7 +319,7 @@ def test_tianxing_profile_predicts_before_every_fight():
                     "current_prediction": "探索",
                     "current_prediction_until": time.time() + 3600,
                     "current_change": "探索",
-                    "current_change_until": time.time() + 3600,
+                    "current_change_until": time.time() + tx.TIANXING_CHANGE_FATE_SECONDS,  # 刚挂上的改命
                 },
             )
             storage.update_external_account_payload(
@@ -343,7 +343,7 @@ def test_tianxing_profile_predicts_before_every_fight():
                     "current_prediction": "斗法",
                     "current_prediction_until": time.time() + 3600,
                     "current_change": "探索",
-                    "current_change_until": time.time() + 3600,
+                    "current_change_until": time.time() + tx.TIANXING_CHANGE_FATE_SECONDS,  # 刚挂上的改命
                 },
             )
             storage.update_external_account_payload(

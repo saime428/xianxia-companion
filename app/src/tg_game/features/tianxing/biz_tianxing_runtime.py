@@ -48,7 +48,8 @@ CRAFT_LOOP_PHASES = {
 }
 ACK_TIMEOUT_SECONDS = 90
 CALIBRATION_BACKOFF_SECONDS = 5 * 60
-EXPLORATION_PANEL_FRESH_SECONDS = CALIBRATION_BACKOFF_SECONDS
+# 本地记着「改命 探索」还在时，探索前天机盘要在这么久以内对过；一批 8 场历练约 14 分钟，一次盘管一批
+EXPLORATION_PANEL_FRESH_SECONDS = 30 * 60
 
 
 def is_tianxing_profile(storage: Optional[Storage], profile_id: Optional[int]) -> bool:
@@ -1848,6 +1849,35 @@ def build_exploration_route_gate(
             now=current_time,
             next_time=change_until,
             detail={"current_change": change_route, "current_change_until": change_until},
+        )
+    # 改命会在本地不知道的地方被「改命回天」吃掉：09-25 12:47 那次探寻裂缝败局用掉了改命，回包没认领上，
+    # 本地仍记到 09-26 00:35，零点 8 场深入全裸打、输 7 场净亏约 96 万修为。本地说还在、但最后一次确认
+    # （对天机盘，或者挂上它那一刻 = 到期减 24 小时）已经是半小时以前的事，就先对一次天机盘
+    # （盘上「当前改命: 无」会把本地清掉，下一轮就补挂）。
+    change_confirmed_at = max(
+        float(state.get("last_panel_checked_at") or 0),
+        change_until - TIANXING_CHANGE_FATE_SECONDS,
+    )
+    if (
+        change_route == "探索"
+        and change_until > current_time
+        and current_time - change_confirmed_at > EXPLORATION_PANEL_FRESH_SECONDS
+    ):
+        return _block_exploration_route_gate(
+            storage,
+            profile_id=int(profile_id),
+            chat_id=int(chat_id or 0),
+            thread_id=thread_id,
+            chat_type=chat_type,
+            bot_username=bot_username,
+            command=".天机盘",
+            queue_enabled=True,
+            phase="sent_waiting_ack",
+            reason="先查天机盘确认改命还在",
+            event_type="panel_required",
+            now=current_time,
+            next_time=current_time + config["ack_timeout_sec"],
+            detail={"current_change_until": change_until, "high_risk": bool(high_risk)},
         )
     missing = []
     if pending_route != "探索" or pending_until <= current_time:

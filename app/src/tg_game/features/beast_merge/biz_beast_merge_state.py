@@ -346,12 +346,18 @@ def finish_beast_merge_request(
     return updated
 
 
-def is_beast_merge_daily_limit_reached(payload: object) -> bool:
+def is_beast_merge_daily_limit_reached(payload: object, *, now: Optional[float] = None) -> bool:
     state = payload.get("beast_merge") if isinstance(payload, dict) else {}
     run = state.get("run") if isinstance(state, dict) and isinstance(state.get("run"), dict) else {}
+    return _run_limit_reached_today(run, now=now)
+
+
+def _run_limit_reached_today(run: dict, *, now: Optional[float] = None) -> bool:
+    """局数按天算：只认今天挑战日期的 used/limit。09-16 打满的 5/5 一直留在状态里，
+    之后每天 00:05 都被当成「今日已达上限」跳过，09-17~09-26 三个号一局没打。"""
     used = max(0, _int(run.get("attempts_used")))
     limit = max(0, _int(run.get("attempts_limit")))
-    return limit > 0 and used >= limit
+    return limit > 0 and used >= limit and str(run.get("challenge_date") or "") == _day_key(now)
 
 
 def was_beast_merge_requested_today(
@@ -407,7 +413,7 @@ def build_beast_merge_view(
     status_label = _safe_text(run.get("status_label") or "未启动", 80)
     if str(request.get("status") or "") in {"resolving", "running"} and not active:
         status_label = "执行中断（可能已消耗 1 局）"
-    limit_reached = limit > 0 and used >= limit
+    limit_reached = _run_limit_reached_today({**run, "attempts_limit": limit}, now=current_time)
     rounds = _normalize_rounds(run.get("runs"))
     return {
         "active": active,
