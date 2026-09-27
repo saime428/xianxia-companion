@@ -128,6 +128,7 @@ from tg_game.features import biz_mulan_feature as mulan_feature
 from tg_game.features.tianxing import (
     apply_settlement_text as apply_tianxing_settlement_text,
     build_exploration_route_gate,
+    get_profile_record as get_tianxing_profile_record,
     tick_craft_loop,
     tick_tianxing_timeline,
 )
@@ -250,6 +251,7 @@ FATE_CARDS_RETRY_SECONDS = 1800
 FATE_CARDS_MAX_FAILURES = 5
 FATE_CARDS_HISTORY_LIMIT = 60
 FATE_CARDS_DONE_STATUSES = {"settled", "expired", "gave_up"}
+WILD_REPORT_RETRY_SECONDS = 600  # 发收藏夹失败后隔这么久再试，别每 5 秒刷一条警告
 # 换过人之后天机阁缓存里的随行者可能还是上一位（约 15 分钟同步一次），这么久内不拼图
 COMPANION_CHART_PUZZLE_AFTER_RECALL_SECONDS = 20 * 60
 # 两名侍妾轮着远航，正常一天换五六次；比这还密一定是判断出了岔子
@@ -1040,6 +1042,51 @@ async def _run_pending_fate_cards(
         result.get("error"),
     )
     return True
+
+
+async def _run_wild_experience_report(
+    client: object,
+    storage: Storage,
+    profile_id: int,
+    payload: Optional[dict] = None,
+) -> bool:
+    """野外历练当天打满后，发一份日报到这个号自己的收藏夹（和股市日报一样，不进游戏群）。
+    runtime_state wild_experience_report:<pid> 里 enabled 才发：每个号的 worker 都跑这段，默认必须关（09-27 只给大号开）。
+    """
+    key = f"wild_experience_report:{int(profile_id)}"
+    try:
+        state = json.loads(storage.get_runtime_state(key) or "{}")
+    except json.JSONDecodeError:
+        return False
+    now = time.time()
+    today = wild_experience_miniapp._day_key(now)
+    if (
+        not isinstance(state, dict)
+        or not state.get("enabled")
+        or state.get("sent") == today
+        or now - float(state.get("failed_at") or 0) < WILD_REPORT_RETRY_SECONDS
+    ):
+        return False
+    if payload is None:
+        payload = read_cached_external_payload(storage, int(profile_id))
+    if not wild_experience_miniapp.is_completed_today(payload, now=now):
+        return False
+    tianxing = get_tianxing_profile_record(storage, int(profile_id))["state"]
+    text = wild_experience_miniapp.build_daily_report(
+        payload,
+        tianji_value=int(tianxing.get("tianji_value") or 0),
+        tianji_checked_at=float(tianxing.get("last_panel_checked_at") or 0),
+        now=now,
+    )
+    try:
+        await client.send_message("me", text)
+    except Exception as exc:
+        logger.warning("Wild experience report send failed for profile=%s: %s", profile_id, exc)
+        storage.set_runtime_state(key, json.dumps({**state, "failed_at": now}, ensure_ascii=False))
+        return False
+    storage.set_runtime_state(key, json.dumps({**state, "sent": today, "failed_at": 0}, ensure_ascii=False))
+    logger.info("Wild experience report sent for profile=%s", profile_id)
+    return False  # 只读 payload，不用让调度器重读
 
 
 async def _run_pending_pagoda_public(
@@ -8273,6 +8320,7 @@ async def _run_miniapp_pending_scheduler(client: object, storage: Storage) -> No
                 _run_pending_luoyun_spirit_tree,
                 biz_stock_miniapp.run_pending_stock_market_snapshot,
                 _run_pending_fate_cards,
+                _run_wild_experience_report,
             ):
                 if await runner(client, storage, int(profile_id), payload):
                     payload = read_cached_external_payload(storage, int(profile_id))

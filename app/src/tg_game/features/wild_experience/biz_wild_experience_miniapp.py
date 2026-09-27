@@ -1,6 +1,7 @@
 import asyncio
 import re
 import time
+from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -565,3 +566,65 @@ def build_reward_summary(payload: object) -> str:
     parts = [f"{len(attempts)} 次", f"胜 {wins} / 负 {defeats}", f"修为 {cultivation:+d}"]
     parts.extend(f"{name} x{quantity}" for name, quantity in loot.items() if quantity)
     return "；".join(parts)
+
+
+OUTCOME_LABELS = {"victory": "胜", "fate_escape": "改命脱险", "safe_event": "平安", "defeat": "败"}
+
+
+def today_attempts(payload: object, *, now: Optional[float] = None) -> list[dict]:
+    """今天打过的每一场。一轮只打一场、每轮进一条 history，所以按场次从今天的 history 拼回来。
+    ponytail: history 只留 HISTORY_LIMIT 轮，同一天失败重试超过 6 次会挤掉前几场；日报会写「只记到 N 场」。
+    """
+    state = payload.get(STATE_KEY) if isinstance(payload, dict) else {}
+    state = state if isinstance(state, dict) else {}
+    day = _day_key(now)
+    fights = {}
+    for run in [*(state.get("history") or []), state.get("run")]:
+        if isinstance(run, dict) and run.get("day_key") == day:
+            for item in run.get("attempts") or []:
+                if isinstance(item, dict) and _int(item.get("daily_count")) > 0:
+                    fights[_int(item.get("daily_count"))] = item
+    return [fights[count] for count in sorted(fights)]
+
+
+def _loot_text(items: object) -> str:
+    return "、".join(f"{item.get('name')}×{_int(item.get('quantity')):,}" for item in items or [] if _int(item.get("quantity")))
+
+
+def build_daily_report(
+    payload: object,
+    *,
+    tianji_value: int = 0,
+    tianji_checked_at: float = 0,
+    now: Optional[float] = None,
+) -> str:
+    fights = today_attempts(payload, now=now)
+    state = payload.get(STATE_KEY) if isinstance(payload, dict) else {}
+    run = state.get("run") if isinstance(state, dict) and isinstance(state.get("run"), dict) else {}
+    strategy = normalize_strategy((fights[-1] if fights else run).get("strategy"))
+    labels = [OUTCOME_LABELS.get(str(item.get("outcome") or ""), str(item.get("outcome") or "未知")) for item in fights]
+    counts = [f"{label} {count}" for label, count in Counter(labels).items()]
+    loot = {}
+    for item in fights:
+        for drop in item.get("loot") or []:
+            loot[drop.get("name")] = loot.get(drop.get("name"), 0) + _int(drop.get("quantity"))
+    hits = sum("推命命中" in note for item in fights for note in item.get("notes") or [])
+    protected = sum(bool(item.get("fate_protected")) for item in fights)
+    tianji = f"推命命中 +{hits}；改命挡下 {protected} 场败局（每次重挂改命花 3 点）"
+    if tianji_value:
+        when = f" {_time_text(tianji_checked_at)[11:16]}" if tianji_checked_at else ""
+        tianji += f"；天机盘{when} 显示 {tianji_value}"
+    lines = [
+        f"【野外历练日报 {_day_key(now)[5:]}】{strategy}，{len(fights)}/{DAILY_LIMIT} 场",
+        " · ".join(counts) or "今天还没有记录到战果",
+        f"修为 {sum(_int(item.get('cultivation_delta')) for item in fights):+,}",
+        f"天机值：{tianji}",
+    ]
+    if loot:
+        lines.append("掉落：" + _loot_text([{"name": name, "quantity": quantity} for name, quantity in loot.items()]))
+    for item, label in zip(fights, labels):
+        drops = _loot_text(item.get("loot"))
+        lines.append(f"{_int(item.get('daily_count'))}. {label} {_int(item.get('cultivation_delta')):+,}" + (f"，{drops}" if drops else ""))
+    if len(fights) < DAILY_LIMIT:
+        lines.append(f"（本地只记到 {len(fights)} 场，缺的几场没有战果记录）")
+    return "\n".join(lines)
