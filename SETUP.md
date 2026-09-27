@@ -217,6 +217,12 @@ PYTHONPATH=app/src .venv/bin/python -B -m tg_game.features.world_boss.world_boss
   .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('stock_market_snapshot_every_seconds:<id>','1800',time.time()));c.commit()"
   ```
 
+- **野外历练日报**（发到这个号自己 TG 的收藏夹，不进游戏群）：当天的野外历练打满后发一份，逐场列出胜负、修为和掉落；天星宗的号还会列出推命命中几次、改命挡下几场败局，方便算天机值的账。一天只发一次。野外历练本身要先在诸元神巡令里开着：
+
+  ```bash
+  .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('wild_experience_report:<id>','{\"enabled\": true}',time.time()));c.commit()"
+  ```
+
 - **天星宗斗法**（`tools/tianxing_duel_daily.py`）：群和话题读 `.env`，照文件头的示例加到计划任务里。只有天星宗号用得上。
 
 ## 10. 安全：网页绝不能直接暴露到公网
