@@ -352,7 +352,7 @@ class Router:
             except Exception:
                 logger.exception("Record-only chat store failed chat=%s", context.chat_id)
         auto_added_bot_sender = False
-        if context.chat_binding and context.sender_id and not context.is_bot_sender:
+        if context.chat_binding and context.sender_id and not context.has_allowed_bot(context.sender_id):
             auto_added_bot_sender = await self._maybe_add_hantianzun_bot(client, context)
             if auto_added_bot_sender and context.profile and context.chat_id is not None:
                 refreshed_binding = self.storage.get_chat_binding(
@@ -653,6 +653,16 @@ class Router:
             bot_username=getattr(sender, "username", "") or "",
             thread_id=context.thread_id,
         )
+        if binding is not None:
+            # 信任边界：名字对得上的 bot 说一句话就进白名单，留痕方便发现冒名的
+            logger.warning(
+                "Auto-trusted new game bot id=%s username=%s name=%s chat=%s profile=%s",
+                context.sender_id,
+                username,
+                _sender_first_name(sender),
+                context.chat_id,
+                context.profile.id,
+            )
         return binding is not None
 
     async def _get_sender_custom_title(

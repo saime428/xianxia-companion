@@ -192,7 +192,7 @@ from tg_game.features.tianji_trial.biz_tianji_trial_remnant_state import (
     build_tianji_remnant_state as _tianji_build_tianji_remnant_state,
     get_latest_tianji_remnant_reply as _tianji_get_latest_tianji_remnant_reply,
 )
-from tg_game.services import automation_switch, module_registry, profile_rebirth
+from tg_game.services import automation_switch, group_activity, module_registry, profile_rebirth
 from tg_game.features.estate import biz_estate_constants
 from tg_game.services.cultivation_sync import sync_cultivation_session
 from tg_game.services.external_sync import (
@@ -2891,6 +2891,7 @@ def create_app() -> FastAPI:
             "artifact_nurture_auto_state": artifact_nurture_auto_state,
             "wild_experience_state": wild_experience_state,
             "world_boss_state": world_boss_runtime.build_view(storage, active_profile.id if active_profile else None),
+            "group_activity_task": (group_activity.get_task(storage, active_profile.id) or {}) if active_profile else {},
             "companion_heart_tribulation_state": companion_heart_tribulation_state,
                 **other_module_state,
                 "stock_state": stock_state,
@@ -5349,6 +5350,17 @@ def create_app() -> FastAPI:
                 last_error="",
             )
         return RedirectResponse(url=redirect_to, status_code=303)
+
+    @application.post("/runtime/group-activity/toggle")
+    async def runtime_toggle_group_activity(request: Request) -> RedirectResponse:
+        profile = _get_request_profile(request)
+        if not profile:
+            raise HTTPException(status_code=401, detail="Profile not active")
+        try:
+            group_activity.toggle(storage, profile.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(url="/modules/other", status_code=303)
 
     @application.post("/runtime/artifact/touch-auto")
     async def runtime_toggle_artifact_touch_auto(

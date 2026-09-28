@@ -54,7 +54,7 @@ def load_profile_card_state(
 
     profile = storage.get_profile(active_profile.id) or active_profile
     external_account = storage.get_external_account(profile.id, ASC_PROVIDER)
-    should_refresh = refresh_external and shouldrefresh_cultivator_payload(
+    should_refresh = refresh_external and should_refresh_cultivator_payload(
         profile, external_account
     )
     payload = (

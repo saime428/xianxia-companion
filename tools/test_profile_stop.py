@@ -20,6 +20,7 @@ from tg_game.features.battle import biz_battle_schedule as battle
 from tg_game.features.stock import biz_stock_miniapp as stock
 from tg_game.features.tianxing import biz_tianxing_runtime as tx
 from tg_game.runtime import executors
+from tg_game.services.automation_switch import pause_automation, resume_automation
 from tg_game.services.profile_schedules import STOP_CURRENT_SCHEDULES_REASON, stop_current_profile_schedules
 from tg_game.storage import ASC_EXTERNAL_PROVIDER, Storage
 
@@ -220,6 +221,59 @@ async def check_stop_during_refresh(storage, profile_id):
             assert not pending(storage, profile_id), outcome
 
 
+async def check_runtime_switches(storage, profile_id, other_id):
+    # 天机命脉、野外历练日报的开关不在任务表里：停角色也得关掉，历次结算留着（09-28 审计 A1）
+    for pid in (profile_id, other_id):
+        storage.set_runtime_state(f"fate_cards:{pid}", json.dumps({"enabled": True, "history": [{"reward": 4}]}))
+        storage.set_runtime_state(f"wild_experience_report:{pid}", json.dumps({"enabled": True, "sent": "2026-09-27"}))
+    stop_current_profile_schedules(storage, profile_id)
+    assert json.loads(storage.get_runtime_state(f"fate_cards:{profile_id}")) == {
+        "enabled": False, "history": [{"reward": 4}],
+    }
+    assert json.loads(storage.get_runtime_state(f"wild_experience_report:{profile_id}")) == {
+        "enabled": False, "sent": "2026-09-27",
+    }
+    for key in (f"fate_cards:{other_id}", f"wild_experience_report:{other_id}"):
+        assert json.loads(storage.get_runtime_state(key))["enabled"] is True
+    assert not await executors._run_pending_fate_cards(
+        SimpleNamespace(_tg_game_profile_id=profile_id), storage, profile_id,
+    )
+
+
+async def check_pause_between_miniapp_runners(storage, profile_id):
+    # 小程序批次跑到一半用户点了全局暂停：后面还没开的别再开（09-28 审计 A2）
+    calls = []
+
+    async def first(client, storage_, pid, payload):
+        calls.append("first")
+        pause_automation(storage_, now=time.time())
+        return False
+
+    async def later(client, storage_, pid, payload):
+        calls.append("later")
+        return False
+
+    async def stop_loop(*args):
+        raise asyncio.CancelledError()
+
+    later_runners = (
+        "_run_pending_estate_public_hunt", "_run_pending_beast_merge_public", "_run_pending_tianji_public_trial",
+        "_run_pending_pagoda_public", "_run_pending_xinggong_public_starboard", "_run_pending_luoyun_spirit_tree",
+        "_run_pending_fate_cards", "_run_wild_experience_report",
+    )
+    with patch.object(executors, "_run_pending_wild_experience", first), patch.multiple(
+        executors, **{name: later for name in later_runners}
+    ), patch.object(executors.biz_stock_miniapp, "run_pending_stock_market_snapshot", later), patch.object(
+        executors.asyncio, "sleep", stop_loop
+    ):
+        try:
+            await executors._run_miniapp_pending_scheduler(SimpleNamespace(_tg_game_profile_id=profile_id), storage)
+        except asyncio.CancelledError:
+            pass
+    resume_automation(storage)
+    assert calls == ["first"], calls
+
+
 async def main():
     # Windows creates its event-loop socketpair before this hook is installed.
     sys.addaudithook(reject_network)
@@ -242,7 +296,10 @@ async def main():
         await check_miniapp_requests(storage, *profile_ids)
         check_battle(storage, *profile_ids)
         await check_stop_during_refresh(storage, profile_ids[0])
-    print("test_profile_stop: ok (scheduler scope, MiniApp history, battle isolation, refresh cancellation)")
+        await check_runtime_switches(storage, *profile_ids)
+        await check_pause_between_miniapp_runners(storage, profile_ids[0])
+    print("test_profile_stop: ok (scheduler scope, MiniApp history, battle isolation, refresh cancellation,"
+          " runtime switches, pause between MiniApp runners)")
 
 
 if __name__ == "__main__":

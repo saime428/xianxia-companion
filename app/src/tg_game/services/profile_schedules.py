@@ -1,3 +1,4 @@
+import json
 import time
 from typing import Optional
 import biz_fanren_game
@@ -221,6 +222,14 @@ def stop_current_profile_schedules(storage: Storage, profile_id: int) -> dict:
         target_profile_id, ASC_EXTERNAL_PROVIDER, _cancel_queued_miniapp_requests,
     )
     storage.set_runtime_state(SCHEDULE_STATE_KEY.format(profile_id=target_profile_id), "0")
+    # 天机命脉、野外历练日报的开关在 runtime_state 里，不跟任务表走：只关 enabled，历次结算留着
+    for key in (f"fate_cards:{target_profile_id}", f"wild_experience_report:{target_profile_id}"):
+        try:
+            switch = json.loads(storage.get_runtime_state(key) or "{}")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(switch, dict) and switch.get("enabled"):
+            storage.set_runtime_state(key, json.dumps({**switch, "enabled": False}, ensure_ascii=False))
     _update_existing_table(
         storage, "app_runtime_state", {"value": "cancelled", "updated_at": time.time()},
         "WHERE key=? AND TRIM(value)='queued'",

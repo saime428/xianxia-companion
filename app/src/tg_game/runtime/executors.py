@@ -196,6 +196,7 @@ from tg_game.storage import (
 from tg_game.telegram.network_guard import is_network_paused
 from tg_game.services.automation_switch import is_automation_paused
 from tg_game.telegram.send_utils import send_message_with_thread_fallback
+from tg_game.services import group_activity
 
 logger = logging.getLogger(__name__)
 
@@ -3909,6 +3910,26 @@ def _defer_companion_heart_tribulation_if_voyaging(
     return True
 
 
+class _HeartTribulationSendExpired(RuntimeError):
+    pass
+
+
+def _heart_tribulation_task_is_current(storage: Storage, task: dict) -> bool:
+    fresh = storage.get_companion_heart_tribulation_task(
+        int(task.get("profile_id") or 0),
+        int(task.get("chat_id") or 0),
+        thread_id=int(task["thread_id"]) if task.get("thread_id") else None,
+    )
+    return bool(fresh and fresh.get("enabled") and all(
+        fresh.get(key) == task.get(key)
+        for key in (
+            "id", "run_id", "workflow_state", "tribulation_msg_id",
+            "anchor_command_msg_id", "tribulation_command_msg_id",
+            "last_action_round_sent", "last_tribulation_command_at",
+        )
+    ))
+
+
 def _claim_companion_heart_tribulation_round(storage: Storage, task: dict, next_round: int) -> bool:
     """同一轮会被两条路径推进：轮询（_advance…）和 bot 编辑事件（_maybe_advance…）。
 
@@ -3933,9 +3954,17 @@ def _claim_companion_heart_tribulation_round(storage: Storage, task: dict, next_
             text=f"第{next_round}轮已由另一条路径发出，跳过",
         )
         return False
-    storage.update_companion_heart_tribulation_task(
-        int(task["id"]), last_action_round_sent=int(next_round)
+    if not _heart_tribulation_task_is_current(storage, task):
+        return False
+    # 撤掉旧轮次的重试计时；排队沿用 10 分钟停滞上限，防进程重启后认领悬空。
+    # ponytail: 超过上限跳过本场；若正常排队也触顶，应给短时交互增加发送优先级。
+    fields = dict(
+        last_action_round_sent=int(next_round), round_retry_deadline_at=0,
+        round_retry_count=0,
+        step_deadline_at=time.time() + COMPANION_HEART_TRIBULATION_EDIT_STALL_SECONDS,
     )
+    storage.update_companion_heart_tribulation_task(int(task["id"]), **fields)
+    task.update(fields)
     return True
 
 
@@ -3959,9 +3988,14 @@ def _claim_companion_heart_tribulation_command(storage: Storage, task: dict) -> 
             text=".共历心劫已由另一张面板发出，跳过",
         )
         return False
-    storage.update_companion_heart_tribulation_task(
-        int(task["id"]), last_tribulation_command_at=time.time()
+    if not _heart_tribulation_task_is_current(storage, task):
+        return False
+    fields = dict(
+        last_tribulation_command_at=time.time(),
+        step_deadline_at=time.time() + COMPANION_HEART_TRIBULATION_EDIT_STALL_SECONDS,
     )
+    storage.update_companion_heart_tribulation_task(int(task["id"]), **fields)
+    task.update(fields)
     return True
 
 
@@ -3976,23 +4010,49 @@ async def _send_companion_heart_tribulation_command(
     chat_id = int(task.get("chat_id") or 0)
     if not chat_id:
         raise RuntimeError("Heart tribulation chat_id missing")
-    return await send_message_with_thread_fallback(
-        client,
-        chat_id,
-        text,
-        thread_id=(
-            int(reply_to_msg_id)
-            if reply_to_msg_id is not None
-            else int(task.get("thread_id"))
-            if task.get("thread_id")
-            else None
-        ),
-        storage=storage,
-        profile_id=int(task.get("profile_id") or 0),
-        bot_username=str(task.get("bot_username") or ""),
-        log_prefix="Heart tribulation",
-        guard_network_pause=True,
-    )
+
+    def ensure_current(stage: str = "before") -> None:
+        if not _heart_tribulation_task_is_current(storage, task):
+            # 记一条再丢：不然查「这一轮怎么没发」只看得到 10 分钟后的超时。
+            # stage：before 没发出去；after 已发出但场次已变；failed 发送出错且场次已变
+            _append_companion_heart_tribulation_log(
+                storage,
+                task,
+                step=str(task.get("workflow_state") or ""),
+                event_type="send_expired",
+                text=text,
+                detail={"stage": stage},
+            )
+            raise _HeartTribulationSendExpired("心劫场次或轮次已变化，丢弃过期发送。")
+
+    ensure_current()
+    try:
+        message = await send_message_with_thread_fallback(
+            client,
+            chat_id,
+            text,
+            thread_id=(
+                int(reply_to_msg_id)
+                if reply_to_msg_id is not None
+                else int(task.get("thread_id"))
+                if task.get("thread_id")
+                else None
+            ),
+            storage=storage,
+            profile_id=int(task.get("profile_id") or 0),
+            bot_username=str(task.get("bot_username") or ""),
+            log_prefix="Heart tribulation",
+            guard_network_pause=True,
+            before_send=ensure_current,
+        )
+    except _HeartTribulationSendExpired:
+        raise
+    except Exception:
+        # 旧发送失败也不能中止已经推进的新轮次。
+        ensure_current("failed")
+        raise
+    ensure_current("after")
+    return message
 
 
 async def _poll_companion_heart_tribulation_message(
@@ -4039,11 +4099,11 @@ async def _poll_companion_heart_tribulation_message(
     # 推的是同一个任务，而这里的 task 只是进函数时的快照。不重新读一次就会重复推进：
     # 多发一条 .稳，还会把已经结算完的任务状态写回 await_*，下一轮重试便因为锚点被
     # 清空而把整个自动开关关掉（大号 09-07/09-09/09-12 就是这么停的）。
+    if not _heart_tribulation_task_is_current(storage, task):
+        return False
     task = storage.get_companion_heart_tribulation_task(
         profile_id, chat_id, thread_id=thread_id
-    ) or task
-    if str(task.get("workflow_state") or "").strip() != workflow_state:
-        return False
+    )
 
     last_fingerprint = str(task.get("last_progress_fingerprint") or "")
     if any(
@@ -4074,6 +4134,8 @@ async def _poll_companion_heart_tribulation_message(
         )
         sender_username = str((existing_message or {}).get("sender_username") or "")
 
+    if not _heart_tribulation_task_is_current(storage, task):
+        return False
     current_fingerprint = _build_companion_heart_tribulation_event_fingerprint(
         message_id=tribulation_msg_id,
         text=current_text,
@@ -4175,6 +4237,8 @@ async def _poll_companion_heart_tribulation_message(
             text=command,
             reply_to_msg_id=tribulation_msg_id,
         )
+    except _HeartTribulationSendExpired:
+        return True
     except Exception as exc:
         _abort_companion_heart_tribulation_run(
             storage,
@@ -4277,6 +4341,14 @@ async def _run_companion_heart_tribulation_scheduler(
                 }:
                     if await _poll_companion_heart_tribulation_message(client, storage, task):
                         continue
+                    if not _heart_tribulation_task_is_current(storage, task):
+                        continue
+                    task = storage.get_companion_heart_tribulation_task(
+                        int(profile_id), int(task["chat_id"]),
+                        thread_id=int(task["thread_id"]) if task.get("thread_id") else None,
+                    )
+                    now = time.time()
+                    step_deadline_at = float(task.get("step_deadline_at") or 0)
                     round_retry_deadline_at = float(task.get("round_retry_deadline_at") or 0)
                     round_retry_count = int(task.get("round_retry_count") or 0)
                     if round_retry_deadline_at > 0 and now >= round_retry_deadline_at:
@@ -4313,6 +4385,8 @@ async def _run_companion_heart_tribulation_scheduler(
                                     text=command,
                                     reply_to_msg_id=tribulation_msg_id,
                                 )
+                            except _HeartTribulationSendExpired:
+                                continue
                             except Exception as exc:
                                 _abort_companion_heart_tribulation_run(
                                     storage,
@@ -4326,8 +4400,8 @@ async def _run_companion_heart_tribulation_scheduler(
                             storage.update_companion_heart_tribulation_task(
                                 task_id,
                                 round_retry_count=new_retry_count,
-                                round_retry_deadline_at=now + COMPANION_HEART_TRIBULATION_ROUND_RETRY_SECONDS,
-                                step_deadline_at=now + COMPANION_HEART_TRIBULATION_EDIT_STALL_SECONDS,
+                                round_retry_deadline_at=time.time() + COMPANION_HEART_TRIBULATION_ROUND_RETRY_SECONDS,
+                                step_deadline_at=time.time() + COMPANION_HEART_TRIBULATION_EDIT_STALL_SECONDS,
                                 last_error="",
                             )
                             _append_companion_heart_tribulation_log(
@@ -4491,6 +4565,8 @@ async def _run_companion_heart_tribulation_scheduler(
                         task,
                         text=COMPANION_PANEL_COMMAND,
                     )
+                except _HeartTribulationSendExpired:
+                    continue
                 except Exception as exc:
                     _abort_companion_heart_tribulation_run(
                         storage,
@@ -8332,13 +8408,6 @@ async def _run_miniapp_pending_scheduler(client: object, storage: Storage) -> No
     logger.info("Miniapp pending scheduler started for profile=%s", profile_id)
     while True:
         try:
-            if (
-                profile_rebirth.is_profile_rebirth_locked(storage, int(profile_id))
-                or is_network_paused(storage, int(profile_id), now=time.time())
-                or is_automation_paused(storage)
-            ):
-                await asyncio.sleep(COMPANION_AUTO_POLL_SECONDS)
-                continue
             payload = read_cached_external_payload(storage, int(profile_id))
             for runner in (
                 _run_pending_wild_experience,
@@ -8352,6 +8421,14 @@ async def _run_miniapp_pending_scheduler(client: object, storage: Storage) -> No
                 _run_pending_fate_cards,
                 _run_wild_experience_report,
             ):
+                # 每项开跑前都查：前一项跑着（一局十几分钟）的时候用户可能已经暂停，后面的就别再开了。
+                # 已经开跑的那一项照常结算，不去掐线程里的 HTTP。
+                if (
+                    profile_rebirth.is_profile_rebirth_locked(storage, int(profile_id))
+                    or is_network_paused(storage, int(profile_id), now=time.time())
+                    or is_automation_paused(storage)
+                ):
+                    break
                 if await runner(client, storage, int(profile_id), payload):
                     payload = read_cached_external_payload(storage, int(profile_id))
             await asyncio.sleep(COMPANION_AUTO_POLL_SECONDS)
@@ -10483,6 +10560,9 @@ class GeneralGameExecutor(BaseExecutor):
             asyncio.create_task(_run_divination_batch_scheduler(client, storage)),
         )
         _register_client_background_task(
+            client, asyncio.create_task(group_activity.run(client, storage)),
+        )
+        _register_client_background_task(
             client,
             asyncio.create_task(_run_companion_auto_scheduler(client, storage)),
         )
@@ -10851,6 +10931,8 @@ class GeneralGameExecutor(BaseExecutor):
                     text=COMPANION_HEART_TRIBULATION_COMMAND,
                     reply_to_msg_id=current_message_id,
                 )
+            except _HeartTribulationSendExpired:
+                return True
             except Exception as exc:
                 _abort_companion_heart_tribulation_run(
                     storage,
@@ -10922,6 +11004,8 @@ class GeneralGameExecutor(BaseExecutor):
                 step=workflow_state,
             ):
                 return True
+            if not _claim_companion_heart_tribulation_round(storage, task, 1):
+                return True
             # 别贴着 bot 那条新消息答（见常量注释）
             await asyncio.sleep(COMPANION_HEART_TRIBULATION_ROUND1_DELAY_SECONDS)
             try:
@@ -10932,6 +11016,8 @@ class GeneralGameExecutor(BaseExecutor):
                     text=round1_command,
                     reply_to_msg_id=current_message_id,
                 )
+            except _HeartTribulationSendExpired:
+                return True
             except Exception as exc:
                 _abort_companion_heart_tribulation_run(
                     storage,
@@ -11147,6 +11233,8 @@ class GeneralGameExecutor(BaseExecutor):
                     text=round2_command,
                     reply_to_msg_id=current_message_id,
                 )
+            except _HeartTribulationSendExpired:
+                return True
             except Exception as exc:
                 _abort_companion_heart_tribulation_run(
                     storage,
@@ -11198,6 +11286,8 @@ class GeneralGameExecutor(BaseExecutor):
                     text=round3_command,
                     reply_to_msg_id=current_message_id,
                 )
+            except _HeartTribulationSendExpired:
+                return True
             except Exception as exc:
                 _abort_companion_heart_tribulation_run(
                     storage,

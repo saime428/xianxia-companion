@@ -145,14 +145,19 @@ def _merge_local_external_payload_fields(existing_json: object, me_payload: dict
     else:
         payload_dongfu = dict(payload_dongfu)
     changed = False
-    for key in ("miniapp_entry", "miniapp_snapshot", "miniapp_hunt", "miniapp_hunt_request"):
-        if key == "miniapp_hunt_request" and payload_dongfu.get("miniapp_hunt"):
-            continue
+    for key in ("miniapp_entry", "miniapp_snapshot", "miniapp_hunt"):
         if payload_dongfu.get(key):
             continue
         if existing_dongfu.get(key):
             payload_dongfu[key] = existing_dongfu[key]
             changed = True
+    # 请求/租约只由本地工作流管理；刷新不能丢请求，也不能恢复已清除的旧请求。
+    if "miniapp_hunt_request" in payload_dongfu:
+        payload_dongfu.pop("miniapp_hunt_request")
+        changed = True
+    if "miniapp_hunt_request" in existing_dongfu:
+        payload_dongfu["miniapp_hunt_request"] = existing_dongfu["miniapp_hunt_request"]
+        changed = True
     if changed:
         payload["dongfu"] = payload_dongfu
     return payload
@@ -2955,19 +2960,18 @@ class Storage:
             updated_payload = transform(payload)
             if not isinstance(updated_payload, dict):
                 raise ValueError("External account payload transform must return a dict")
-            conn.execute(
-                """
-                UPDATE external_accounts
-                SET me_json=?, updated_at=?
-                WHERE profile_id=? AND provider=?
-                """,
-                (
-                    json.dumps(updated_payload, ensure_ascii=False),
-                    now,
-                    profile_id,
-                    provider,
-                ),
-            )
+            me_json = json.dumps(updated_payload, ensure_ascii=False)
+            # 小程序调度每 5 秒空跑一遍 claim，没变就别整份重写（09-28 审计 A4）。
+            # 要跟库里的原文比：transform 常常原地改完再返回同一个 dict，跟 payload 比永远相等
+            if me_json != row["me_json"]:
+                conn.execute(
+                    """
+                    UPDATE external_accounts
+                    SET me_json=?, updated_at=?
+                    WHERE profile_id=? AND provider=?
+                    """,
+                    (me_json, now, profile_id, provider),
+                )
         return updated_payload
 
     def profile_has_companion(self, profile_id: int) -> bool:
@@ -3402,6 +3406,7 @@ class Storage:
         enabled: bool = False,
         pond: str = "青溪浅滩",
         bait: str = "凡饵",
+        bait_source: str = "craft",
         auto_probe: bool = True,
         auto_until_limit: bool = True,
         auto_nest: bool = False,
@@ -3427,19 +3432,21 @@ class Storage:
         last_action_at: float = 0,
         last_error: str = "",
     ) -> dict:
+        from biz_fishing_game import normalize_bait_source
+
         now = time.time()
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO fishing_sessions (
                     profile_id, chat_id, thread_id, chat_type, bot_username,
-                    enabled, pond, bait, auto_probe, auto_until_limit,
+                    enabled, pond, bait, bait_source, auto_probe, auto_until_limit,
                     auto_nest, nest, nest_limit, nest_used_count, nest_remaining, state,
                     daily_count, daily_limit, rod_text, skill_text, current_nest,
                     baits_json, nest_baits_json, catches_json, last_fish_name, last_result_text,
                     last_command_text, last_command_msg_id, last_bot_msg_id,
                     next_action_at, last_action_at, last_error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(profile_id, chat_id) DO UPDATE SET
                     thread_id=excluded.thread_id,
                     chat_type=excluded.chat_type,
@@ -3447,6 +3454,7 @@ class Storage:
                     enabled=excluded.enabled,
                     pond=excluded.pond,
                     bait=excluded.bait,
+                    bait_source=excluded.bait_source,
                     auto_probe=excluded.auto_probe,
                     auto_until_limit=excluded.auto_until_limit,
                     auto_nest=excluded.auto_nest,
@@ -3482,6 +3490,7 @@ class Storage:
                     1 if enabled else 0,
                     str(pond or "青溪浅滩").strip() or "青溪浅滩",
                     str(bait or "凡饵").strip() or "凡饵",
+                    normalize_bait_source(bait_source),
                     1 if auto_probe else 0,
                     1 if auto_until_limit else 0,
                     1 if auto_nest else 0,

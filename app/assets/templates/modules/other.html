@@ -6,6 +6,19 @@
     <div class="other-dashboard-main">
         <section class="detail-grid other-core-grid">
     <div class="detail-card">
+        <div class="section-header compact"><p>群聊活跃</p><h2>自动群聊骚话</h2></div>
+        <p class="muted">北京时间 08:00–23:00，每隔 45–75 分钟随机一句，最近 10 句不重复，也避开别的号刚说过的。约 70% 在 90 秒后撤回，其余保留。</p>
+        <div class="stack-list compact-stack">
+            <div class="kv-row"><span>状态</span><strong>{{ '已开启' if group_activity_task.enabled else '已关闭' }}</strong></div>
+            <div class="kv-row"><span>下次发言</span><strong>{% if group_activity_task.enabled and group_activity_task.next_run_at %}{{ format_timestamp(group_activity_task.next_run_at) }}{% else %}-{% endif %}</strong></div>
+        </div>
+        <form method="post" action="/runtime/group-activity/toggle" class="action-row top-gap">
+            <button type="submit" class="inline-button auto-toggle-button{% if group_activity_task.enabled %} active{% endif %}" {% if not command_chat_ready %}disabled{% endif %}>{{ '关闭自动群聊骚话' if group_activity_task.enabled else '开启自动群聊骚话' }}</button>
+        </form>
+        <p class="muted top-gap">仅发到当前角色绑定的主群；游戏任务优先，离线不补发。关闭后仍会清理已登记的撤回消息。</p>
+        {% if group_activity_task.last_error %}<p class="muted top-gap">{{ group_activity_task.last_error }}</p>{% endif %}
+    </div>
+    <div class="detail-card">
         <div class="section-header compact">
             <p>琉璃古塔</p>
             <h2>闯塔状态</h2>

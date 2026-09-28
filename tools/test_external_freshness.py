@@ -3,14 +3,18 @@
 updated_at 会被小程序调度器每轮顶新，绝不能拿它当"已同步"的凭据。
 运行：.venv/bin/python tools/test_external_freshness.py
 """
+import json
 import sys
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app" / "src"))
+from tg_game import storage as storage_module
 from tg_game.clients.asc_client import AscNotFoundError
+from tg_game.storage import ASC_EXTERNAL_PROVIDER, Storage
 from tg_game.services import external_sync
 from tg_game.services.external_sync import (
     get_external_account_touch_time,
@@ -80,5 +84,28 @@ with patch.object(external_sync, "get_cultivator", fake_get_cultivator):
         pass
     PAGES["old_name"] = {"dao_name": "测试修士"}  # 天机阁没给 telegram_id：照旧收，不因缺字段误伤
     assert external_sync.fetch_cultivator_payload("session=x", ME)[1] == "old_name"
+
+# 小程序调度每 5 秒空跑一遍 claim：payload 没变就不整份重写（09-28 审计 A4）；
+# transform 原地改完再返回同一个 dict 的也得照写
+with tempfile.TemporaryDirectory() as folder:
+    storage = Storage(Path(folder) / "payload.db")
+    storage.init_schema()
+    pid = storage.create_profile("payload-noop").id
+    storage.upsert_external_account(
+        pid, ASC_EXTERNAL_PROVIDER, telegram_user_id="", telegram_username="", status="connected",
+        cookie_text="", api_token="", me_payload={"a": 1, "名": "修士"},
+    )
+    written_at = storage.get_external_account(pid, ASC_EXTERNAL_PROVIDER)["updated_at"]
+    with patch.object(storage_module.time, "time", lambda: written_at + 60):
+        storage.update_external_account_payload(pid, ASC_EXTERNAL_PROVIDER, lambda payload: payload)
+        assert storage.get_external_account(pid, ASC_EXTERNAL_PROVIDER)["updated_at"] == written_at
+
+        def bump_in_place(payload):
+            payload["a"] = 2
+            return payload
+
+        storage.update_external_account_payload(pid, ASC_EXTERNAL_PROVIDER, bump_in_place)
+    row = storage.get_external_account(pid, ASC_EXTERNAL_PROVIDER)
+    assert json.loads(row["me_json"]) == {"a": 2, "名": "修士"} and row["updated_at"] == written_at + 60
 
 print("ok")

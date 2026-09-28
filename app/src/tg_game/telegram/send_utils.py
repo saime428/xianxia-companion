@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 from collections import deque
-from typing import Optional
+from typing import Callable, Optional
 
 from telethon import functions, types
 
@@ -121,13 +121,18 @@ def _ensure_send_allowed(
             raise OutgoingCommandNotSendingError("排队指令已取消或不再处于发送状态。")
 
 
-async def _send_topic_reply(client, chat_id: int, text: str, reply_to: int, top_msg_id: int):
+async def _send_topic_reply(
+    client, chat_id: int, text: str, reply_to: int, top_msg_id: int,
+    before_send: Optional[Callable[[], None]] = None,
+):
     # Telethon 的 send_message 只填 reply_to_msg_id。论坛话题里回复话题根以外的消息，
     # Telegram 要求同时带 top_msg_id（core.telegram.org/constructor/inputReplyToMessage），
     # 不带就靠服务端推断话题，推断不出就归到已关闭的 General 报 TOPIC_CLOSED。
     # 2026-09-18 心魔抉择回复刚发出 1 秒的提示时撞上，被下面的兜底改发成了不带回复的话题消息。
     # ponytail: 文本原样发、不走 markdown 解析，游戏指令用不到格式
     peer = await client.get_input_entity(chat_id)
+    if before_send:
+        before_send()
     request = functions.messages.SendMessageRequest(
         peer=peer,
         message=text,
@@ -147,6 +152,7 @@ async def _send_with_network_tracking(
     profile_id: Optional[int] = None,
     guard_network_pause: bool = False,
     outgoing_command_id: Optional[int] = None,
+    before_send: Optional[Callable[[], None]] = None,
 ):
     # 限流及主题重试都可能让出执行权；每次真正交给 Telegram 前再查控制状态。
     _ensure_send_allowed(
@@ -157,8 +163,10 @@ async def _send_with_network_tracking(
         outgoing_command_id=outgoing_command_id,
     )
     try:
+        if before_send:
+            before_send()
         if reply_to and top_msg_id and int(reply_to) != int(top_msg_id):
-            message = await _send_topic_reply(client, chat_id, text, int(reply_to), int(top_msg_id))
+            message = await _send_topic_reply(client, chat_id, text, int(reply_to), int(top_msg_id), before_send)
         elif reply_to:
             message = await client.send_message(chat_id, text, reply_to=reply_to)
         else:
@@ -211,6 +219,7 @@ async def send_message_with_thread_fallback(
     log_prefix: str = "Telegram",
     guard_network_pause: bool = False,
     outgoing_command_id: Optional[int] = None,
+    before_send: Optional[Callable[[], None]] = None,
 ):
     resolved_storage = _resolve_storage(storage, client)
     # 全局暂停的兜底：调度器已经拦过一层，这里防漏网的直发路径
@@ -244,6 +253,7 @@ async def send_message_with_thread_fallback(
                 profile_id=profile_id,
                 guard_network_pause=guard_network_pause,
                 outgoing_command_id=outgoing_command_id,
+                before_send=before_send,
             )
         except Exception as exc:
             if "TOPIC_CLOSED" not in str(exc):
@@ -281,6 +291,7 @@ async def send_message_with_thread_fallback(
                         profile_id=profile_id,
                         guard_network_pause=guard_network_pause,
                         outgoing_command_id=outgoing_command_id,
+                        before_send=before_send,
                     )
                 except Exception as retry_exc:
                     if "TOPIC_CLOSED" not in str(retry_exc):
@@ -309,4 +320,5 @@ async def send_message_with_thread_fallback(
         profile_id=profile_id,
         guard_network_pause=guard_network_pause,
         outgoing_command_id=outgoing_command_id,
+        before_send=before_send,
     )

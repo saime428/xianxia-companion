@@ -7,6 +7,7 @@
 运行：.venv/bin/python tools/test_heart_tribulation_round_claim.py
 """
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app" / "src"))
@@ -15,7 +16,7 @@ from tg_game.runtime.executors import (  # noqa: E402
     _claim_companion_heart_tribulation_round,
 )
 
-TASK = {"id": 7, "profile_id": 2, "chat_id": -100, "thread_id": "1000003", "last_action_round_sent": 2}
+TASK = {"enabled": 1, "run_id": "test-run", "id": 7, "profile_id": 2, "chat_id": -100, "thread_id": "1000003", "last_action_round_sent": 2}
 
 
 class _FakeStorage:
@@ -39,8 +40,10 @@ class _FakeStorage:
 # 先到的路径：第 2 轮已发、要发第 3 轮 -> 认领成功，库里立刻记 3（还没 await 发送）
 storage = _FakeStorage(round_sent=2)
 assert _claim_companion_heart_tribulation_round(storage, dict(TASK), 3) is True
-assert storage.updates == [(7, {"last_action_round_sent": 3})], storage.updates
-assert storage.lookups == [(2, -100, 1000003)], "thread_id 要转成 int 再查"
+assert storage.row["last_action_round_sent"] == 3
+assert storage.row["round_retry_deadline_at"] == 0
+assert storage.row["step_deadline_at"] > time.time()
+assert set(storage.lookups) == {(2, -100, 1000003)}, "thread_id 要转成 int 再查"
 assert storage.logs == []
 
 # 后到的路径：拿着过期的 task 副本（还写着第 2 轮）再来认领第 3 轮 -> 库里已是 3，退
@@ -51,16 +54,16 @@ assert [log["event_type"] for log in storage.logs] == ["round_already_sent"], st
 
 # abort 把计数重置回 0 之后允许重新认领（发送失败后的重试）
 storage.row["last_action_round_sent"] = 0
-assert _claim_companion_heart_tribulation_round(storage, dict(TASK), 3) is True
+assert _claim_companion_heart_tribulation_round(storage, dict(storage.row), 3) is True
 
 # .共历心劫：09-26 20:31 两张面板 4 秒内先后到，都过了面板兜底，发了两遍
 storage = _FakeStorage(round_sent=0)
 storage.row["last_tribulation_command_at"] = 0
-assert _claim_companion_heart_tribulation_command(storage, dict(TASK)) is True
+assert _claim_companion_heart_tribulation_command(storage, dict(storage.row)) is True
 assert storage.row["last_tribulation_command_at"] > 0
-assert _claim_companion_heart_tribulation_command(storage, dict(TASK)) is False, "第二张面板不能再发"
+assert _claim_companion_heart_tribulation_command(storage, dict(storage.row)) is False, "第二张面板不能再发"
 assert [log["event_type"] for log in storage.logs] == ["tribulation_command_already_sent"], storage.logs
 storage.row["last_tribulation_command_at"] = 0  # 开跑/中止清零后下一轮照常
-assert _claim_companion_heart_tribulation_command(storage, dict(TASK)) is True
+assert _claim_companion_heart_tribulation_command(storage, dict(storage.row)) is True
 
 print("test_heart_tribulation_round_claim: ok")
