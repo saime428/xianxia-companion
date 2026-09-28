@@ -15,6 +15,8 @@ _ZHUIMO_GUARD_PATTERN = re.compile(r"坠魔谷护持[:：]\s*([^\n]+)")
 _PANEL_BLOCK_HEAD_PATTERN = re.compile(
     r"(?m)^\d+\.\s*你的(?:道心侍妾|红尘道侣)[:：]\s*【([^】]+)】\s*[(（]状态[:：]\s*([^)）]+)[)）]"
 )
+# 「- 梦图拼片: 虚天 1/4 | 苍坤 4/4」：数的是有几种残纹，重复藏本不算，4/4 就拼得出
+_PANEL_CHART_COMPLETE_PATTERN = re.compile(r"梦图拼片[:：][^\n]*(?:虚天|苍坤)\s*4/4")
 
 
 def split_companion_panel_blocks(text: str) -> list[dict]:
@@ -50,6 +52,12 @@ def attending_companion_panel_name(text: str) -> str:
     return next(
         (b["name"] for b in split_companion_panel_blocks(text) if b["attending"]), ""
     )
+
+
+def attending_panel_has_complete_chart(text: str) -> bool:
+    """面板上随行那位有一张残图四种残纹都齐了（.拼图 只认随行那位）。"""
+    block = next((b for b in split_companion_panel_blocks(text) if b["attending"]), None)
+    return bool(block and _PANEL_CHART_COMPLETE_PATTERN.search(block["text"]))
 
 
 def resident_companion_panel_block(text: str) -> Optional[dict]:

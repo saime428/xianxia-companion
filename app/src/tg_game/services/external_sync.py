@@ -187,18 +187,25 @@ def fetch_cultivator_payload(
             "当前 Telegram 账号未绑定用户名或姓名，无法调用 /api/cultivator/<identifier>"
         )
 
+    expected_id = str(getattr(profile, "telegram_user_id", "") or "").strip()
     last_error: Optional[Exception] = None
     for candidate in candidates:
         try:
             payload, _status, refreshed_cookie, refreshed_token = get_cultivator(
                 candidate, cookie_text, api_token=api_token
             )
-            return payload, candidate, refreshed_cookie, refreshed_token
         except AscAuthError:
             raise
         except AscNotFoundError as exc:
             last_error = exc
             continue
+        # 天机阁只能按用户名查，用户名却会换：09-28 丁真人换了 TG 用户名，库里的 demo_alt2 就空了出来，
+        # 谁占了它就会查到谁。telegram_id 对不上的当没找到，别把别人的数据同步进来
+        found_id = str(payload.get("telegram_id") or "").strip() if isinstance(payload, dict) else ""
+        if expected_id and found_id and found_id != expected_id:
+            last_error = AscNotFoundError(f"{candidate} 在天机阁是别人（telegram_id {found_id}）")
+            continue
+        return payload, candidate, refreshed_cookie, refreshed_token
 
     if last_error:
         raise last_error

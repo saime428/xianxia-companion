@@ -54,35 +54,6 @@ def list_companions(payload: dict) -> list[dict]:
     return roster
 
 
-# 天机阁里每位侍妾各一份碎片袋：{残纹: 片数}，四种都有才拼得出（重复藏本不算）
-CHART_FRAGMENT_KEYS = {
-    "xutian_fragment_bag": (
-        "xutian_chart_north",
-        "xutian_chart_south",
-        "xutian_chart_east",
-        "xutian_chart_west",
-    ),
-    "cangkun_fragment_bag": (
-        "cangkun_chart_mulan",
-        "cangkun_chart_gate",
-        "cangkun_chart_jade",
-        "cangkun_chart_taimiao",
-    ),
-}
-
-
-def attending_has_complete_chart(payload: dict) -> bool:
-    """随行那位的虚天/苍坤残图有没有一张四种残纹都齐了（.拼图 只认随行那位）。"""
-    roster = list_companions(payload)
-    if not roster or not roster[0]["attending"]:
-        return False
-    for bag_key, piece_keys in CHART_FRAGMENT_KEYS.items():
-        bag = _coerce_json(roster[0].get(bag_key))
-        if isinstance(bag, dict) and all(int(bag.get(key) or 0) > 0 for key in piece_keys):
-            return True
-    return False
-
-
 def voyage_end_ts(companion: dict) -> float:
     """在途或已归航待结算的远航的归航时刻；没有就是 0。
 

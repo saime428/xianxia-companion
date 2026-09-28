@@ -61,7 +61,6 @@ from tg_game.features.companion.biz_companion_cooldown import (
     resolve_simple_cooldown_next_run_at,
 )
 from tg_game.features.companion.biz_companion_roster import (
-    attending_has_complete_chart,
     list_companions,
     plan_companion_rotation,
     voyage_end_ts,
@@ -72,6 +71,7 @@ from tg_game.features.companion.biz_companion_voyage import (
     ZHUIMO_GUARD_COMMAND,
     attending_companion_panel_name,
     attending_companion_panel_text,
+    attending_panel_has_complete_chart,
     build_companion_voyage_state_from_reply,
     companion_voyage_start_commands,
     is_companion_panel_text,
@@ -252,11 +252,9 @@ FATE_CARDS_MAX_FAILURES = 5
 FATE_CARDS_HISTORY_LIMIT = 60
 FATE_CARDS_DONE_STATUSES = {"settled", "expired", "gave_up"}
 WILD_REPORT_RETRY_SECONDS = 600  # 发收藏夹失败后隔这么久再试，别每 5 秒刷一条警告
-# 换过人之后天机阁缓存里的随行者可能还是上一位（约 15 分钟同步一次），这么久内不拼图
-COMPANION_CHART_PUZZLE_AFTER_RECALL_SECONDS = 20 * 60
 # 两名侍妾轮着远航，正常一天换五六次；比这还密一定是判断出了岔子
 COMPANION_RECALL_MIN_INTERVAL_SECONDS = 10 * 60
-# 召回发出去这么久，面板上随行的还不是她，就当游戏不让换
+# 召回发出去这么久，面板上随行的还不是她：游戏回了包就当不让换（歇 6 小时），没回包按 COMPANION_UNANSWERED_RETRY_SECONDS 重试
 COMPANION_RECALL_CONFIRM_SECONDS = 180
 COMPANION_RECALL_FAILED_BACKOFF_SECONDS = 6 * 3600
 # 只为做入梦/代卜/心劫而换人（她出不了航）：三项冷却 8~12 小时，两小时内换第二次就是白换
@@ -264,7 +262,7 @@ COMPANION_RECALL_FAILED_BACKOFF_SECONDS = 6 * 3600
 COMPANION_RECALL_COOLDOWN_WORK_MIN_INTERVAL_SECONDS = 2 * 3600
 # 道心侍妾（星宫）路径实测：「你与侍妾情缘未至，至少需 300 情缘方可代卜天机。」红尘道侣路径不检定
 COMPANION_DIVINATION_MIN_AFFECTION = 300
-# 入梦/代卜发出去没等到回包：隔这么久再试（期间不查面板）
+# 入梦/代卜/召回发出去没等到回包：隔这么久再试（期间不查面板）
 COMPANION_UNANSWERED_RETRY_SECONDS = 3600
 COMPANION_VOYAGE_RETURN_DELAY_SECONDS = 10
 COMPANION_VOYAGE_PREFLIGHT_RECHECK_SECONDS = 60
@@ -3077,8 +3075,11 @@ async def _maybe_recall_resident_companion(
         if (list_companions(payload) or [{}])[0].get("name") != attending_name:
             return False, 0.0
     recall_state = _load_companion_recall_state(storage, profile_id)
-    if float(recall_state.get("failed_until") or 0) > now:
-        return False, 0.0
+    failed_until = float(recall_state.get("failed_until") or 0)
+    if failed_until > now:
+        # 退避到期得有人来看：返回 0 远航任务就一觉睡到随行那位归航
+        # （09-28 丁真人退避 10:58 到期，远航任务却睡到 13:55，清漪多闲 3 小时）
+        return False, failed_until
     name, wake_at = plan_companion_rotation(payload, now=now, strategy=strategy)
     next_allowed_at = (
         float(recall_state.get("at") or 0) + COMPANION_RECALL_MIN_INTERVAL_SECONDS
@@ -3354,7 +3355,6 @@ def _companion_sibling_command_in_flight(
 def _maybe_queue_chart_puzzle(
     storage: Storage,
     task: dict,
-    payload: dict,
     *,
     chat_id: int,
     thread_id: Optional[int],
@@ -3364,12 +3364,19 @@ def _maybe_queue_chart_puzzle(
 
     远航途中也能拼：09-24 丙真人召回还在航线上的凌玉灵，14 秒后拼成虚天。集齐了不拼会拖低入梦掉率
     （回包「进度衰减」3/4 −18%、4/4 −22%，4/4 的线路照样会被抽中）。
-    ponytail: 碎片只有随行时入梦才掉，集齐那一刻她一定在随行，所以只看随行那位；藏娇阁那位集齐了
-    等她下次被换出来再拼。要更快就在 _resolve_resident_cooldown_ready_at 里把她那段「4/4」也算成有活。
+    认自己最新那张侍妾面板，不认天机阁缓存：09-28 丙真人两位都跑稳妥，凌玉灵每轮只随行十来分钟
+    （召回→入梦→归来→起航→换回莎儿），08:55 入梦集齐苍坤；缓存 15 分钟才同步，老规矩又是召回后 20 分钟不拼，
+    整段错过，09:06 她被换回藏娇阁。面板在换人、入梦、归来、起航前后都会刷。
+    ponytail: 藏娇阁那位集齐了不专门召回，等她下次被换出来、面板一刷就拼（最多晚一趟远航）。
+    要更快就在 _maybe_recall_resident_companion 里把她那段「4/4」也算成有活（她在海上时也要算）。
     """
-    if not attending_has_complete_chart(payload):
-        return False
     profile_id = int(task.get("profile_id") or 0)
+    panel_reply = _get_latest_companion_panel_message(
+        storage, profile_id=profile_id, chat_id=chat_id, thread_id=thread_id
+    ) or {}
+    if not attending_panel_has_complete_chart(str(panel_reply.get("text") or "")):
+        return False
+    panel_at = float(panel_reply.get("created_at") or 0)
     last_command = storage.get_latest_outgoing_command(
         chat_id,
         profile_id=profile_id,
@@ -3378,6 +3385,9 @@ def _maybe_queue_chart_puzzle(
     ) or {}
     last_at = float(last_command.get("created_at") or 0)
     if last_at:
+        # 拼之前（或回包之前）的面板还写着 4/4：等之后刷的新面板
+        if panel_at <= float(last_command.get("updated_at") or last_at):
+            return False
         reply = _get_latest_profile_command_reply(
             storage,
             profile_id=profile_id,
@@ -3386,8 +3396,8 @@ def _maybe_queue_chart_puzzle(
             command_text=COMPANION_CHART_PUZZLE_COMMAND,
             since_ts=last_at,
         )
-        # 拼成了：等天机阁刷新（约 15 分钟）再看还齐不齐，重复藏本够就接着拼下一张。
-        # 「仍缺」、没回包、还在等回包：天机阁和游戏对不上，6 小时后再试，别每半小时白发一条
+        # 拼成了：半小时后新面板还是 4/4（重复藏本够）就接着拼下一张。
+        # 「仍缺」、没回包、还在等回包：面板和游戏对不上，6 小时后再试，别每半小时白发一条
         retry_after = (
             COMPANION_AUTO_POST_SEND_GRACE_SECONDS
             if "拼合成功" in str((reply or {}).get("text") or "")
@@ -3400,8 +3410,12 @@ def _maybe_queue_chart_puzzle(
     ) or []:
         text = str(command.get("text") or "").strip()
         age = now - float(command.get("created_at") or 0)
-        # 刚换过人：天机阁缓存里的随行者可能还是上一位，拼到别人身上只换来「仍缺」和 6 小时退避
-        if text.startswith(COMPANION_RECALL_COMMAND) and age < COMPANION_CHART_PUZZLE_AFTER_RECALL_SECONDS:
+        # 召回还在路上，或者游戏回召回在这张面板之后：随行的可能已经不是面板上那位，
+        # 拼到别人身上只换来「仍缺」和 6 小时退避
+        if text.startswith(COMPANION_RECALL_COMMAND) and (
+            command.get("status") in {"pending", "sending", OUTGOING_AWAITING_CONFIRM_STATUS}
+            or float(command.get("updated_at") or 0) >= panel_at
+        ):
             return False
         # 起航/归来/坠魔心劫刚发：侍妾指令挨着发，游戏常吞掉后一条（吞了召回会让轮换停 6 小时）
         if text.startswith(
@@ -7697,13 +7711,29 @@ async def _run_companion_auto_scheduler(
                             > COMPANION_RECALL_CONFIRM_SECONDS
                         )
                     ):
-                        # 召回之后的新面板：随行的是她就成了；不是，就当游戏不让换，歇 6 小时别来回试
+                        # 召回之后的新面板：随行的是她就成了；不是，游戏回了包就当不让换，歇 6 小时别来回试。
+                        # 游戏压根没回（bot 偶发不回）只是这条丢了，一小时后再试：09-28 04:52 丁真人召回清漪没回包，
+                        # 被当成不让换，清漪入梦/代卜/心劫全好着闲了 9 小时。
+                        # ponytail: 为冷却换人的两小时限频照算这次没换成的召回，那条路实际两小时后才重试；要更快就把召回前的 cooldown_at 存下来，这里还原
                         recall_failed = attending_name != recall_name
+                        recall_answered = (
+                            storage.get_latest_outgoing_command(
+                                chat_id,
+                                profile_id=int(profile_id),
+                                text=f"{COMPANION_RECALL_COMMAND} {recall_name}",
+                                thread_id=thread_id,
+                            )
+                            or {}
+                        ).get("status") == "confirmed"
                         recall_state = {
                             **recall_state,
                             "settled": True,
                             "failed_until": now
-                            + COMPANION_RECALL_FAILED_BACKOFF_SECONDS
+                            + (
+                                COMPANION_RECALL_FAILED_BACKOFF_SECONDS
+                                if recall_answered
+                                else COMPANION_UNANSWERED_RETRY_SECONDS
+                            )
                             if recall_failed
                             else 0,
                         }
@@ -7712,10 +7742,11 @@ async def _run_companion_auto_scheduler(
                         )
                         if recall_failed:
                             logger.warning(
-                                "Companion recall did not take effect profile=%s target=%s attending=%s",
+                                "Companion recall did not take effect profile=%s target=%s attending=%s answered=%s",
                                 profile_id,
                                 recall_name,
                                 attending_name,
+                                recall_answered,
                             )
 
                     panel_state = _build_companion_voyage_state_from_reply(panel_reply)
@@ -7978,11 +8009,10 @@ async def _run_companion_auto_scheduler(
                     thread_id = (
                         int(task.get("thread_id")) if task.get("thread_id") else None
                     )
-                    # 拼图不看远航，排在远航门前面（这一支每 5 秒整个重算，读的是缓存的天机阁数据）
+                    # 拼图不看远航，排在远航门前面（这一支每 5 秒整个重算，读的是最新那张侍妾面板）
                     if feature_key == "dream_seek" and _maybe_queue_chart_puzzle(
                         storage,
                         task,
-                        payload if isinstance(payload, dict) else {},
                         chat_id=chat_id,
                         thread_id=thread_id,
                         now=now,

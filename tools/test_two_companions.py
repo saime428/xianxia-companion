@@ -35,13 +35,13 @@ FOOTER = (
 )
 
 
-def block(index, name, status, *, dream, heart, divination, voyage_line="", kind="道心侍妾"):
+def block(index, name, status, *, dream, heart, divination, voyage_line="", kind="道心侍妾", charts="虚天 0/4 | 苍坤 1/4"):
     return (
         f"{index}. 你的{kind}: 【{name}】 (状态: {status})\n\n情缘值: 570\n已解锁神通:\n"
         " - 【红袖添香】: 闭关失败时，修为惩罚降低30%。\n\n【掩月心契】\n- 当前誓约: 无\n"
         "命令: .立誓 护道/守秘/共修、.毁誓\n\n【第二期机缘】\n- 天机代卜链: 无\n- 坠魔谷护持: 可用（剩余 900分钟）\n"
         f"- 入梦寻图冷却: {dream}\n- 共历心劫冷却: {heart}\n- 天机代卜冷却: {divination}\n"
-        "- 梦图拼片: 虚天 0/4 | 苍坤 1/4\n命令: .入梦寻图、.残图、.拼图、.共历心劫、.坠魔心劫、.天机代卜\n\n"
+        f"- 梦图拼片: {charts}\n命令: .入梦寻图、.残图、.拼图、.共历心劫、.坠魔心劫、.天机代卜\n\n"
         + (f"{voyage_line}\n\n" if voyage_line else "")
     )
 
@@ -243,6 +243,7 @@ async def check_cooldown_rotation():
     """不送灵石：藏娇阁那位出不了航，但入梦/代卜/心劫好了也要换她出来做（心劫 +7 情缘，攒到 70 才进远航轮换）。"""
     wan_away = {"name": "南宫婉·月影", "affection": 674, "voyage": sailing(NOW + 5 * 3600, "月殿寻痕")}
     away_block = dict(dream="100分钟", heart="500分钟", divination="600分钟", voyage_line="远航状态: 月殿寻痕航线进行中，剩余约 300 分钟。")
+    last = {}  # 最近一轮跑完的召回状态
 
     async def round_with(resident_block, *, recall_state=None, resident_affection=0, features=("heart",), sent_commands=()):
         with tempfile.TemporaryDirectory() as tmp:
@@ -270,6 +271,7 @@ async def check_cooldown_rotation():
             sent = queued(storage, pid)
             for text, _, _ in sent_commands:  # 预置的那几条不是这一轮发的，扣掉
                 sent.remove(text)
+            last["recall"] = ex._load_companion_recall_state(storage, pid)
             return sent, float(voyage_task(storage, pid)["next_run_at"])
 
     ready = block(2, "莎儿", "居于藏娇阁", kind="红尘道侣", dream="200分钟", heart="可施展", divination="300分钟")
@@ -315,6 +317,21 @@ async def check_cooldown_rotation():
     hers = [(".入梦寻图", 1200, "confirmed")]
     sent, next_run_at = await round_with(seek_ready, recall_state={**recall, "at": time.time() - 900}, features=("dream_seek",), sent_commands=hers)
     assert set(sent) <= {".我的侍妾"} and 500 < next_run_at - time.time() < 700, (sent, next_run_at - time.time())
+
+    # 09-28 04:52 线上实况：丁真人召回清漪，游戏没回包，面板上随行的还是月婵。老逻辑当成「游戏不让换」退避 6 小时，
+    # 退避期间又返回 0，远航任务一觉睡到月婵 13:55 归航，清漪三项全好着闲了 9 小时。
+    # 没回包只是丢了一条：一小时后再试，远航任务到点就醒（而不是南宫婉 5 小时后归航才醒）
+    lost = {"name": "莎儿", "at": time.time() - 300, "cooldown_at": time.time() - 300}
+    sent, next_run_at = await round_with(ready, recall_state=lost, sent_commands=[(".召回侍妾 莎儿", 300, "needs_manual_confirm")])
+    assert sent == [] and abs(next_run_at - (time.time() + 3600)) < 120, (sent, next_run_at - time.time())
+    assert last["recall"]["settled"] is True, last["recall"]
+    # 游戏回了包、面板上还是没换：真不让换，照旧歇 6 小时
+    sent, _ = await round_with(ready, recall_state=lost, sent_commands=[(".召回侍妾 莎儿", 300, "confirmed")])
+    assert sent == [] and abs(last["recall"]["failed_until"] - (time.time() + 6 * 3600)) < 120, (sent, last["recall"])
+    # 退避两小时后到期：睡到那时候再看，不睡到归航
+    backoff = {"name": "莎儿", "at": time.time() - 3600, "settled": True, "failed_until": time.time() + 7200}
+    sent, next_run_at = await round_with(ready, recall_state=backoff)
+    assert sent == [] and abs(next_run_at - (time.time() + 7200)) < 120, (sent, next_run_at - time.time())
 
 
 async def check_requirement_backoff():
@@ -472,43 +489,43 @@ def check_preflight_waits_for_imminent():
 
 
 async def check_chart_puzzle():
-    """随行那位残图四种残纹齐了就 .拼图（09-24 实测远航途中也能拼、只认随行那位）。
+    """随行那位残图四种残纹齐了就 .拼图（09-24 实测远航途中也能拼、只认随行那位）。认最新那张侍妾面板，不认天机阁缓存。
     拼成了半小时内、「仍缺」/没回包 6 小时内不重发；和入梦/代卜错开，免得被游戏吞。"""
-    full = {"cangkun_chart_mulan": 1, "cangkun_chart_gate": 3, "cangkun_chart_jade": 1, "cangkun_chart_taimiao": 1}
-    short = {**full, "cangkun_chart_jade": 0}  # 甲真人 09-24：苍坤 3/4 缺玉匣
-    xutian = {"xutian_chart_north": 1, "xutian_chart_south": 2, "xutian_chart_east": 1, "xutian_chart_west": 1}
     wan = {"name": "南宫婉·月影", "affection": 674}
-    assert roster.attending_has_complete_chart(payload_for({**wan, "cangkun_fragment_bag": full}, []))
-    assert not roster.attending_has_complete_chart(payload_for({**wan, "cangkun_fragment_bag": short}, []))
-    assert roster.attending_has_complete_chart(payload_for({**wan, "xutian_fragment_bag": json.dumps(xutian)}, []))
-    assert not roster.attending_has_complete_chart(payload_for({"name": "银月"}, []))  # 新侍妾整个碎片袋都没有
-    assert not roster.attending_has_complete_chart(payload_for(wan, [{"name": "莎儿", "cangkun_fragment_bag": full}]))  # 藏娇阁那位齐了不算
-    assert not roster.attending_has_complete_chart(
-        {"companion": {**wan, "cangkun_fragment_bag": full}, "companion_status": "居于藏娇阁", "dongfu": {}}
-    )
+
+    def wan_block(charts, status="随行中"):
+        return block(1, "南宫婉·月影", status, kind="红尘道侣", dream="420分钟", heart="500分钟", divination="600分钟",
+                     voyage_line="远航状态: 月殿寻痕航线进行中，剩余约 300 分钟。", charts=charts)
+
+    full, short = "虚天 1/4 | 苍坤 4/4", "虚天 3/4 | 苍坤 3/4"  # 丙真人凌玉灵 09-28 09:12 / 丁真人月婵 10:40
+    sha = block(2, "莎儿", "居于藏娇阁", kind="红尘道侣", dream="1分钟", heart="1分钟", divination="1分钟", charts=full)
+    assert voyage.attending_panel_has_complete_chart(wan_block(full) + FOOTER)
+    assert voyage.attending_panel_has_complete_chart(wan_block("虚天 4/4 | 苍坤 0/4") + FOOTER)
+    assert not voyage.attending_panel_has_complete_chart(wan_block(short) + FOOTER)
+    assert not voyage.attending_panel_has_complete_chart(panel(wan_block(short), sha))  # 藏娇阁那位齐了不算
+    assert voyage.attending_panel_has_complete_chart(panel(wan_block(short, "居于藏娇阁"), sha.replace("居于藏娇阁", "随行中")))
+    assert not voyage.attending_panel_has_complete_chart(wan_block(full, "居于藏娇阁") + FOOTER)  # 没人随行
 
     success = "【苍坤残图·拼合成功】\n侍妾【南宫婉·月影】为你拼齐残图，锁定出苍坤上人洞府外层太妙神禁的薄弱方位。\n你获得：苍坤残图 x1、修为 +505。"
     missing = "虚天残图仍缺：东离残纹、西极残纹。\n苍坤残图仍缺：玉匣残纹。\n请继续使用 .入梦寻图。"
 
-    async def round_with(bag, *, puzzle=None, others=()):
-        """puzzle = (上一条 .拼图 几秒前发的, 回包文本或 None)；others = 之前发过的 (指令, 几秒前, 状态)。
-        返回这两轮新发的指令。"""
+    async def round_with(charts, *, puzzle=None, others=(), panel_age=0):
+        """puzzle = (上一条 .拼图 几秒前发的, 回包文本或 None)；others = 之前发过的 (指令, 几秒前, 状态)；
+        panel_age = 面板是几秒前回的。返回这两轮新发的指令。"""
         with tempfile.TemporaryDirectory() as tmp:
             storage = Storage(Path(tmp) / "t.db")
             storage.init_schema()
             pid = storage.create_profile("甲真人").id
             storage.create_chat_binding(pid, CHAT, bot_username="fanrenxiuxian_bot")
             storage.upsert_companion_auto_task(profile_id=pid, chat_id=CHAT, feature_key="dream_seek", enabled=True, bot_username="fanrenxiuxian_bot")
-            payload = payload_for({
-                **wan, "cangkun_fragment_bag": bag, "last_dream_map_seek_time": iso(NOW - 3600),
-                "voyage": sailing(NOW + 5 * 3600, "月殿寻痕"),
+            payload = payload_for({  # 天机阁缓存没同步到集齐：只看面板
+                **wan, "last_dream_map_seek_time": iso(NOW - 3600), "voyage": sailing(NOW + 5 * 3600, "月殿寻痕"),
             }, [])
             storage.upsert_external_account(pid, ASC_EXTERNAL_PROVIDER, "", "", "connected", "", payload, "")
             say(storage, pid, 700, ".我的侍妾")  # 南宫婉在海上：入梦走不到，拼图照样发
-            say(storage, pid, 701, block(
-                1, "南宫婉·月影", "随行中", kind="红尘道侣", dream="420分钟", heart="500分钟", divination="600分钟",
-                voyage_line="远航状态: 月殿寻痕航线进行中，剩余约 300 分钟。",
-            ) + FOOTER, reply_to=700, bot=True)
+            say(storage, pid, 701, wan_block(charts) + FOOTER, reply_to=700, bot=True)
+            with storage.connect() as conn:
+                conn.execute("update bound_messages set created_at=?, updated_at=?", (time.time() - panel_age,) * 2)
             if puzzle:
                 age, reply = puzzle
                 storage.enqueue_outgoing_command(profile_id=pid, chat_id=CHAT, text=".拼图", bot_username="fanrenxiuxian_bot")
@@ -532,15 +549,19 @@ async def check_chart_puzzle():
 
     assert await round_with(full) == [".拼图"]
     assert await round_with(short) == []
-    assert await round_with(full, puzzle=(600, success)) == []  # 刚拼成，等天机阁刷新
-    assert await round_with(full, puzzle=(1900, success)) == [".拼图"]  # 刷新后还齐（重复藏本够）：接着拼
-    assert await round_with(full, puzzle=(3600, missing)) == []  # 天机阁说齐、游戏说缺：6 小时后再试
+    assert await round_with(full, puzzle=(600, success)) == []  # 刚拼成
+    assert await round_with(full, puzzle=(1900, success)) == [".拼图"]  # 拼完之后的新面板还是 4/4（重复藏本够）：接着拼
+    assert await round_with(full, puzzle=(1900, success), panel_age=2000) == []  # 面板是拼之前的，那张 4/4 已经用掉了
+    assert await round_with(full, puzzle=(3600, missing)) == []  # 面板说齐、游戏说缺：6 小时后再试
     assert await round_with(full, puzzle=(2 * 3600, None)) == []  # 没回包，同上
     assert await round_with(full, puzzle=(7 * 3600, missing)) == [".拼图"]
     assert await round_with(full, others=[(".入梦寻图", 5, "awaiting_confirm")]) == []  # 入梦还在等回包：先不发
-    # 复审指出：刚换过人时天机阁缓存里的随行者可能还是上一位，拼到别人身上只换来「仍缺」和 6 小时退避
-    assert await round_with(full, others=[(".召回侍妾 莎儿", 300, "confirmed")]) == []
-    assert await round_with(full, others=[(".召回侍妾 莎儿", 25 * 60, "confirmed")]) == [".拼图"]
+    # 09-28 丙真人：08:53:59 召回凌玉灵 → 08:55 入梦集齐苍坤 → 08:57 面板 4/4 → 09:06 又被换回藏娇阁。
+    # 老规矩「召回后 20 分钟不拼」把十来分钟的随行窗口整段挡掉；召回回包之后刷的面板就是现在随行的人
+    assert await round_with(full, others=[(".召回侍妾 南宫婉·月影", 180, "confirmed")], panel_age=60) == [".拼图"]
+    # 面板之后又换过人、召回还在等回包：随行的可能已经不是面板上那位，拼到别人身上只换来「仍缺」和 6 小时退避
+    assert await round_with(full, others=[(".召回侍妾 莎儿", 60, "confirmed")], panel_age=180) == []
+    assert await round_with(full, others=[(".召回侍妾 莎儿", 5, "awaiting_confirm")]) == []
     # 起航刚发：挨着发游戏会吞一条
     assert await round_with(full, others=[(".侍妾远航 月殿寻痕", 30, "awaiting_confirm")]) == []
     assert await round_with(full, others=[(".侍妾远航 月殿寻痕", 600, "confirmed")]) == [".拼图"]

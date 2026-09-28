@@ -1,4 +1,4 @@
-"""天机阁 payload 新鲜度判定自检。
+"""天机阁 payload 新鲜度判定自检；按用户名查到的人 telegram_id 得对得上。
 
 updated_at 会被小程序调度器每轮顶新，绝不能拿它当"已同步"的凭据。
 运行：.venv/bin/python tools/test_external_freshness.py
@@ -7,8 +7,11 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app" / "src"))
+from tg_game.clients.asc_client import AscNotFoundError
+from tg_game.services import external_sync
 from tg_game.services.external_sync import (
     get_external_account_touch_time,
     should_keep_external_session_fresh,
@@ -51,5 +54,31 @@ assert (
     )
     is False
 )
+
+# 用户名会换，旧名字空出来可能被别人占：按旧名查到的 telegram_id 对不上就不收，接着试下一个候选
+ME = SimpleNamespace(
+    telegram_user_id="1001", telegram_username="old_name", account_name="@old_name",
+    game_name="测试修士", display_name="测试修士",
+)
+PAGES = {"old_name": {"telegram_id": 2002, "dao_name": "别人"}, "测试修士": {"telegram_id": 1001, "dao_name": "测试修士"}}
+
+
+def fake_get_cultivator(identifier, cookie_text, api_token=""):
+    if identifier not in PAGES:
+        raise AscNotFoundError("未找到该修士")
+    return PAGES[identifier], 200, "", ""
+
+
+with patch.object(external_sync, "get_cultivator", fake_get_cultivator):
+    payload, used, _cookie, _token = external_sync.fetch_cultivator_payload("session=x", ME)
+    assert used == "测试修士" and payload["telegram_id"] == 1001, used
+    del PAGES["测试修士"]
+    try:
+        external_sync.fetch_cultivator_payload("session=x", ME)
+        raise AssertionError("someone else's payload must not be accepted")
+    except AscNotFoundError:
+        pass
+    PAGES["old_name"] = {"dao_name": "测试修士"}  # 天机阁没给 telegram_id：照旧收，不因缺字段误伤
+    assert external_sync.fetch_cultivator_payload("session=x", ME)[1] == "old_name"
 
 print("ok")

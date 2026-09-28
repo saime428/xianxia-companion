@@ -169,8 +169,9 @@ class EventContext:
             me = await self.client.get_me()
         except Exception:
             me = None
-        # 丁真人的 TG 账号没有用户名（get_me().username=None），游戏却按库里的 @demo_alt2 点名：
-        # 只认 get_me 时南陇侯点名过不了这道门，09-25 13:39 没人回，侍妾银月被掳。库里记的名字一起认。
+        # 游戏按它自己库里的名字点名，跟 get_me() 不一定一样：丁真人 09-28 前 TG 账号没设用户名，
+        # 游戏却按 @demo_alt2 点名，只认 get_me 时南陇侯点名过不了这道门，09-25 13:39 没人回，侍妾银月被掳。
+        # 库里记的名字（跟天机阁对齐）一起认。
         names = {
             str(name or "").strip().lstrip("@").lower()
             for name in (

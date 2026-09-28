@@ -93,7 +93,7 @@ def alt(tmp, username="demo_alt", **session):
 
 
 class NoUsernameClient:
-    """丁真人：TG 账号没设用户名，游戏按库里的 @demo_alt2 点名。"""
+    """丁真人 09-28 前：TG 账号没设用户名，游戏按库里的 @demo_alt2 点名。"""
 
     async def get_me(self):
         return SimpleNamespace(id=1000000014, username=None)
