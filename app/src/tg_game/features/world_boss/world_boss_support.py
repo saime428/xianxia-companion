@@ -7,10 +7,10 @@ import json
 import re
 import socket
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from functools import partial
 
 try:
     import httpx
@@ -84,6 +84,14 @@ _HTTP_HEADERS = {
     "Referer": ORIGIN + WEB_PATH,
     "User-Agent": "Mozilla/5.0",
 }
+_HTTP_TRACE_PHASES = {
+    "connect_tcp": "http_connect_ms", "start_tls": "http_tls_ms",
+    "send_request_headers": "http_write_ms", "send_request_body": "http_write_ms",
+    "receive_response_headers": "http_headers_wait_ms", "receive_response_body": "http_body_read_ms",
+}
+_HTTP_TIMING_KEYS = frozenset(_HTTP_TRACE_PHASES.values()) | {
+    "http_pool_dispatch_ms", "http_encode_ms", "http_decode_ms",
+}
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -144,13 +152,32 @@ def _raise_from_http_body(status: int, raw: bytes | str) -> None:
     )
 
 
-def _json_post_with_client(client, origin, path, payload, timeout):
+def _json_post_with_client(client, origin, path, payload, timeout, *, timing=None):
     """POST JSON through an injected or pooled client; never follow redirects."""
     if origin != ORIGIN:
         raise MiniAppBeastError("origin_not_allowed")
     if client is None or httpx is None:
         raise MiniAppBeastError("api_unreachable")
+    encoded_at = time.monotonic()
     body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    post_started_at = time.monotonic()
+    if timing is not None:
+        timing["http_encode_ms"] = round((post_started_at - encoded_at) * 1000, 3)
+    phase_starts = {}
+
+    def record_phase(event, _info):
+        # Never retain trace info: it can contain headers, credentials or sockets.
+        parts = str(event).rsplit(".", 2)
+        if timing is None or len(parts) != 3 or parts[1] not in _HTTP_TRACE_PHASES:
+            return
+        now = time.monotonic()
+        timing.setdefault("http_pool_dispatch_ms", round(max(0, now - post_started_at) * 1000, 3))
+        phase, status = parts[1:]
+        if status == "started":
+            phase_starts[phase] = now
+        elif status in {"complete", "failed"} and phase in phase_starts:
+            key = _HTTP_TRACE_PHASES[phase]
+            timing[key] = round(timing.get(key, 0) + max(0, now - phase_starts.pop(phase)) * 1000, 3)
     request_timeout = max(0.2, min(60.0, float(timeout)))
     try:
         response = client.post(
@@ -158,6 +185,7 @@ def _json_post_with_client(client, origin, path, payload, timeout):
             content=body,
             headers=_HTTP_HEADERS,
             timeout=httpx.Timeout(request_timeout, connect=min(request_timeout, 3.0)),
+            extensions={"trace": record_phase} if timing is not None else {},
         )
     except httpx.TimeoutException as exc:
         raise MiniAppBeastError("api_timeout") from exc
@@ -170,10 +198,14 @@ def _json_post_with_client(client, origin, path, payload, timeout):
         raise MiniAppBeastError("bad_response")
     if response.status_code >= 400:
         _raise_from_http_body(response.status_code, raw)
+    decode_started_at = time.monotonic()
     try:
         return json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeError) as exc:
         raise MiniAppBeastError("bad_response") from exc
+    finally:
+        if timing is not None:
+            timing["http_decode_ms"] = round(max(0, time.monotonic() - decode_started_at) * 1000, 3)
 
 
 def _json_post_urllib(origin, path, payload, timeout):
@@ -209,15 +241,15 @@ def _json_post_urllib(origin, path, payload, timeout):
         raise MiniAppBeastError("bad_response") from exc
 
 
-def _json_post_sync(origin, path, payload, timeout):
+def _json_post_sync(origin, path, payload, timeout, *, timing=None):
     client = _world_boss_http_client()
     if client is not None:
-        return _json_post_with_client(client, origin, path, payload, timeout)
+        return _json_post_with_client(client, origin, path, payload, timeout, timing=timing)
     return _json_post_urllib(origin, path, payload, timeout)
 
 
 async def _post_json(origin, path, payload, timeout, *, post_json=None,
-                     time_critical=False, executor=None):
+                     time_critical=False, executor=None, timing=None):
     miniapp_circuit_preflight(origin, time_critical=time_critical)
     if path not in ENDPOINTS or not isinstance(payload, dict):
         raise MiniAppBeastError("request_not_allowed")
@@ -226,16 +258,31 @@ async def _post_json(origin, path, payload, timeout, *, post_json=None,
         if inspect.isawaitable(result):
             result = await result
     else:
-        result = await asyncio.get_running_loop().run_in_executor(
-            executor,
-            partial(
-                _json_post_sync,
-                origin,
-                path,
-                payload,
-                max(0.2, min(60.0, float(timeout))),
-            ),
-        )
+        worker_times = {}
+        def send():
+            worker_times["started"] = time.monotonic()
+            try:
+                return _json_post_sync(origin, path, payload, max(0.2, min(60.0, float(timeout))), timing=worker_times)
+            finally:
+                worker_times["finished"] = time.monotonic()
+
+        submitted = time.monotonic()
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(executor, send)
+        finally:
+            recorded = worker_times.copy()
+            resumed = time.monotonic()
+            # Copy numeric timings on the event loop only. A cancelled await
+            # may leave the worker running; it must never mutate a saved trace.
+            if timing is not None:
+                timing.update({key: recorded[key] for key in _HTTP_TIMING_KEYS if key in recorded})
+                started = recorded.get("started")
+                finished = recorded.get("finished")
+                if started is not None:
+                    timing["executor_queue_ms"] = round(max(0, started - submitted) * 1000, 3)
+                if finished is not None:
+                    timing["transport_ms"] = round(max(0, finished - started) * 1000, 3)
+                    timing["loop_resume_ms"] = round(max(0, resumed - finished) * 1000, 3)
     if not isinstance(result, dict):
         raise MiniAppBeastError("bad_response")
     if result.get("ok") is not True:

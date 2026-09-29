@@ -1,6 +1,7 @@
 """大号洞府 JSON 字符串 + companion 同时存在时，页面不能丢掉冷却字段。"""
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app" / "src"))
@@ -74,4 +75,17 @@ assert (other["name"], other["status"], other["affection"]) == ("陈巧倩", "�
 assert other["voyage_countdown_target"] > NOW and other["voyage_display"] != "未远航", other
 assert other["heart_tribulation_display"] == "可施展", other
 assert build_companion_view({}, now_ts=NOW)["dream_seek_display"] == "接口未提供"  # 没有侍妾照旧
+
+# 护持在角色的 active_buffs 上，不能从当前随行侍妾取；0、缺失和过期各自保留含义。
+guard = {"taint_shield": 12, "seal_bonus": 8, "morale_bonus": 12,
+         "expiry_time": datetime.fromtimestamp(NOW + 3600, timezone.utc).isoformat()}
+guarded = {**two, "active_buffs": {"companion_zhuimo_trial": guard}}
+guard_text = build_companion_view(guarded, "- 坠魔谷护持: 可用（剩余 900分钟）", now_ts=NOW)["abyss_guard"]
+assert "魔染护持 12、封印起始 +8、士气起始 +12" in guard_text and "有效至" in guard_text and "北京时间" in guard_text
+assert build_companion_view(guarded, now_ts=NOW + 3600)["abyss_guard"] == "已过期"
+guard.update(taint_shield=0, seal_bonus="0", morale_bonus=None, expiry_time="bad date")
+guarded["active_buffs"] = json.dumps({"companion_zhuimo_trial": json.dumps(guard)})
+assert build_companion_view(guarded, now_ts=NOW)["abyss_guard"] == "魔染护持 0、封印起始 +0、士气起始 未提供；有效期未知"
+assert build_companion_view(two, "- 坠魔谷护持: 无", now_ts=NOW)["abyss_guard"] == "无"
+assert build_companion_view(two, now_ts=NOW)["abyss_guard"] == "接口未提供"
 print("ok", view["dream_seek_display"], view["heart_tribulation_display"], view["divination_chain_display"])

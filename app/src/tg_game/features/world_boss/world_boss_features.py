@@ -70,7 +70,7 @@ WORLD_BOSS_TIMEOUT_SECONDS = 20
 # threads behind.  A dozen workers covers the four-account burst while bounding
 # the amount of concurrent upstream pressure.
 WORLD_BOSS_HTTP_WORKERS = 12
-WORLD_BOSS_DIAGNOSTIC_VERSION = 2
+WORLD_BOSS_DIAGNOSTIC_VERSION = 4
 # The production Mini App now gates /begin with Cloudflare Turnstile.  A worker
 # never fabricates a token: after the server reports that verification is
 # required, it queues a short-lived browser handoff and waits for the official
@@ -125,9 +125,8 @@ WORLD_BOSS_CHARGE_TIMEOUT_SECONDS = 1.5
 WORLD_BOSS_REQUEST_LEAD_MAX_MS = 120
 WORLD_BOSS_SCHEDULE_LEAD_MIN_MS = -80
 WORLD_BOSS_SCHEDULE_LEAD_MAX_MS = 200
-# Production accounts are ``profile_N``, not main/sub.  Spread the three
-# concurrent VPS fights so they do not share one millisecond on one uplink.
-WORLD_BOSS_PROFILE_STAGGER_MS = 70
+# Target the same window centre for all three accounts; latency supplies the lead.
+WORLD_BOSS_PROFILE_STAGGER_MS = 0
 # The server timestamps arrival itself and ignores our reported ``elapsedMs`` for
 # the hit verdict. ``deltaMs`` is an absolute value, however, so it cannot by
 # itself tell us whether a request arrived before or after the centre. Compare
@@ -518,6 +517,7 @@ class WorldBossMonitor:
         self._inflight_fingerprints: set[str] = set()
         self._fight_lock = asyncio.Lock()
         self._combat: dict[str, Any] | None = None
+        self._guard_timing: dict[str, Any] = {}
         self._boss_defeated = asyncio.Event()
         self._boss_defeat_reason = ""
         self._boss_defeat_marker: Path | None = None
@@ -676,8 +676,17 @@ class WorldBossMonitor:
         return self.enabled and (bool(check()) if callable(check) else True)
 
     def _check_enabled(self) -> None:
-        if not self._is_enabled():
-            raise _WorldBossDisabledError()
+        started = self.monotonic()
+        try:
+            if not self._is_enabled():
+                raise _WorldBossDisabledError()
+        finally:
+            elapsed = max(0.0, (self.monotonic() - started) * 1000)
+            timing = getattr(self, "_guard_timing", None)
+            if timing is not None:
+                timing["count"] = timing.get("count", 0) + 1
+                timing["total_ms"] = timing.get("total_ms", 0.0) + elapsed
+                timing["max_ms"] = max(timing.get("max_ms", 0.0), elapsed)
 
     def _start_combat(
         self, challenge: dict[str, Any], player: dict[str, Any],
@@ -1233,6 +1242,7 @@ class WorldBossMonitor:
             )
         trace_started_at = self.monotonic()
         if trace is not None:
+            trace.clear()
             trace.update(
                 {
                     "path": "/" + str(path or "").rstrip("/").rsplit("/", 1)[-1],
@@ -1240,7 +1250,9 @@ class WorldBossMonitor:
                 }
             )
         for attempt in range(max(0, retries) + 1):
+            guard_started_at = self.monotonic()
             self._check_enabled()
+            timing = {"guard_ms": round(max(0.0, self.monotonic() - guard_started_at) * 1000, 3)}
             if str(path).endswith(("/hit", "/charge-start")):
                 self._tick_combat()
                 if self._combat_stopped() or self._boss_stop_requested():
@@ -1260,6 +1272,7 @@ class WorldBossMonitor:
                         request_timeout,
                         time_critical=bool(time_critical),
                         executor=self._world_boss_http_executor(),
+                        timing=timing,
                     )
                 else:
                     result = await _post_json(
@@ -1274,6 +1287,7 @@ class WorldBossMonitor:
             except MiniAppBeastError as exc:
                 if trace is not None:
                     attempt_trace = {
+                        **timing,
                         "attempt": attempt + 1,
                         "duration_ms": max(
                             0,
@@ -1299,6 +1313,7 @@ class WorldBossMonitor:
                 if trace is not None:
                     trace["attempts"].append(
                         {
+                            **timing,
                             "attempt": attempt + 1,
                             "duration_ms": max(
                                 0,
@@ -1318,6 +1333,7 @@ class WorldBossMonitor:
                 if trace is not None:
                     trace["attempts"].append(
                         {
+                            **timing,
                             "attempt": attempt + 1,
                             "duration_ms": max(
                                 0,
@@ -1332,6 +1348,19 @@ class WorldBossMonitor:
                         int(round((self.monotonic() - trace_started_at) * 1000)),
                     )
                 return result
+            finally:
+                if trace is not None:
+                    # Shallow numeric fields survive the bounded/redacted
+                    # window log even when nested attempt objects are cut off.
+                    for key, value in timing.items():
+                        trace[key] = round(trace.get(key, 0.0) + value, 3)
+                    attempts = trace.get("attempts") or []
+                    if attempts:
+                        last = attempts[-1]
+                        trace.update(attempt_count=len(attempts),
+                                     last_duration_ms=last["duration_ms"],
+                                     last_http_status=last["http_status"],
+                                     last_error=last.get("error", ""))
         raise MiniAppBeastError("request_failed")
 
     async def _start_request(
@@ -2841,6 +2870,15 @@ class WorldBossMonitor:
             # second upstream request (or put a credential in the log).
             self.log.warning("World Boss verification receipt failed: %s", _error_code(exc))
 
+    @classmethod
+    def _response_resume_ms(cls, attempt: dict[str, Any]) -> float:
+        """Local post-response wait is neither network RTT nor server time."""
+        lag = cls._finite_ms(attempt.get("loop_resume_ms"))
+        duration = cls._finite_ms(attempt.get("duration_ms"))
+        if lag is None or duration is None or duration < 0 or not 0 <= lag <= duration + 1:
+            return 0.0
+        return lag
+
     async def _begin_with_turnstile(
         self,
         entry: WorldBossEntry,
@@ -2906,7 +2944,7 @@ class WorldBossMonitor:
                             continue
                         duration = attempt.get("duration_ms")
                         if isinstance(duration, (int, float)) and math.isfinite(duration) and duration > 0:
-                            pre_verification_rtts.append(int(round(duration)))
+                            pre_verification_rtts.append(max(0, int(round(duration - self._response_resume_ms(attempt)))))
                 all_attempts.extend(
                     item
                     for item in request_trace.get("attempts", [])
@@ -3015,17 +3053,19 @@ class WorldBossMonitor:
                 successful_attempt_ms = max(
                     0, int(round((response_received_at - request_started_at) * 1000)),
                 )
+                response_resume_ms = 0.0
                 for attempt in reversed(request_trace.get("attempts", [])):
                     if isinstance(attempt, dict) and attempt.get("ok") is True:
                         duration = attempt.get("duration_ms")
                         if isinstance(duration, (int, float)) and math.isfinite(duration) and duration >= 0:
                             successful_attempt_ms = int(round(duration))
+                        response_resume_ms = self._response_resume_ms(attempt)
                         break
                 # Siteverify can add seconds of server work before startsInMs
                 # is generated. Keep that duration for diagnostics, but use the
                 # faster response from this same endpoint before verification
                 # as the network reference. Browser wait is excluded above too.
-                clock_rtt_ms = successful_attempt_ms
+                clock_rtt_ms = max(0, int(round(successful_attempt_ms - response_resume_ms)))
                 clock_rtt_source = "successful_begin"
                 if using_turnstile and pre_verification_rtts:
                     reference_ms = min(pre_verification_rtts)
@@ -3046,7 +3086,11 @@ class WorldBossMonitor:
                             "successful_attempt_ms": successful_attempt_ms,
                             "clock_rtt_ms": clock_rtt_ms,
                             "clock_rtt_source": clock_rtt_source,
-                            "response_received_monotonic": response_received_at,
+                            "response_resume_ms": round(response_resume_ms, 3),
+                            # Keep the HTTP completion anchor, not the coroutine's
+                            # later wakeup. Remove the same wait from RTT above to
+                            # avoid subtracting half of it a second time.
+                            "response_received_monotonic": response_received_at - response_resume_ms / 1000.0,
                         }
                     )
                 return result
@@ -3064,6 +3108,7 @@ class WorldBossMonitor:
         identity: str = WORLD_BOSS_IDENTITY,
     ) -> dict[str, Any]:
         challenge = payload.get("challenge") or {}
+        self._guard_timing = {}
         self._prepare_boss_lifecycle(entry)
         if self._boss_stop_requested():
             # Another account may have finished this exact event while this
@@ -3275,6 +3320,7 @@ class WorldBossMonitor:
         challenge_diagnostics = _diagnostic_value(challenge_profile)
         diagnostics = {
             "version": WORLD_BOSS_DIAGNOSTIC_VERSION,
+            "guard_checks": {key: round(value, 3) for key, value in self._guard_timing.items()},
             "recorded_at": _now_text(),
             "strategy": {
                 "stance": WORLD_BOSS_STANCE,

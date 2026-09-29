@@ -73,6 +73,8 @@ async def main():
             # 新 Storage 模拟进程重启；关闭发言后也会撤回已登记消息。
             await ga.tick(client, Storage(Path(storage.path)), profile.id, 123)
             assert deleted == [1] and len(sent) == 1
+            saved = ga.load_state(Storage(Path(storage.path)), profile.id)
+            assert saved["last_sent_at"] == clock[0] - 91 and saved["last_text"] == sent[0][1], "关闭、重启、撤回后保留最近发言"
 
             # 数据中即使出现别人的消息或其他账号遗留，也绝不删除。
             messages[99] = SimpleNamespace(id=99, sender_id=999)
@@ -177,10 +179,14 @@ async def main():
             page = (Path(__file__).resolve().parent.parent / "app/assets/templates/modules/other.html").read_text(encoding="utf-8")
             card = page[page.index('    <div class="detail-card">'):page.index('    <div class="detail-card">', page.index('    <div class="detail-card">') + 1)]
             template = Environment(autoescape=True).from_string(card)
-            html = template.render(group_activity_task={}, command_chat_ready=False, format_timestamp=str)
+            html = template.render(group_activity_task={}, group_activity_state={}, command_chat_ready=False, format_timestamp=str)
             assert '开启自动群聊骚话' in html and 'disabled' in html
-            html = template.render(group_activity_task={'enabled':1,'next_run_at':clock[0]}, command_chat_ready=True, format_timestamp=str)
+            assert '尚未发言' in html and '<span>发言内容</span><strong>-</strong>' in html
+            html = template.render(group_activity_task={'enabled':1,'next_run_at':clock[0]}, group_activity_state=saved, command_chat_ready=True, format_timestamp=lambda ts: datetime.fromtimestamp(ts, ga.BEIJING).strftime('%Y-%m-%d %H:%M:%S'))
             assert '关闭自动群聊骚话' in html and 'disabled' not in html
+            assert '2026-09-28 10:00:00' in html and sent[0][1] in html
+            html = template.render(group_activity_task={}, group_activity_state={'last_sent_at': saved['last_sent_at'], 'last_text': '<b>道友 & 我</b>'}, command_chat_ready=True, format_timestamp=str)
+            assert str(saved['last_sent_at']) in html and '&lt;b&gt;道友 &amp; 我&lt;/b&gt;' in html, "关闭后仍显示记录，正文按纯文本转义"
     print("group activity: ok")
 
 

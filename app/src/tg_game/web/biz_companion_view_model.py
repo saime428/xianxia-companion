@@ -34,6 +34,7 @@ from tg_game.web.biz_web_display_formatting import (
     format_datetime_display,
     parse_chinese_duration_seconds,
     parse_iso_datetime,
+    parse_optional_int,
 )
 
 
@@ -302,6 +303,21 @@ def build_companion_view(
     if heart_demon_value is None:
         heart_demon_value = behavior_metrics.get("companion_heart_demon_value")
     now = _now_ts(now_ts)
+    guard = coerce_json_dict(
+        coerce_json_dict((payload or {}).get("active_buffs")).get("companion_zhuimo_trial")
+    )
+    if guard:
+        expiry = parse_iso_datetime(guard.get("expiry_time"))
+        if expiry and expiry.timestamp() <= now:
+            abyss_guard_text = "已过期"
+        else:
+            details = []
+            for key, label in (("taint_shield", "魔染护持"), ("seal_bonus", "封印起始"), ("morale_bonus", "士气起始")):
+                value = parse_optional_int(str(guard.get(key)))
+                value_text = "未提供" if value is None else str(value) if key == "taint_shield" else f"{value:+d}"
+                details.append(f"{label} {value_text}")
+            validity = f"有效至 {format_datetime_display(guard['expiry_time'])}（北京时间）" if expiry else "有效期未知"
+            abyss_guard_text = "、".join(details) + f"；{validity}"
     # 两名侍妾各有各的远航：先信天机阁里她自己的；.远航状态 的回包只说得清最近起航的那位，
     # 说的要是另一位（09-19 丁真人：绾绾的卡片上挂着陈巧倩的归航倒计时）就不能算她的
     voyage_state = build_payload_voyage_state(companion_payload, now_ts=now)

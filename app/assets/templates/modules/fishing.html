@@ -33,6 +33,7 @@
             <p>钓鱼状态</p>
             <h2>鱼篓与鱼讯</h2>
         </div>
+        <p class="muted">今日竿数、钓术和鱼讯来自垂钓或鱼篓记录，天机阁人物接口未提供这些字段。</p>
         <div class="stack-list compact-stack">
             <div class="kv-row"><span>当前任务</span><strong style="color: {% if fishing_state.active %}var(--success){% else %}var(--text-muted){% endif %};">{{ '执行中' if fishing_state.active else '空闲' }}</strong></div>
             <div class="kv-row"><span>当前状态</span><strong>{{ fishing_state.state_label }}</strong></div>
@@ -59,6 +60,7 @@
             <p>鱼饵</p>
             <h2>当前库存</h2>
         </div>
+        <p class="muted">{{ fishing_state.inventory_source }} · {{ fishing_state.inventory_updated_display }}</p>
         {% if fishing_state.baits %}
         <div class="stack-list compact-stack">
             {% for name, count in fishing_state.baits %}
@@ -66,7 +68,7 @@
             {% endfor %}
         </div>
         {% else %}
-        <p class="muted">暂无鱼饵记录，先刷新鱼篓。</p>
+        <p class="muted">{{ '当前没有鱼饵库存。' if fishing_state.inventory_source == '天机阁' else '暂无鱼饵记录，先更新天机数据。' }}</p>
         {% endif %}
         {% if fishing_state.nest_baits %}
         <div class="section-header compact top-gap">
@@ -86,6 +88,7 @@
             <p>鱼获</p>
             <h2>鱼篓清单</h2>
         </div>
+        <p class="muted">{{ fishing_state.inventory_source }} · {{ fishing_state.inventory_updated_display }}</p>
         {% if fishing_state.catches %}
         <div class="stack-list compact-stack">
             {% for name, count in fishing_state.catches %}
@@ -93,7 +96,7 @@
             {% endfor %}
         </div>
         {% else %}
-        <p class="muted">暂无鱼获记录，先刷新鱼篓。</p>
+        <p class="muted">{{ '当前没有鱼类库存。' if fishing_state.inventory_source == '天机阁' else '暂无鱼获记录，先更新天机数据。' }}</p>
         {% endif %}
     </div>
 </section>

@@ -11,6 +11,8 @@
         <div class="stack-list compact-stack">
             <div class="kv-row"><span>状态</span><strong>{{ '已开启' if group_activity_task.enabled else '已关闭' }}</strong></div>
             <div class="kv-row"><span>下次发言</span><strong>{% if group_activity_task.enabled and group_activity_task.next_run_at %}{{ format_timestamp(group_activity_task.next_run_at) }}{% else %}-{% endif %}</strong></div>
+            <div class="kv-row"><span>最近发言</span><strong>{% if group_activity_state.last_sent_at %}{{ format_timestamp(group_activity_state.last_sent_at) }}{% else %}尚未发言{% endif %}</strong></div>
+            <div class="kv-row"><span>发言内容</span><strong>{{ group_activity_state.last_text or '-' }}</strong></div>
         </div>
         <form method="post" action="/runtime/group-activity/toggle" class="action-row top-gap">
             <button type="submit" class="inline-button auto-toggle-button{% if group_activity_task.enabled %} active{% endif %}" {% if not command_chat_ready %}disabled{% endif %}>{{ '关闭自动群聊骚话' if group_activity_task.enabled else '开启自动群聊骚话' }}</button>
@@ -301,6 +303,7 @@
                 <h2>天机试炼台</h2>
                 <div class="tg-minigame-notice">TG-MINIGAME：仅可在 Telegram 小程序内进行</div>
             </div>
+            <p class="muted">当前天机阁人物接口未提供残痕余额和兑换清单；以下保留最近查询记录，不会随天机更新自动发群指令。</p>
             <div class="mulan-daily-layout">
                 <section class="mulan-daily-section">
                     <h3 class="mulan-daily-section-title">残痕状态</h3>
@@ -422,6 +425,7 @@
                 <p>慕兰烽烟</p>
                 <h2>每日边境军功</h2>
             </div>
+            <p class="muted">军功、连胜等战绩随天机更新同步；今日军议和兑换清单来自群查询记录。</p>
             <div class="mulan-daily-layout">
                 <section class="mulan-daily-section">
                     <h3 class="mulan-daily-section-title">边境状态</h3>
@@ -430,8 +434,8 @@
                         <div class="mulan-stat"><span>{{ row.label }}</span><strong>{{ row.value }}</strong></div>
                         {% endfor %}
                         <div class="mulan-stat mulan-stat-wide"><span>今日推荐</span><strong>{{ mulan_state.recommendation.title }}</strong></div>
-                        {% if mulan_state.panel_time %}
-                        <div class="mulan-stat mulan-stat-wide"><span>更新时间</span><strong>{{ mulan_state.panel_time }}</strong></div>
+                        {% if mulan_state.data_time %}
+                        <div class="mulan-stat mulan-stat-wide"><span>{{ mulan_state.data_source }}更新</span><strong>{{ mulan_state.data_time }}</strong></div>
                         {% endif %}
                     </div>
                 </section>
@@ -450,7 +454,7 @@
                     {% endif %}
                     {% if mulan_state.daily_council %}
                     <div class="mulan-intel-block">
-                        <span class="mulan-intel-label">今日军议</span>
+                        <span class="mulan-intel-label">军议记录{% if mulan_state.panel_time %}<em>{{ mulan_state.panel_time }}</em>{% endif %}</span>
                         <ul class="mulan-daily-list">
                             {% for line in mulan_state.daily_council %}
                             <li>{{ line }}</li>

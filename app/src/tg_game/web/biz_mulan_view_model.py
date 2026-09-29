@@ -3,6 +3,8 @@ from typing import Optional
 import biz_fanren_game
 from tg_game.features import biz_mulan_feature as mulan_feature
 from tg_game.web.biz_web_display_formatting import SHANGHAI_TZ
+from tg_game.web.biz_web_display_formatting import coerce_json_dict
+from tg_game.storage import ASC_EXTERNAL_PROVIDER
 
 def mulan_message_matches_thread(message: dict, thread_id: Optional[int]) -> bool:
     if not thread_id:
@@ -137,6 +139,7 @@ def build_mulan_state(
         return state
 
     panel_ts = 0.0
+    result_ts = 0.0
     panel_message = find_latest_mulan_message(
         storage,
         profile.id,
@@ -196,6 +199,25 @@ def build_mulan_state(
                     .strftime("%Y-%m-%d")
                 )
             mulan_feature.refresh_mulan_summary(state)
+
+    account = storage.get_external_account(profile.id, ASC_EXTERNAL_PROVIDER) or {}
+    payload = coerce_json_dict(account.get("me_json"))
+    mulan = coerce_json_dict(coerce_json_dict(payload.get("active_buffs")).get("mulan_smoke"))
+    tianji_ts = float(account.get("last_verified_at") or 0)
+    state.update(data_source="群回包", data_time=state["panel_time"])
+    if mulan and tianji_ts >= max(panel_ts, result_ts):
+        for field, key, suffix in (
+            ("military_merit", "total_merit", ""), ("streak", "streak", " 天"),
+            ("matched_orders", "matched_orders", " 次"), ("risky_success", "danger_wins", " 次"),
+            ("latest_support", "last_date", ""),
+        ):
+            if mulan.get(key) is not None:
+                state[field] = str(mulan[key]) + suffix
+        if mulan.get("last_date"):
+            today = datetime.now(SHANGHAI_TZ).date().isoformat()
+            state["status"] = "已支援" if str(mulan["last_date"]) == today else "未支援"
+        state.update(available=True, data_source="天机阁", data_time=formatter(tianji_ts))
+        mulan_feature.refresh_mulan_summary(state)
 
     command_sender_text = str(
         getattr(command_chat, "telegram_user_id", "")

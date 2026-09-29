@@ -855,7 +855,7 @@ def create_app() -> FastAPI:
             return None
         return _build_tianji_login_redirect()
 
-    def _connect_external_cookie(profile_id: int, cookie_text: str) -> None:
+    def _connect_external_cookie(profile_id: int, cookie_text: str, *, refresh_sect: bool = True) -> None:
         profile = storage.get_profile(profile_id)
         if not profile:
             raise RuntimeError("Profile not found")
@@ -908,7 +908,8 @@ def create_app() -> FastAPI:
                     binding.chat_id,
                     exc,
                 )
-        storage.request_sect_refresh(profile_id, cooldown_seconds=0)
+        if refresh_sect:
+            storage.request_sect_refresh(profile_id, cooldown_seconds=0)
 
     def _get_profile_refresh_cookie(profile_id: int) -> str:
         external_account = storage.get_external_account(profile_id, ASC_PROVIDER) or {}
@@ -933,7 +934,7 @@ def create_app() -> FastAPI:
         if not cookie_text:
             return False, "missing_cookie"
         try:
-            _connect_external_cookie(profile.id, cookie_text)
+            _connect_external_cookie(profile.id, cookie_text, refresh_sect=False)
             return True, ""
         except Exception as exc:
             mark_external_account_failure(
@@ -2684,6 +2685,7 @@ def create_app() -> FastAPI:
                         active_profile=active_profile,
                         command_chat=command_chat,
                         build_fishing_view=_build_fishing_view,
+                        payload=payload,
                     )
                     fishing_state = fishing_module_state["fishing_state"]
                 if module_key == "small_world":
@@ -2892,6 +2894,7 @@ def create_app() -> FastAPI:
             "wild_experience_state": wild_experience_state,
             "world_boss_state": world_boss_runtime.build_view(storage, active_profile.id if active_profile else None),
             "group_activity_task": (group_activity.get_task(storage, active_profile.id) or {}) if active_profile else {},
+            "group_activity_state": group_activity.load_state(storage, active_profile.id) if active_profile else {},
             "companion_heart_tribulation_state": companion_heart_tribulation_state,
                 **other_module_state,
                 "stock_state": stock_state,
@@ -3170,7 +3173,9 @@ def create_app() -> FastAPI:
         return RedirectResponse(url="/profile", status_code=303)
 
     @application.post("/profiles/{profile_id}/refresh-info")
-    async def refresh_profile_info(profile_id: int) -> RedirectResponse:
+    async def refresh_profile_info(request: Request, profile_id: int) -> RedirectResponse:
+        if not _profile_belongs_to_session(request, profile_id):
+            raise HTTPException(status_code=403, detail="Profile not available in current session")
         profile = storage.get_profile(profile_id)
         if not profile:
             raise HTTPException(status_code=404, detail="Profile not found")
@@ -3181,7 +3186,7 @@ def create_app() -> FastAPI:
             return expired_redirect
         if not _get_profile_refresh_cookie(profile_id):
             return RedirectResponse(url="/profile", status_code=303)
-        _refresh_profile_external_info(profile)
+        await asyncio.to_thread(_refresh_profile_external_info, profile)
         return RedirectResponse(url="/profile", status_code=303)
 
     @application.post("/profiles/refresh-all-info")
@@ -3194,7 +3199,7 @@ def create_app() -> FastAPI:
         failed = 0
         skipped = 0
         for profile in profiles:
-            ok, message = _refresh_profile_external_info(profile)
+            ok, message = await asyncio.to_thread(_refresh_profile_external_info, profile)
             if ok:
                 refreshed += 1
             elif message in {"missing_profile", "telegram_unverified", "missing_cookie"}:

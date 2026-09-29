@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app" / "src"))
 from tg_game.features.world_boss import world_boss_features as boss
+from tg_game.features.world_boss import world_boss_support as support
 from tg_game.features.world_boss.world_boss_turnstile import WorldBossTurnstileBroker
 import check_world_boss_event as acceptance
 
@@ -143,9 +144,9 @@ async def main():
         assert monitor._hit_offset_ms({"perfectMs": 210}) == 0
         monitor.account = "profile_3"
         assert monitor._account_offset_slot() == 1
-        assert monitor._hit_offset_ms({"perfectMs": 210}) == 70
+        assert monitor._hit_offset_ms({"perfectMs": 210}) == 0
         monitor.account = "profile_4"
-        assert monitor._hit_offset_ms({"perfectMs": 210}) == 140
+        assert monitor._hit_offset_ms({"perfectMs": 210}) == 0
         monitor.account = "offline"
         assert monitor._hit_offset_ms({"perfectMs": 210}) == 0
         monitor._reset_drift()
@@ -190,6 +191,13 @@ async def main():
         assert server.proof["playerHp"] == 100 and server.proof["dead"] is False
         assert server.proof["clientStats"]["hits"] == 3
         assert server.proof["clientStats"]["bestCombo"] == 3
+        assert result["diagnostics"]["version"] == 4
+        assert result["diagnostics"]["guard_checks"]["count"] > 0
+        for reveal in result["diagnostics"]["window_reveal"]["log"]:
+            trace = reveal["request"]
+            assert trace["attempt_count"] == 1 and trace["last_http_status"] == 200
+            assert isinstance(trace["last_duration_ms"], (int, float))
+            assert trace["guard_ms"] >= 0
         for hit in result["diagnostics"]["hits"]:
             assert hit["actual_elapsed_ms"] == hit["sent_elapsed_ms"]
         assert all(action["t"] <= server.proof["durationMs"] for action in server.proof["actions"])
@@ -222,6 +230,7 @@ async def main():
             finish = result["diagnostics"]["finish"]
             assert finish["request"]["path"] == "/finish" and finish["error"] == error_code
             assert finish["request"]["attempts"][0]["http_status"] == http_status
+            assert finish["request"]["last_http_status"] == http_status
             evidence = acceptance.identity_evidence(result, 1)
             assert evidence["begin_accepted"] is True and evidence["accepted_hit_count"] == 1
             assert evidence["settlement_confirmed"] is False
@@ -279,6 +288,33 @@ async def main():
         diagnostic = boss._diagnostic_value({"chargeTicket": "private", "message": "token=private qyz_private"})
         assert "private" not in str(diagnostic)
         assert "private" not in str(boss._diagnostic_value({"a": {"b": {"c": {"d": {"token": "private"}}}}}))
+
+        # Production-shaped window logging: flattened timings survive while
+        # nested attempts/credentials retain their existing truncation rules.
+        trace = {"executor_queue_ms": 2, "transport_ms": 5, "loop_resume_ms": 3,
+                 "http_headers_wait_ms": 4,
+                 "attempts": [{"duration_ms": 10, "token": "private"}], "token": "private"}
+        saved = boss._diagnostic_value([{"request": trace}])[0]["request"]
+        assert all(saved[key] == trace[key] for key in ("executor_queue_ms", "transport_ms", "loop_resume_ms", "http_headers_wait_ms"))
+        assert saved["attempts"] == ["<truncated>"] and "private" not in str(saved)
+
+        # Test the real monitor -> executor -> transport wiring as well as the
+        # sanitizer, so forgetting to pass timing to the transport fails here.
+        real_monitor, _ = monitor_for(root, Clock())
+        original_post = support._json_post_sync
+        support._json_post_sync = lambda *args, **kwargs: {"ok": True}
+        real_monitor.post_json = None
+        try:
+            request_trace = {"transport_ms": 999999, "stale": "private"}
+            await real_monitor._request(support.ORIGIN, support.API_PREFIX + "window", {}, trace=request_trace)
+            saved_trace = boss._diagnostic_value([{"request": request_trace}])[0]["request"]
+            for key in ("executor_queue_ms", "transport_ms", "loop_resume_ms", "guard_ms"):
+                assert 0 <= saved_trace[key] < 999999, saved_trace
+            assert saved_trace["attempt_count"] == 1 and "private" not in str(saved_trace)
+        finally:
+            support._json_post_sync = original_post
+            if real_monitor._http_executor:
+                real_monitor._http_executor.shutdown(wait=True)
 
         broker = monitor.turnstile_broker
         create = broker.create_request

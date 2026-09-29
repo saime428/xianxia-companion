@@ -4,13 +4,17 @@ Run: python -B tools/test_world_boss_runtime.py
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import os
+import sqlite3
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app" / "src"))
 
@@ -67,8 +71,130 @@ def main():
         assert not actor.is_world_boss_enabled(), "A replaced account must not keep using the old Telegram client"
         storage.bind_profile_telegram_account(profile.id, "101", "boss_test", telegram_session_name="unused")
 
+        # Exercise the real getter/ClosingConnection contract, including a
+        # separate writer committing a stop between guard reads.
+        actor = runtime._actor(None, storage, profile.id, SimpleNamespace(id=101))
+        original_connect = storage.connect
+        connections, queries = [], []
+        hook = [None]
+
+        def observe(sql):
+            queries.append(sql)
+            if hook[0] and hook[0][0] in sql:
+                _, key, value = hook[0]
+                hook[0] = None
+                with original_connect() as writer:
+                    writer.execute("UPDATE app_runtime_state SET value=? WHERE key=?", (value, key))
+
+        def counted_connect():
+            conn = original_connect()
+            conn.set_trace_callback(observe)
+            connections.append(conn)
+            return conn
+
+        def assert_closed():
+            assert len(connections) == 1, len(connections)
+            try:
+                connections[0].execute("SELECT 1")
+                raise AssertionError("Guard leaked its connection")
+            except sqlite3.ProgrammingError:
+                pass
+            assert not any(sql.strip().upper() == "BEGIN" for sql in queries)
+
+        storage.connect = counted_connect
+        try:
+            assert actor.is_world_boss_enabled()
+            assert_closed()
+            assert storage.connect is counted_connect
+            for key, reset, stopped in (
+                ("automation_paused_at", "0", "1"),
+                (f"profile_rebirth:{profile.id}", "{}", '{"active":true}'),
+                (f"telegram_network_pause_until:{profile.id}", "0", str(time.time() + 60)),
+            ):
+                with original_connect() as writer:
+                    writer.execute("UPDATE app_runtime_state SET value=? WHERE key=?", (reset, key))
+                connections.clear()
+                queries.clear()
+                hook[0] = (f"'{key}'", key, stopped)
+                assert not actor.is_world_boss_enabled(), f"Missed mid-check stop: {key}"
+                assert hook[0] is None
+                assert_closed()
+                connections.clear()
+                assert not actor.is_world_boss_enabled(), "The next check reused stale state"
+                assert_closed()
+                with original_connect() as writer:
+                    writer.execute("UPDATE app_runtime_state SET value=? WHERE key=?", (reset, key))
+
+            original_get_profile = storage.get_profile
+            def broken_get_profile(_):
+                raise RuntimeError("offline read failure")
+            storage.get_profile = broken_get_profile
+            connections.clear()
+            try:
+                actor.is_world_boss_enabled()
+                raise AssertionError("Read failure was ignored")
+            except RuntimeError as exc:
+                assert str(exc) == "offline read failure"
+            finally:
+                storage.get_profile = original_get_profile
+            assert_closed()
+        finally:
+            storage.connect = original_connect
+        storage.set_runtime_state("offline_guard_check", "write still allowed")
+        assert actor.is_world_boss_enabled()
+
         async def checks():
             calls = []
+
+            # Actual executor boundary, injected transport: no network. The
+            # deterministic clock makes queue/transport/resume attribution exact.
+            original_post, original_time = support._json_post_sync, support.time
+            try:
+                for fails in (False, True):
+                    ticks = iter((100.0, 102.0, 107.0, 110.0))
+                    support.time = SimpleNamespace(monotonic=lambda: next(ticks))
+                    def transport(*args, timing=None):
+                        timing["http_headers_wait_ms"] = 4000.0
+                        if fails:
+                            raise support.MiniAppBeastError("server_error", 503)
+                        return {"ok": True}
+                    support._json_post_sync = transport
+                    timing = {}
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        try:
+                            result = await support._post_json(support.ORIGIN, support.API_PREFIX + "window",
+                                                              {}, 1, executor=executor, timing=timing)
+                            assert not fails and result["ok"]
+                        except support.MiniAppBeastError as exc:
+                            assert fails and exc.code == "server_error"
+                    assert timing == {"executor_queue_ms": 2000.0, "transport_ms": 5000.0,
+                                      "loop_resume_ms": 3000.0, "http_headers_wait_ms": 4000.0}, timing
+
+                support.time = original_time
+                started, release = threading.Event(), threading.Event()
+                def delayed_transport(*args, timing=None):
+                    started.set()
+                    assert release.wait(3)
+                    timing["http_headers_wait_ms"] = 500
+                    return {"ok": True}
+                support._json_post_sync = delayed_transport
+                timing = {}
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    task = asyncio.create_task(support._post_json(
+                        support.ORIGIN, support.API_PREFIX + "window", {}, 1,
+                        executor=executor, timing=timing))
+                    try:
+                        assert await asyncio.to_thread(started.wait, 2)
+                        task.cancel()
+                        result = await asyncio.gather(task, return_exceptions=True)
+                        assert isinstance(result[0], asyncio.CancelledError)
+                        frozen = dict(timing)
+                        assert "transport_ms" not in frozen and "loop_resume_ms" not in frozen
+                    finally:
+                        release.set()
+                assert timing == frozen, "A cancelled worker changed the saved diagnostics"
+            finally:
+                support._json_post_sync, support.time = original_post, original_time
 
             async def fake_post(origin, path, payload, timeout):
                 calls.append(path)
@@ -126,6 +252,35 @@ def main():
                         assert exc.code == "origin_not_allowed"
                 finally:
                     pooled.close()
+                # httpcore's trace hook is per request. Keep only stage durations,
+                # including failed stages; never retain the supplied trace info.
+                for fail_headers in (False, True):
+                    elapsed, timing = [0.0], {}
+                    def traced_handler(request):
+                        callback = request.extensions["trace"]
+                        elapsed[0] += .007
+                        for phase, duration in (("connect_tcp", .003), ("start_tls", .005),
+                                                ("send_request_headers", .001), ("send_request_body", .002),
+                                                ("receive_response_headers", .4), ("receive_response_body", .01)):
+                            prefix = "connection" if phase in {"connect_tcp", "start_tls"} else "http11"
+                            callback(f"{prefix}.{phase}.started", {"token": "private"})
+                            elapsed[0] += duration
+                            failed = fail_headers and phase == "receive_response_headers"
+                            callback(f"{prefix}.{phase}.{'failed' if failed else 'complete'}", {"cookie": "private"})
+                            if failed:
+                                raise httpx.ReadTimeout("offline timeout")
+                        return httpx.Response(200, json={"ok": True})
+                    with httpx.Client(transport=httpx.MockTransport(traced_handler)) as client:
+                        with patch.object(support, "time", SimpleNamespace(monotonic=lambda: elapsed[0])):
+                            try:
+                                support._json_post_with_client(client, support.ORIGIN, support.API_PREFIX + "window", {}, 1, timing=timing)
+                                assert not fail_headers
+                            except support.MiniAppBeastError as exc:
+                                assert fail_headers and exc.code == "api_timeout"
+                    assert timing["http_pool_dispatch_ms"] == 7 and timing["http_connect_ms"] == 3
+                    assert timing["http_tls_ms"] == 5 and timing["http_write_ms"] == 3
+                    assert timing["http_headers_wait_ms"] == 400 and "private" not in str(timing)
+                    assert ("http_body_read_ms" in timing) is not fail_headers
             try:
                 await support._post_json(support.ORIGIN, support.API_PREFIX + "finish", {}, 5,
                                          post_json=lambda *args: {"ok": "true"})

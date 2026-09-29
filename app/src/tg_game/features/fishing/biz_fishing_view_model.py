@@ -49,7 +49,9 @@ def _sorted_items(value: object) -> list[tuple]:
     return sorted(value.items(), key=lambda item: item[0]) if isinstance(value, dict) else []
 
 
-def build_fishing_view(raw_session: Optional[dict], daily_task: Optional[dict] = None, payload: Optional[dict] = None) -> dict:
+def build_fishing_view(raw_session: Optional[dict], daily_task: Optional[dict] = None, payload: Optional[dict] = None, *, payload_updated_at: float = 0, game_items: Optional[dict] = None) -> dict:
+    # web 包会反向导入本模块，格式化工具延迟到渲染时加载。
+    from tg_game.web.biz_web_display_formatting import coerce_json_dict
     session = raw_session or {}
     rod_info = biz_fishing_game.fishing_rod_from_inventory(payload)
     task = daily_task or {}
@@ -95,6 +97,21 @@ def build_fishing_view(raw_session: Optional[dict], daily_task: Optional[dict] =
     # 会话里的"今日竿数"只在每日自动跑完（默认 05:30）才刷新，零点到那之前页面还是昨天的数——
     # 过了当天就明说，别让 5/5 看起来像没更新。
     updated_at = _float_value(session.get("updated_at")) or _float_value(session.get("last_action_at"))
+    catches, baits = _sorted_items(session.get("catches")), _sorted_items(session.get("baits"))
+    materials = coerce_json_dict((payload or {}).get("inventory")).get("materials")
+    inventory_from_tianji = isinstance(materials, dict) and payload_updated_at >= updated_at
+    if inventory_from_tianji:
+        catches, baits = [], []
+        for item_id, count in materials.items():
+            if _int_value(count) <= 0:
+                continue
+            name = str(((game_items or {}).get(item_id) or {}).get("name") or item_id)
+            if item_id.startswith("mat_fish_") and item_id not in {"mat_fish_meat", "mat_fish_scale"}:
+                catches.append((name, _int_value(count)))
+            elif item_id.startswith("item_fishing_bait_"):
+                baits.append((name, _int_value(count)))
+        catches.sort()
+        baits.sort()
     is_today = pagoda_auto.is_same_local_day(updated_at, time.time())
     state_label = FISHING_STATE_LABELS.get(state, state)
     daily_text = f"{daily_count}/{daily_limit}"
@@ -135,9 +152,11 @@ def build_fishing_view(raw_session: Optional[dict], daily_task: Optional[dict] =
         "rod_text": str(rod_info.get("rod_text") or "").strip() or _session_text(session, "rod_text", "-"),
         "skill_text": _session_text(session, "skill_text", "-"),
         "current_nest": _session_text(session, "current_nest", "无"),
-        "baits": _sorted_items(session.get("baits")),
+        "baits": baits,
         "nest_baits": _sorted_items(session.get("nest_baits")),
-        "catches": _sorted_items(session.get("catches")),
+        "catches": catches,
+        "inventory_source": "天机阁" if inventory_from_tianji else "鱼篓回包/垂钓记录",
+        "inventory_updated_display": biz_fanren_game.format_timestamp(payload_updated_at if inventory_from_tianji else updated_at),
         "last_fish_name": _session_text(session, "last_fish_name", "-"),
         "last_result_text": last_result_text,
         "canary_passed": canary_passed,

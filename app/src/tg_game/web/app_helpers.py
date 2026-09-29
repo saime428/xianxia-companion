@@ -1397,9 +1397,10 @@ def _build_divination_batch_view(raw_batch: Optional[dict]) -> dict:
 
 
 def _build_fishing_view(
-    raw_session: Optional[dict], daily_task: Optional[dict] = None, payload: Optional[dict] = None
+    raw_session: Optional[dict], daily_task: Optional[dict] = None, payload: Optional[dict] = None,
+    *, payload_updated_at: float = 0, game_items: Optional[dict] = None,
 ) -> dict:
-    return build_fishing_view(raw_session, daily_task, payload=payload)
+    return build_fishing_view(raw_session, daily_task, payload=payload, payload_updated_at=payload_updated_at, game_items=game_items)
 
 
 def _list_dungeon_feed_source_messages(

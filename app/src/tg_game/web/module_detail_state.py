@@ -3,6 +3,7 @@ from __future__ import annotations
 import biz_fanren_game
 import biz_sect_game
 import biz_small_world_game
+from tg_game.storage import ASC_EXTERNAL_PROVIDER
 from tg_game.features.fishing import biz_fishing_daily_auto
 from tg_game.features.vase.biz_vase_condense import (
     FOLLOWUP_SUGGESTIONS as VASE_FOLLOWUP_SUGGESTIONS,
@@ -176,6 +177,8 @@ def build_fishing_module_state(
                 biz_fishing_daily_auto.FEATURE_KEY,
             ),
             payload=payload,
+            payload_updated_at=(storage.get_external_account(active_profile.id, ASC_EXTERNAL_PROVIDER) or {}).get("last_verified_at", 0),
+            game_items=storage.get_game_items(),
         ),
     }
 

@@ -226,6 +226,7 @@
                         <button class="button profile-refresh-current-button" type="submit" {% if not active_profile.telegram_verified_at or not external_account or external_account.status != 'connected' %}disabled{% endif %}>探寻天机更新</button>
                     </form>
                 </div>
+                <p class="muted">同步天机阁提供的人物、慕兰战绩、鱼类及鱼饵库存等数据，不向群发送查询指令。</p>
                 <div class="profile-info-grid">
                     <div><span>天机阁玉简</span><strong>{{ active_profile.account_name or '未绑定' }}</strong></div>
                     {% set profile_artifact_text = active_profile.artifact_text or '' %}

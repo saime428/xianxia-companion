@@ -1,6 +1,8 @@
 """Run the event-driven Boss monitor on the existing Telegram client."""
 
 import asyncio
+from contextlib import nullcontext
+from copy import copy
 import json
 import logging
 import time
@@ -123,9 +125,16 @@ def _actor(client, storage, profile_id, me):
     binding_signature = _binding_signature(storage, profile_id)
 
     def eligible():
-        latest = storage.get_profile(profile_id)
-        return bool(latest) and (latest.telegram_user_id, latest.telegram_session_name) == identity_signature \
-            and is_enabled(storage, profile_id) and _binding_signature(storage, profile_id) == binding_signature
+        with storage.connect() as conn:
+            # ponytail: one read-only connection per check, no cached state or
+            # transaction snapshot. Keep the existing guards and their order.
+            conn.isolation_level = None
+            conn.execute("PRAGMA query_only=ON")
+            reader = copy(storage)
+            reader.connect = lambda: nullcontext(conn)
+            latest = reader.get_profile(profile_id)
+            return bool(latest) and (latest.telegram_user_id, latest.telegram_session_name) == identity_signature \
+                and is_enabled(reader, profile_id) and _binding_signature(reader, profile_id) == binding_signature
 
     def save_state():
         state["result_updated_at"] = time.time()
