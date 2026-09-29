@@ -58,6 +58,34 @@ def main():
 
         actor = runtime._actor(None, storage, profile.id, SimpleNamespace(id=101, username="boss_test"))
         assert actor.is_world_boss_enabled()
+        # The 5 s heartbeat writes only a timestamp; the ~0.5 MB state is
+        # rewritten only to retry a save that failed.
+        state_key, beat_key = runtime._state_key(profile.id), runtime._heartbeat_key(profile.id)
+        real_set, failures = storage.set_runtime_state, [1]
+
+        def flaky_set(key, value):
+            if key == state_key and failures[0]:
+                failures[0] -= 1
+                raise sqlite3.OperationalError("unable to open database file")
+            return real_set(key, value)
+
+        with patch.object(storage, "set_runtime_state", side_effect=flaky_set) as written:
+            runtime._heartbeat(storage, profile.id, actor)
+            runtime._heartbeat(storage, profile.id, actor)
+            assert [c.args[0] for c in written.call_args_list] == [beat_key] * 2, "Heartbeat rewrote the full state"
+            try:
+                actor.save_state()
+                raise AssertionError("A failed state write was swallowed")
+            except sqlite3.OperationalError:
+                pass
+            assert actor.has_unsaved_state()
+            written.reset_mock()
+            runtime._heartbeat(storage, profile.id, actor)
+            runtime._heartbeat(storage, profile.id, actor)
+            assert [c.args[0] for c in written.call_args_list] == [state_key, beat_key, beat_key], \
+                "Heartbeat must retry a failed save exactly once"
+        assert not actor.has_unsaved_state() and "heartbeat_at" not in runtime._read_state(storage, profile.id)
+        assert time.time() - float(storage.get_runtime_state(beat_key)) < 5
         binding = storage.list_chat_bindings(profile.id)[0]
         storage.set_chat_binding_thread_id(profile.id, binding.chat_id, 123)
         assert not actor.is_world_boss_enabled(), "Old listener must stop as soon as its binding changes"
@@ -326,13 +354,14 @@ def main():
             except support.MiniAppBeastError:
                 pass
 
+            storage.set_runtime_state(runtime._heartbeat_key(profile.id), "0")
             task = asyncio.create_task(runtime.run_monitor(client, storage))
             for _ in range(50):
-                if len(client.handlers) == 2:
+                if len(client.handlers) == 2 and runtime.build_view(storage, profile.id)["monitoring"]:
                     break
                 await asyncio.sleep(0.02)
             assert len(client.handlers) == 2
-            assert runtime.build_view(storage, profile.id)["monitoring"]
+            assert runtime.build_view(storage, profile.id)["monitoring"], "First loop pass must write the heartbeat"
             task.cancel()
             done, pending = await asyncio.wait({task}, timeout=2)
             if pending:

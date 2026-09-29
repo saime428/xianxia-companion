@@ -65,6 +65,7 @@ WORLD_BOSS_DEFEAT_MARKER_TTL_SECONDS = 15 * 60
 WORLD_BOSS_HISTORY_LIMIT = 20
 WORLD_BOSS_SCAN_LIMIT = 30
 WORLD_BOSS_TIMEOUT_SECONDS = 20
+WORLD_BOSS_GUARD_REUSE_SECONDS = 0.1
 # Keep deadline-sensitive world-boss HTTP off the process-wide asyncio pool.
 # The pool is created lazily, so tests and disabled monitors do not leave worker
 # threads behind.  A dozen workers covers the four-account burst while bounding
@@ -673,7 +674,18 @@ class WorldBossMonitor:
 
     def _is_enabled(self) -> bool:
         check = getattr(self.actor, "is_world_boss_enabled", None)
-        return self.enabled and (bool(check()) if callable(check) else True)
+        if not self.enabled or not callable(check):
+            return self.enabled
+        # ponytail: the DB guard costs ~2.5 ms (max ~19 ms) on the shared event
+        # loop and ran 30-40 times a second per account in battle. A passing
+        # result is reused for one _sleep_until tick, so DB-side stops/pauses
+        # land <=100 ms later; self.enabled (monitor.stop) still stops at once.
+        now = self.monotonic()
+        if now - getattr(self, "_guard_ok_at", float("-inf")) < WORLD_BOSS_GUARD_REUSE_SECONDS:
+            return True
+        ok = bool(check())
+        self._guard_ok_at = now if ok else float("-inf")
+        return ok
 
     def _check_enabled(self) -> None:
         started = self.monotonic()
@@ -3109,6 +3121,7 @@ class WorldBossMonitor:
     ) -> dict[str, Any]:
         challenge = payload.get("challenge") or {}
         self._guard_timing = {}
+        self._guard_ok_at = float("-inf")
         self._prepare_boss_lifecycle(entry)
         if self._boss_stop_requested():
             # Another account may have finished this exact event while this

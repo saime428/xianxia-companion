@@ -275,6 +275,36 @@ async def main():
         assert not [row for row in server.requests if row[0] in {"charge-start", "hit", "finish"}]
         assert not list(root.glob(".world_boss_defeated_*.json"))
 
+        # A passing DB guard is reused for 100 ms; a failing one never is, and
+        # monitor.stop() (self.enabled) does not wait for the reuse window.
+        clock = Clock()
+        monitor, enabled = monitor_for(root, clock)
+        calls = []
+        monitor.actor.is_world_boss_enabled = lambda: calls.append(clock.now) or enabled["value"]
+        monitor._check_enabled()
+        monitor._check_enabled()
+        assert calls == [0.0], calls
+        enabled["value"] = False
+        clock.now = 0.09
+        monitor._check_enabled()
+        clock.now = 0.1
+        for message in ("A DB-side stop was hidden past 100 ms", "A failing guard was reused"):
+            try:
+                monitor._check_enabled()
+                raise AssertionError(message)
+            except boss._WorldBossDisabledError:
+                pass
+        assert calls == [0.0, 0.1, 0.1], calls
+        enabled["value"] = True
+        monitor._check_enabled()
+        monitor.enabled = False
+        try:
+            monitor._check_enabled()
+            raise AssertionError("monitor.stop() waited for the guard reuse window")
+        except boss._WorldBossDisabledError:
+            pass
+        assert len(calls) == 4 and monitor._guard_timing["count"] == 7, (calls, monitor._guard_timing)
+
         clock = Clock()
         monitor, enabled = monitor_for(root, clock)
         monitor._reset_drift()

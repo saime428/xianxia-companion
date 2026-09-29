@@ -32,6 +32,10 @@ def _state_key(profile_id):
     return f"world_boss_state:{int(profile_id)}"
 
 
+def _heartbeat_key(profile_id):
+    return f"world_boss_heartbeat:{int(profile_id)}"
+
+
 def _read_state(storage, profile_id):
     try:
         value = json.loads(storage.get_runtime_state(_state_key(profile_id)) or "{}")
@@ -106,7 +110,7 @@ def build_view(storage, profile_id):
     return {
         "enabled": bool(task and task.get("enabled")),
         "monitoring": bool(state.get("world_boss_monitor_active"))
-        and time.time() - float(state.get("heartbeat_at") or 0) < 20,
+        and time.time() - float(storage.get_runtime_state(_heartbeat_key(profile_id)) or 0) < 20,
         "paused": bool(profile_id and task and task.get("enabled") and not is_enabled(storage, profile_id)),
         "status": STATUS_LABELS.get(latest.get("status"), "尚未参战"),
         "summary": "；".join(summaries),
@@ -121,7 +125,8 @@ def _actor(client, storage, profile_id, me):
         raise ValueError("world_boss_profile_identity_mismatch")
     identity_signature = (profile.telegram_user_id, profile.telegram_session_name)
     state = _read_state(storage, profile_id)
-    state["heartbeat_at"] = time.time()
+    state.pop("heartbeat_at", None)  # liveness now lives in _heartbeat_key
+    unsaved = [False]
     binding_signature = _binding_signature(storage, profile_id)
 
     def eligible():
@@ -138,7 +143,9 @@ def _actor(client, storage, profile_id, me):
 
     def save_state():
         state["result_updated_at"] = time.time()
+        unsaved[0] = True  # cleared only once the write lands; _heartbeat retries otherwise
         storage.set_runtime_state(_state_key(profile_id), json.dumps(state, ensure_ascii=False))
+        unsaved[0] = False
         task = get_task(storage, profile_id)
         if task and state.get("world_boss_last_status"):
             status = str(state["world_boss_last_status"])
@@ -150,13 +157,22 @@ def _actor(client, storage, profile_id, me):
 
     return SimpleNamespace(
         client=client, config={"world_boss": {"enabled": True}}, state=state,
-        save_state=save_state, my_info=me, avatars=[],
+        save_state=save_state, has_unsaved_state=lambda: unsaved[0], my_info=me, avatars=[],
         identity_usernames={"主魂": [profile.telegram_username]},
         state_file=str(Path(storage.path).parent / "world_boss" / "profiles" / f"{profile_id}.json"),
         target_chats=list(dict.fromkeys(binding.chat_id for binding in _bindings(storage, profile_id))),
         binding_signature=binding_signature,
         is_world_boss_enabled=eligible,
     )
+
+
+def _heartbeat(storage, profile_id, actor):
+    # ponytail: the full state (~0.5 MB, ~9 ms to serialize on the shared event
+    # loop, ~25 GB/day when rewritten every 5 s) is written by save_state only
+    # when it changes; the heartbeat is a timestamp plus a retry of a failed save.
+    if actor.has_unsaved_state():
+        actor.save_state()
+    storage.set_runtime_state(_heartbeat_key(profile_id), str(time.time()))
 
 
 async def run_monitor(client, storage):
@@ -202,11 +218,9 @@ async def run_monitor(client, storage):
                             }
                         except Exception as exc:
                             actor.state["entry_probe"] = {"checked_at": time.time(), "error": type(exc).__name__}
+                        actor.save_state()
                 if monitor:
-                    monitor.actor.state["heartbeat_at"] = time.time()
-                    storage.set_runtime_state(
-                        _state_key(profile_id), json.dumps(monitor.actor.state, ensure_ascii=False)
-                    )
+                    _heartbeat(storage, profile_id, monitor.actor)
             except asyncio.CancelledError:
                 raise
             except Exception:
