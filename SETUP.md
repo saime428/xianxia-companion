@@ -203,7 +203,7 @@ PYTHONPATH=app/src .venv/bin/python -B -m tg_game.features.world_boss.world_boss
 
 ### 没有网页开关的几项（可选）
 
-用下面的命令写开关。`<id>` 是账号编号，第一个登录的号是 1，可以在「角色真身」页的多账号切换里看到。「角色真身」页的「停止当前元神调度」会把这里的天机命脉、股市定时快照、野外历练日报一起关掉（历次结算记录留着），之后要用再跑一遍对应的命令。
+用下面的命令写开关。`<id>` 是账号编号，第一个登录的号是 1，可以在「角色真身」页的多账号切换里看到。「角色真身」页的「停止当前元神调度」会把这里的天机命脉、股市定时快照、野外历练日报、自动抢红包一起关掉（历次结算记录留着），之后要用再跑一遍对应的命令。
 
 - **天机命脉**（洞府外府的每日塔罗）：开启后每天 00:01 自动问一次。三个命择的奖励是固定的：逆势改命 4 天机残痕、顺势承命 2、藏锋避劫 1，启牌另给 1。下面这条命令用 `"choice": "defy"` 选逆势改命（不写 choice 就是藏锋避劫）。逆势改命要在选完之后再打一局噬金虫才算完成，所以这个号要在「三界游历」页开着**自己的**噬金虫每日开关（交给诸元神巡令托管的不算）；没开，或者当天已经打过，会自动退回藏锋避劫。
 
@@ -221,6 +221,12 @@ PYTHONPATH=app/src .venv/bin/python -B -m tg_game.features.world_boss.world_boss
 
   ```bash
   .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('wild_experience_report:<id>','{\"enabled\": true}',time.time()));c.commit()"
+  ```
+
+- **自动抢 LDC 红包**（群里有人 `.发红包` 后 bot 发的【LDC 红包】，抢到的 LDC 进这个号绑定的 linux.do 论坛账户，先私聊 bot 发 `.绑定论坛 论坛ID 论坛用户名` 绑好）：只抢总额大于 `min_total`、至少 2 份的包；不抢第一个，看到别人抢到了、还有剩余，才随机等 `delay` 秒点一次；没人抢的包不碰；讨红包的按钮一律不碰。每次点完把 bot 的回复发到这个号的收藏夹。bot 回复里出现「绑定」「天牢」「封禁」，或者天道封禁点了这个号，会自动关掉开关。日志前缀 `LDC抢红包`：
+
+  ```bash
+  .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('ldc_red_packet:<id>','{\"enabled\": true, \"min_total\": 200, \"delay\": [1, 3]}',time.time()));c.commit()"
   ```
 
 - **天星宗斗法**（`tools/tianxing_duel_daily.py`）：群和话题读 `.env`，照文件头的示例加到计划任务里。只有天星宗号用得上。

@@ -22,6 +22,7 @@ from tg_game.features.xinggong.biz_xinggong_star_board import (
     extract_starboard_pull_target,
     is_starboard_insufficient_reply,
 )
+from tg_game.features.biz_ldc_red_packet import observe_ldc_red_packet, track_ldc_red_packet
 from tg_game.features.tianxing import ensure_schema as ensure_tianxing_schema
 from tg_game.features.soul.biz_soul_cultivation import maybe_resume_after_return
 from tg_game.features.soul.biz_soul_trial import maybe_answer_soul_trial
@@ -564,6 +565,14 @@ class Router:
             observe_dual_cultivation_result(context, self.storage)
         except Exception:
             logger.exception("Dual cultivation observer failed")
+        try:
+            observe_ldc_red_packet(context, self.storage)
+        except Exception:
+            logger.exception("LDC red packet observer failed")
+        try:
+            track_ldc_red_packet(context, self.storage)
+        except Exception:
+            logger.exception("LDC red packet grabber failed")
         try:
             await notify_dual_cultivation_bonus(context, self.storage)
         except Exception:

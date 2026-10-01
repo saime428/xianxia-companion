@@ -4,6 +4,7 @@ import atexit
 import asyncio
 import inspect
 import json
+import logging
 import re
 import socket
 import threading
@@ -25,6 +26,16 @@ API_PREFIX = "/api/miniapp/xianxia-world-boss/"
 ENDPOINTS = frozenset(API_PREFIX + name for name in (
     "start", "begin", "window", "charge-start", "hit", "finish",
 ))
+# ponytail: 3 accounts x (window poll + charge + hit) in flight; derive from the account count if more join.
+WORLD_BOSS_WARM_CONNECTIONS = 9
+# Longer than one whole event (~7 min), so a later verification failure cannot
+# start a second warm-up in the middle of another account's battle.
+WORLD_BOSS_WARM_COOLDOWN_SECONDS = 600
+# Lets the sibling accounts' first /begin (sent within ~0.3 s) and a /begin
+# retry finish first: warmers briefly hold every idle connection, and that
+# /begin round trip is the clock-sync reference.
+WORLD_BOSS_WARM_DELAY_SECONDS = 2.0
+LOG = logging.getLogger(__name__)
 
 
 class MiniAppBeastError(RuntimeError):
@@ -77,6 +88,7 @@ def miniapp_circuit_preflight(origin, *, time_critical=False):
 
 _HTTP_CLIENT_LOCK = threading.Lock()
 _HTTP_CLIENT = None
+_HTTP_WARMED_AT = float("-inf")
 _HTTP_HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",
@@ -115,11 +127,80 @@ def _world_boss_http_client():
                 limits=httpx.Limits(
                     max_keepalive_connections=12,
                     max_connections=24,
-                    keepalive_expiry=30.0,
+                    # The pool always reuses its oldest idle connection, so the
+                    # warmed spares sit idle between request peaks; keep them
+                    # for the whole battle (Cloudflare holds idle ones longer).
+                    keepalive_expiry=300.0,
                 ),
             )
             _HTTP_CLIENT = client
         return client
+
+
+def warm_world_boss_http_pool(client, count=WORLD_BOSS_WARM_CONNECTIONS):
+    """Open `count` keep-alive connections in the background; return the thread (None if skipped).
+
+    A cold connection costs ~0.5 s of DNS (the CDN CNAME chain has a 1 s TTL
+    and the VPS has no local cache), enough to push a /hit outside its window
+    when three accounts' requests peak at once. Best effort: whatever fails
+    stays cold, as before.
+    """
+    global _HTTP_WARMED_AT
+    with _HTTP_CLIENT_LOCK:
+        if time.monotonic() - _HTTP_WARMED_AT < WORLD_BOSS_WARM_COOLDOWN_SECONDS:
+            return None
+        _HTTP_WARMED_AT = time.monotonic()
+    barrier, failures = threading.Barrier(count), []
+
+    def arrive(started):
+        # Failed warmers arrive too, so one failure cannot void the others.
+        try:
+            if barrier.wait(timeout=5.0) == 0:
+                (LOG.warning if failures else LOG.info)(
+                    "World Boss HTTP pool warmed: %d/%d connections in %d ms %s",
+                    count - len(failures), count, round((time.monotonic() - started) * 1000),
+                    failures or "")
+        except threading.BrokenBarrierError:
+            pass  # a warmer stuck in DNS past 5 s; the others still keep theirs
+
+    def warm_one(started):
+        arrived = False
+        try:
+            with client.stream("GET", ORIGIN + WEB_PATH, headers={"Accept": "text/html"},
+                               timeout=5.0) as response:
+                # Headers are in but the body is unread, so this connection is
+                # still busy: until all warmers arrive they hold `count` distinct
+                # connections. Reading the body returns each one to the pool.
+                arrived = True
+                arrive(started)
+                response.read()
+        except Exception as exc:
+            if not arrived:
+                failures.append(type(exc).__name__)
+                arrive(started)
+
+    def run():
+        time.sleep(WORLD_BOSS_WARM_DELAY_SECONDS)
+        started = time.monotonic()
+        threads = [threading.Thread(target=warm_one, args=(started,), name="world-boss-warm", daemon=True)
+                   for _ in range(count)]
+        try:
+            for thread in threads:
+                thread.start()
+        except RuntimeError as exc:
+            barrier.abort()
+            LOG.warning("World Boss HTTP pool warm-up failed: %s", type(exc).__name__)
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(30)
+
+    spawner = threading.Thread(target=run, name="world-boss-warm", daemon=True)
+    try:
+        spawner.start()
+    except RuntimeError as exc:  # never let warm-up replace the /begin outcome
+        LOG.warning("World Boss HTTP pool warm-up failed: %s", type(exc).__name__)
+        return None
+    return spawner
 
 
 def _close_world_boss_http_client() -> None:
@@ -243,9 +324,17 @@ def _json_post_urllib(origin, path, payload, timeout):
 
 def _json_post_sync(origin, path, payload, timeout, *, timing=None):
     client = _world_boss_http_client()
-    if client is not None:
+    if client is None:
+        return _json_post_urllib(origin, path, payload, timeout)
+    try:
         return _json_post_with_client(client, origin, path, payload, timeout, timing=timing)
-    return _json_post_urllib(origin, path, payload, timeout)
+    except MiniAppBeastError as exc:
+        # Browser verification is next (10 s or more): the one quiet gap before
+        # the battle. A /begin that succeeds starts the battle ~1.5 s later.
+        # ponytail: no verification means no warm-up; warm after /start if it is ever dropped.
+        if path == API_PREFIX + "begin" and exc.code.startswith("turnstile_"):
+            warm_world_boss_http_pool(client)
+        raise
 
 
 async def _post_json(origin, path, payload, timeout, *, post_json=None,

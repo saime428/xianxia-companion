@@ -19,6 +19,81 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app" / "src"))
 
 
+def check_http_pool_warmup(support):
+    """Warm-up holds N distinct connections, survives one failure, runs once per cooldown,
+    and only a verification-required /begin starts it, keeping /begin's own error."""
+    class FakeClient:
+        def __init__(self, fail=0):
+            self.lock, self.open, self.peak, self.reads, self.fail, self.requests = threading.Lock(), 0, 0, 0, fail, []
+
+        def stream(self, method, url, **kwargs):
+            with self.lock:
+                self.requests.append((method, url))
+                if len(self.requests) <= self.fail:
+                    raise OSError("offline")
+            client = self
+
+            class Stream:
+                def __enter__(self):
+                    with client.lock:
+                        client.open += 1
+                        client.peak = max(client.peak, client.open)
+                    return self
+
+                def read(self):
+                    with client.lock:
+                        client.reads += 1
+
+                def __exit__(self, *exc):
+                    with client.lock:
+                        client.open -= 1
+            return Stream()
+
+    def finish(spawner):
+        spawner.join(4)  # well under the 5 s barrier timeout: a failure must not stall the rest
+        assert not spawner.is_alive(), "warm-up hung"
+
+    original = (support._world_boss_http_client, support._json_post_with_client, support.WORLD_BOSS_WARM_DELAY_SECONDS)
+    try:
+        support.WORLD_BOSS_WARM_DELAY_SECONDS = 0
+        support._HTTP_WARMED_AT = float("-inf")
+        client = FakeClient()
+        finish(support.warm_world_boss_http_pool(client, count=4))
+        assert client.peak == 4 and client.reads == 4, "warmers must hold their connections at the same time"
+        assert client.requests == [("GET", support.ORIGIN + support.WEB_PATH)] * 4
+        assert support.warm_world_boss_http_pool(client, count=4) is None and len(client.requests) == 4
+
+        for fail in (1, 4):
+            support._HTTP_WARMED_AT = float("-inf")
+            client = FakeClient(fail=fail)
+            finish(support.warm_world_boss_http_pool(client, count=4))
+            assert client.reads == 4 - fail, (fail, client.reads)
+
+        # Only a verification-required /begin starts it, and /begin's error survives.
+        client, error = FakeClient(), ["server_error"]
+        def post(client, origin, path, payload, timeout, *, timing=None):
+            if error[0] is None:
+                return {"ok": True}
+            raise support.MiniAppBeastError(error[0], 403)
+        support._world_boss_http_client, support._json_post_with_client = (lambda: client), post
+        support._HTTP_WARMED_AT = float("-inf")
+        for path, error[0] in (("begin", "server_error"), ("begin", None), ("window", "turnstile_required"),
+                               ("begin", "turnstile_required")):
+            try:
+                result = support._json_post_sync(support.ORIGIN, support.API_PREFIX + path, {}, 1)
+                assert error[0] is None and result == {"ok": True}
+            except support.MiniAppBeastError as exc:
+                assert exc.code == error[0]
+            if error[0] != "turnstile_required" or path != "begin":
+                assert support._HTTP_WARMED_AT == float("-inf"), (path, error[0])
+        for thread in [t for t in threading.enumerate() if t.name == "world-boss-warm"]:
+            finish(thread)
+        assert client.reads == support.WORLD_BOSS_WARM_CONNECTIONS
+    finally:
+        support._world_boss_http_client, support._json_post_with_client, support.WORLD_BOSS_WARM_DELAY_SECONDS = original
+        support._HTTP_WARMED_AT = float("-inf")
+
+
 def main():
     with tempfile.TemporaryDirectory() as temporary:
         os.environ["WORLD_BOSS_TURNSTILE_QUEUE_DIR"] = str(Path(temporary) / "queue")
@@ -33,6 +108,7 @@ def main():
         from tg_game.features.world_boss import world_boss_support as support
         from tg_game.services.automation_switch import pause_automation, resume_automation
         from tg_game.services.profile_schedules import stop_current_profile_schedules
+        check_http_pool_warmup(support)
 
         storage = Storage(settings.database_path)
         storage.init_schema()

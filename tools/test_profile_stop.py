@@ -222,10 +222,11 @@ async def check_stop_during_refresh(storage, profile_id):
 
 
 async def check_runtime_switches(storage, profile_id, other_id):
-    # 天机命脉、野外历练日报的开关不在任务表里：停角色也得关掉，历次结算留着（09-28 审计 A1）
+    # 天机命脉、野外历练日报、自动抢红包的开关不在任务表里：停角色也得关掉，历次结算留着（09-28 审计 A1）
     for pid in (profile_id, other_id):
         storage.set_runtime_state(f"fate_cards:{pid}", json.dumps({"enabled": True, "history": [{"reward": 4}]}))
         storage.set_runtime_state(f"wild_experience_report:{pid}", json.dumps({"enabled": True, "sent": "2026-09-27"}))
+        storage.set_runtime_state(f"ldc_red_packet:{pid}", json.dumps({"enabled": True, "min_total": 300}))
     stop_current_profile_schedules(storage, profile_id)
     assert json.loads(storage.get_runtime_state(f"fate_cards:{profile_id}")) == {
         "enabled": False, "history": [{"reward": 4}],
@@ -233,7 +234,8 @@ async def check_runtime_switches(storage, profile_id, other_id):
     assert json.loads(storage.get_runtime_state(f"wild_experience_report:{profile_id}")) == {
         "enabled": False, "sent": "2026-09-27",
     }
-    for key in (f"fate_cards:{other_id}", f"wild_experience_report:{other_id}"):
+    assert json.loads(storage.get_runtime_state(f"ldc_red_packet:{profile_id}")) == {"enabled": False, "min_total": 300}
+    for key in (f"fate_cards:{other_id}", f"wild_experience_report:{other_id}", f"ldc_red_packet:{other_id}"):
         assert json.loads(storage.get_runtime_state(key))["enabled"] is True
     assert not await executors._run_pending_fate_cards(
         SimpleNamespace(_tg_game_profile_id=profile_id), storage, profile_id,

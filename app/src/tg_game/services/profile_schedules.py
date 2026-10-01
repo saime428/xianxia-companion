@@ -222,8 +222,12 @@ def stop_current_profile_schedules(storage: Storage, profile_id: int) -> dict:
         target_profile_id, ASC_EXTERNAL_PROVIDER, _cancel_queued_miniapp_requests,
     )
     storage.set_runtime_state(SCHEDULE_STATE_KEY.format(profile_id=target_profile_id), "0")
-    # 天机命脉、野外历练日报的开关在 runtime_state 里，不跟任务表走：只关 enabled，历次结算留着
-    for key in (f"fate_cards:{target_profile_id}", f"wild_experience_report:{target_profile_id}"):
+    # 天机命脉、野外历练日报、自动抢红包的开关在 runtime_state 里，不跟任务表走：只关 enabled，历次结算留着
+    for key in (
+        f"fate_cards:{target_profile_id}",
+        f"wild_experience_report:{target_profile_id}",
+        f"ldc_red_packet:{target_profile_id}",
+    ):
         try:
             switch = json.loads(storage.get_runtime_state(key) or "{}")
         except json.JSONDecodeError:

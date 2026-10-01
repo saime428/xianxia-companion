@@ -15,7 +15,7 @@ SMALL_WORLD_DEFAULT_REFRESH_INTERVAL_SECONDS = 30 * 60
 SMALL_WORLD_MIN_REFRESH_INTERVAL_SECONDS = 5 * 60
 SMALL_WORLD_DEFAULT_COLLECT_INTERVAL_HOURS = 24
 # 赈灾/布道/安抚信徒共用一个「神谕」冷却，实测 3 小时：
-# 群里 wanglaoban12138 布道成功后 16 秒发赈灾，回「需再等待 2小时59分44秒」，两次独立复现。
+# 群里 lucky_player 布道成功后 16 秒发赈灾，回「需再等待 2小时59分44秒」，两次独立复现。
 MIRACLE_COOLDOWN_SECONDS = 3 * 3600
 # 待收香火少于这个数就别为它单独发一条指令。
 SMALL_WORLD_MIN_PENDING_INCENSE = 1.0
