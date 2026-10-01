@@ -21,9 +21,10 @@ from tg_game.features.beast_merge import biz_beast_merge_daily_auto as daily_aut
 from tg_game.features.beast_merge import biz_beast_merge_state as state  # noqa: E402
 from tg_game.runtime import executors as ex  # noqa: E402
 from tg_game.storage import ASC_EXTERNAL_PROVIDER, Storage  # noqa: E402
+from tg_game.game_clock import game_day
 
 CHAT = -1005550000555  # 假群号，别用公开版构建里的占位值（构建脚本会拒绝）
-TODAY = time.strftime("%Y-%m-%d")
+TODAY = game_day()
 
 
 def payload(challenge_date, used=5, limit=5):

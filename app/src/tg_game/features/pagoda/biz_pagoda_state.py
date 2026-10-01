@@ -2,6 +2,7 @@ import json
 import time
 from copy import deepcopy
 from typing import Optional
+from tg_game.game_clock import game_day, game_time_text
 
 
 PAGODA_REQUEST_LEASE_SECONDS = 5 * 60
@@ -14,7 +15,7 @@ def _now_text(value: object = None) -> str:
         timestamp = float(time.time() if value is None else value)
     except (TypeError, ValueError):
         timestamp = time.time()
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+    return game_time_text(timestamp)
 
 
 def _day_key(value: object = None) -> str:
@@ -22,7 +23,7 @@ def _day_key(value: object = None) -> str:
         timestamp = float(time.time() if value is None else value)
     except (TypeError, ValueError):
         return ""
-    return time.strftime("%Y-%m-%d", time.localtime(timestamp))
+    return game_day(timestamp)
 
 
 def _float(value: object) -> float:
@@ -84,6 +85,10 @@ def queue_pagoda_request(
     if _request_is_active(root.get("request")):
         return updated
     now = time.time()
+    previous = root.get("request") or {}
+    uncertain = (previous.get("reconcile_only") or previous.get("phase") in {"challenge", "settlement_confirm"}
+                 or (root.get("run") or {}).get("status") == "settlement_unknown")
+    same_day = _day_key(previous.get("queued_at")) == _day_key(now) or (root.get("run") or {}).get("day_key") == _day_key(now)
     root["request"] = {
         "status": "queued",
         "queued_at": now,
@@ -93,6 +98,7 @@ def queue_pagoda_request(
         "thread_id": int(thread_id) if thread_id is not None else None,
         "chat_type": str(chat_type or "group"),
         "bot_username": str(bot_username or "fanrenxiuxian_bot"),
+        "reconcile_only": bool(uncertain and same_day),
     }
     root["run"] = {
         "status": "queued",
@@ -133,18 +139,10 @@ def claim_pagoda_request(
     current = float(time.time() if now is None else now)
     status = str(request.get("status") or "")
     if status in {"resolving", "running"} and _float(request.get("lease_expires_at")) <= current:
-        request["status"] = "interrupted"
-        request["error"] = PAGODA_INTERRUPTED_ERROR
-        root["request"] = request
-        root["run"] = {
-            **dict(root.get("run") or {}),
-            "status": "interrupted",
-            "status_label": "执行已中断",
-            "updated_at": _now_text(current),
-            "error": PAGODA_INTERRUPTED_ERROR,
-        }
-        updated["pagoda_miniapp"] = root
-        return updated
+        if request.get("phase") not in {"entry", "start"}:
+            request["reconcile_only"] = True
+        status = "queued"
+        request["status"] = status
     if status != "queued" or _float(request.get("not_before")) > current:
         return updated
     if _day_key(request.get("queued_at")) not in {"", _day_key(current)}:
@@ -249,7 +247,10 @@ def finish_pagoda_request(
     source = result if isinstance(result, dict) else {}
     current = float(time.time() if now is None else now)
     status = str(source.get("status") or "failed")
-    if not source.get("ok"):
+    if not source.get("ok") and request.get("reconcile_only"):
+        # A failed observation says nothing about the earlier ambiguous challenge.
+        status = "settlement_unknown"
+    if not source.get("ok") and status != "settlement_unknown":
         status = "failed"
     state = source.get("state") if isinstance(source.get("state"), dict) else {}
     replay = source.get("replay") if isinstance(source.get("replay"), dict) else {}
@@ -257,8 +258,18 @@ def finish_pagoda_request(
         "settled": "闯塔已结算",
         "skipped": "今日已闯塔，无需重复执行",
         "failed": "闯塔执行失败",
+        "settlement_unknown": "结算待核对，仅查询，不重复挑战",
     }.get(status, "闯塔执行结束")
     root.pop("request", None)
+    retries = int(request.get("retry_count") or 0)
+    if not source.get("ok") and retries < 3 and (source.get("retry_safe") or source.get("status") == "settlement_unknown"):
+        request.update(status="queued", execution_owner="", lease_expires_at=0,
+                       retry_count=retries + 1, not_before=current + 300 * (retries + 1),
+                       reconcile_only=bool(source.get("status") == "settlement_unknown" or request.get("reconcile_only")))
+        root["request"] = request
+    elif status == "settlement_unknown":
+        request.update(status="needs_review", execution_owner="", lease_expires_at=0, reconcile_only=True)
+        root["request"] = request
     root["entry"] = source.get("entry") if isinstance(source.get("entry"), dict) else root.get("entry", {})
     root["run"] = {
         "status": status,

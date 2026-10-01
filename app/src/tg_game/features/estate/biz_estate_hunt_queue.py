@@ -81,14 +81,15 @@ def _estate_miniapp_hunt_request_is_active(
 
 
 def _estate_miniapp_day_key(value: object = None) -> str:
+    from tg_game.game_clock import game_day
     if value is None:
-        return time.strftime("%Y-%m-%d", time.localtime(time.time()))
+        return game_day()
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         timestamp = float(value)
         if timestamp > 10_000_000_000:
             timestamp = timestamp / 1000
         try:
-            return time.strftime("%Y-%m-%d", time.localtime(timestamp))
+            return game_day(timestamp)
         except (OverflowError, OSError, ValueError):
             return ""
     text = str(value or "").strip()
@@ -127,23 +128,156 @@ def _revealed_hunt_indices(run: dict) -> set[int]:
     return indices
 
 
-def _choose_hunt_reveal_index(run: dict, tried: list[int]) -> Optional[int]:
-    revealed = _revealed_hunt_indices(run)
-    blocked = set(tried) | revealed
-    hint = _as_dict(run.get("latestHint"))
-    markers = [item for item in _as_list(hint.get("markers")) if isinstance(item, dict)]
-    for preferred_kind in ("treasure", "resource"):
+_HUNT_DIRECTION_PATTERN = re.compile(r"灵气流向([北南]?)([西东]?)")
+
+
+def _hunt_neighbors(index: int, size: int) -> list[int]:
+    row, col = divmod(index, size)
+    return [
+        r * size + c
+        for r in range(row - 1, row + 2)
+        for c in range(col - 1, col + 2)
+        if (r, c) != (row, col) and 0 <= r < size and 0 <= c < size
+    ]
+
+
+def _hunt_side(value: int, origin: int, word: str, less: str, more: str) -> bool:
+    if word == less:
+        return value < origin
+    if word == more:
+        return value > origin
+    return value == origin
+
+
+def _hunt_knowledge(run: dict, size: int) -> tuple[dict[int, str], set[int]]:
+    """把所有翻开的线索格合起来读：每个未翻格是什么类、主宝匣还可能在哪几格。
+
+    线索格的规则（前端 previewHuntHint，线上回包文案逐字一致）：「灵气流向X」是从线索格看主宝匣的方位
+    （同行只报东西、同列只报南北）；markers 把周围八格里的机关/残魂标成 risk、宝匣/主宝匣标成 treasure、
+    药圃/矿脉标成 resource，没标到的邻格只剩线索或空室（记成 plain）。
+    """
+    kinds: dict[int, str] = {}
+    candidates = set(range(size * size)) - _revealed_hunt_indices(run)
+    for cell in _as_list(run.get("cells")):
+        if not isinstance(cell, dict) or not cell.get("revealed"):
+            continue
+        hint = _as_dict(cell.get("hint"))
+        try:
+            index = int(cell.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if not hint:
+            continue
+        match = _HUNT_DIRECTION_PATTERN.search(str(hint.get("text") or ""))
+        if match and (match.group(1) or match.group(2)):
+            row, col = divmod(index, size)
+            candidates = {
+                item
+                for item in candidates
+                if _hunt_side(item // size, row, match.group(1), "北", "南")
+                and _hunt_side(item % size, col, match.group(2), "西", "东")
+            }
+        markers = hint.get("markers")
+        if not isinstance(markers, list):
+            continue
+        marked: dict[int, str] = {}
         for marker in markers:
-            if marker.get("kind") != preferred_kind:
-                continue
             try:
-                index = int(marker.get("index"))
-            except (TypeError, ValueError):
+                marked[int(marker.get("index"))] = str(marker.get("kind") or "")
+            except (AttributeError, TypeError, ValueError):
                 continue
-            if index not in blocked:
+        for neighbor in _hunt_neighbors(index, size):
+            kind = marked.get(neighbor) or "plain"
+            kinds[neighbor] = "risk" if neighbor in kinds and kinds[neighbor] != kind else kind
+    # 主宝匣只可能在没被判过类、或被标成 treasure 的格子里
+    candidates = {item for item in candidates if kinds.get(item, "treasure") == "treasure"}
+    return kinds, candidates
+
+
+def _remember_hunt_hints(run: dict, hints: dict, revealed_index: int) -> dict:
+    """求解要用到每一条线索。前端从 cells[i].hint 取；万一服务器只在 latestHint 里给最新一条，
+    就按「刚翻的是哪一格」自己记住，再补回 cells 里。hints[-1] 存上一次的 latestHint，用来判断有没有新线索。"""
+    cells = [dict(cell) if isinstance(cell, dict) else cell for cell in _as_list(run.get("cells"))]
+    by_index = {}
+    for cell in cells:
+        try:
+            by_index[int(cell.get("index"))] = cell
+        except (AttributeError, TypeError, ValueError):
+            continue
+    latest = _as_dict(run.get("latestHint"))
+    cell = by_index.get(int(revealed_index))
+    if cell is not None:
+        own = _as_dict(cell.get("hint"))
+        is_clue = "clue" in (
+            str(cell.get("type") or ""),
+            str(cell.get("class") or ""),
+        ) or "线索" in str(cell.get("title") or "")
+        if own:
+            hints[int(revealed_index)] = own
+        elif latest and (is_clue or latest != hints.get(-1)):
+            hints[int(revealed_index)] = latest
+    hints[-1] = latest
+    for index, hint in hints.items():
+        cell = by_index.get(index)
+        if (
+            index >= 0
+            and cell is not None
+            and cell.get("revealed")
+            and not _as_dict(cell.get("hint"))
+        ):
+            cell["hint"] = hint
+    result = dict(run)
+    result["cells"] = cells
+    return result
+
+
+def _choose_hunt_reveal_index(run: dict, tried: list[int]) -> Optional[int]:
+    """累计线索，低神识时提前结算。预览的额外损耗不是服务端上限保证。
+
+    已知安全格预留1点；未知格按预览的3点总消耗再预留1点。
+    不以推测主宝匣唯一位置为由，在低神识时赌未知格。
+    """
+    size = _int_or_zero(run.get("size")) or 5
+    ap = _int_or_zero(run.get("ap"))
+    kinds, candidates = _hunt_knowledge(run, size)
+    blocked = set(tried) | _revealed_hunt_indices(run)
+    base_order = _DEFAULT_HUNT_REVEAL_ORDER if size == 5 else range(size * size)
+    order = [index for index in base_order if index not in blocked]
+    if not order or ap <= 0:
+        return None
+
+    def pick(want) -> Optional[int]:
+        return next((index for index in order if want(index)), None)
+
+    if run.get("foundMain"):
+        for kind in ("treasure", "resource"):
+            index = pick(lambda item, kind=kind: kinds.get(item) == kind)
+            if index is not None and ap >= 2:
                 return index
-    for index in _DEFAULT_HUNT_REVEAL_ORDER:
-        if index not in blocked:
+        return None
+
+    live = candidates - blocked
+    if ap < 2:
+        return None
+    if len(live) == 1:
+        candidate = next(iter(live))
+        if kinds.get(candidate) == "treasure" or ap >= 4:
+            return candidate
+    index = pick(lambda item: item in live and kinds.get(item) == "treasure")
+    if index is not None:
+        return index
+    if len(live) > 4:
+        # 范围还大：先翻确定是线索或空室的格子（必定只耗 1 点），翻出线索能把范围砍到一个象限
+        index = pick(lambda item: kinds.get(item) == "plain")
+        if index is not None:
+            return index
+    if ap >= 4:
+        index = pick(lambda item: item in live and item not in kinds)
+        if index is not None:
+            return index
+    for kind in ("resource", "treasure", "plain"):
+        index = pick(lambda item, kind=kind: kinds.get(item) == kind)
+        if index is not None:
             return index
     return None
 
@@ -156,7 +290,7 @@ def _build_hunt_state(
     dwelling: object = None,
     error: object = "",
     events: Optional[list] = None,
-    strategy: str = "exhaust_ap",
+    strategy: str = "follow_clues",
     revealed_indices: Optional[list[int]] = None,
 ) -> dict:
     from .biz_estate_miniapp import sanitize_estate_miniapp_secret_text
@@ -196,10 +330,15 @@ def _build_hunt_state(
     }
 
 
-def _extract_hunt_limits_state(data: object) -> dict:
+def _extract_hunt_limits_state(data: object, *, authoritative: bool = False) -> dict:
     from .biz_estate_miniapp import _extract_snapshot_source
     dwelling = _as_dict(_extract_snapshot_source(data))
+    level = str(_as_dict(dwelling.get("_snapshot")).get("level") or "")
+    if level in {"core", "overview"} or (not authoritative and level not in {"deferred", "details", "full"}):
+        return {}
     limits = _as_dict(dwelling.get("hunt"))
+    if not all(key in limits for key in ("used", "limit", "remaining")):
+        return {}
     used = _int_or_zero(limits.get("used"))
     limit = _int_or_zero(limits.get("limit"))
     remaining = _int_or_zero(limits.get("remaining"))
@@ -291,7 +430,7 @@ def queue_estate_miniapp_hunt_request(
     dongfu["miniapp_hunt"] = {
         "status": "queued",
         "updated_at": request["requested_at"],
-        "strategy": "exhaust_ap",
+        "strategy": "follow_clues",
         "automation_mode": "auto_daily",
         "automation_runs": 0,
         "automation_total_loot": [],
@@ -468,17 +607,16 @@ def continue_estate_miniapp_hunt_automation(
     remaining = _int_or_zero(hunt_data.get("remaining"))
     can_continue = bool(was_settled and limit and used < limit and remaining > 0)
     automation_status = "继续执行" if can_continue else "今日次数已满"
-    if not was_settled:
+    if not was_settled and hunt_data.get("status") != "limit_reached":
         automation_status = "执行失败，已停止"
     if was_settled and not limit:
         automation_status = "已结算，等待下次确认次数"
 
     previous_rounds = _normalize_hunt_rounds(request_data.get("rounds"))
     next_round_number = len(previous_rounds) + 1 if previous_rounds else previous_runs + 1
-    rounds = [
-        *previous_rounds,
-        _build_hunt_round_summary(hunt_data, round_number=next_round_number),
-    ]
+    rounds = list(previous_rounds)
+    if hunt_data.get("status") != "limit_reached":
+        rounds.append(_build_hunt_round_summary(hunt_data, round_number=next_round_number))
 
     updated_hunt = dict(hunt_data)
     updated_hunt.update(

@@ -6,6 +6,7 @@ import re
 import time
 from typing import Optional
 from urllib.parse import parse_qsl, quote, unquote, urljoin, urlsplit
+import urllib.error
 import urllib.request
 
 from telethon import functions, types
@@ -28,6 +29,7 @@ from .biz_estate_hunt_queue import (
     _build_hunt_state,
     _choose_hunt_reveal_index,
     _extract_hunt_limits_state,
+    _remember_hunt_hints,
     build_estate_miniapp_hunt_request,
     claim_estate_miniapp_hunt_request,
     continue_estate_miniapp_hunt_automation,
@@ -48,6 +50,7 @@ from .biz_estate_view_state import (
     _stamp_snapshot_sync_time,
     build_estate_miniapp_hunt,
     build_estate_miniapp_snapshot,
+    merge_estate_snapshots,
     merge_estate_miniapp_payload,
 )
 
@@ -829,8 +832,13 @@ def _urllib_transport(request: dict):
         },
         method=str(request.get("method") or "POST"),
     )
-    with urllib.request.urlopen(http_request, timeout=20) as response:
-        return int(getattr(response, "status", 200) or 200), response.read()
+    try:
+        with urllib.request.urlopen(http_request, timeout=20) as response:
+            return int(getattr(response, "status", 200) or 200), response.read()
+    except urllib.error.HTTPError as exc:
+        # Business refusals carry authoritative state even on non-2xx responses.
+        with exc:
+            return int(exc.code or 0), exc.read()
 
 
 def _coerce_response(raw_response) -> tuple[int, object]:
@@ -854,12 +862,14 @@ def _coerce_response(raw_response) -> tuple[int, object]:
 
 
 def _classify_http_response(status_code: int, body: object) -> dict:
+    from tg_game.miniapp_contract import action_failure
     if not isinstance(body, dict):
         body = {"value": body}
     data = body.get("data") if isinstance(body.get("data"), dict) else body
-    if 200 <= int(status_code or 0) < 300 and body.get("ok") is not False:
+    rejected = action_failure(body)
+    if 200 <= int(status_code or 0) < 300 and body.get("ok") is not False and not rejected:
         return {"ok": True, "status_code": int(status_code), "data": data, "error": ""}
-    error = body.get("error") or body.get("message") or f"http_{status_code}"
+    error = rejected or body.get("error") or body.get("message") or f"http_{status_code}"
     return {
         "ok": False,
         "status_code": int(status_code or 0),
@@ -971,13 +981,8 @@ def execute_estate_external_app_lookup(
 
 
 def _execute_hunt_reveal_with_retry(request: dict, transport) -> dict:
-    result = execute_estate_miniapp_request(request, transport)
-    if result.get("ok"):
-        return result
-    status_code = int(result.get("status_code") or 0)
-    if status_code == 0 or status_code >= 500:
-        return execute_estate_miniapp_request(request, transport)
-    return result
+    # A lost response may already have consumed AP; caller must refresh the run.
+    return execute_estate_miniapp_request(request, transport)
 
 
 def _unwrap_data(data: object) -> dict:
@@ -995,12 +1000,15 @@ def _extract_snapshot_source(data: object) -> dict:
     for key in ("dwelling", "dongfu", "estate", "cave", "home", "profile", "state"):
         value = root.get(key) if isinstance(root, dict) else None
         if isinstance(value, dict):
+            value = dict(value)
+            value["_snapshot"] = dict(root.get("snapshot") or {})
             if key == "dwelling":
                 account = root.get("account")
                 if isinstance(account, dict):
-                    value = dict(value)
-                    value.setdefault("owner", account.get("daoName") or account.get("username"))
-                    value.setdefault("stage", account.get("cultivationLevel"))
+                    if account.get("daoName") or account.get("username"):
+                        value.setdefault("owner", account.get("daoName") or account.get("username"))
+                    if account.get("cultivationLevel") is not None:
+                        value.setdefault("stage", account["cultivationLevel"])
             return value
     return root if isinstance(root, dict) else {}
 
@@ -1083,9 +1091,19 @@ def run_estate_miniapp_snapshot_flow(
     snapshot_source = _stamp_snapshot_sync_time(_extract_snapshot_source(start_data))
     snapshot = build_estate_miniapp_snapshot(snapshot_source)
     hunt_limits = _extract_hunt_limits_state(start_data)
+    # Core/overview counts and upgrade flags can be placeholders.
+    details_result = execute_estate_miniapp_request(
+        build_estate_miniapp_request("details", token=token, init_data=init_data), transport,
+    )
+    _append_event(events, "details", details_result)
+    if details_result.get("ok"):
+        details_data = details_result.get("data") or {}
+        snapshot = merge_estate_snapshots(snapshot, _stamp_snapshot_sync_time(_extract_snapshot_source(details_data)))
+        hunt_limits = _extract_hunt_limits_state(details_data, authoritative=True)
     return _flow_result(
         True,
-        "synced",
+        "synced" if details_result.get("ok") else "partial",
+        error=details_result.get("error") or "",
         snapshot=snapshot,
         hunt_limits=hunt_limits,
         events=events,
@@ -1111,8 +1129,19 @@ def run_estate_miniapp_hunt_flow(
     min_ap = max(0, min(_int_or_zero(min_ap_to_settle), 8))
     events: list[dict] = []
     revealed_indices: list[int] = []
+    hints: dict = {}
     dwelling: dict = {}
     run: dict = {}
+
+    details = execute_estate_miniapp_request(
+        build_estate_miniapp_request("details", token=token, init_data=init_data), transport,
+    )
+    _append_event(events, "details", details)
+    limits = _extract_hunt_limits_state(details.get("data") or {}, authoritative=True) if details.get("ok") else {}
+    if not limits:
+        return _hunt_flow_result(False, "failed", error=details.get("error") or "完整寻宝次数未确认，未开局", events=events)
+    if limits.get("status") == "limit_reached":
+        return _hunt_flow_result(True, "limit_reached", hunt=limits, events=events)
 
     start_request = build_estate_miniapp_request(
         "hunt", token=token, init_data=init_data
@@ -1172,6 +1201,17 @@ def run_estate_miniapp_hunt_flow(
         reveal_result = _execute_hunt_reveal_with_retry(reveal_request, transport)
         _append_event(events, f"reveal:{index}", reveal_result)
         if not reveal_result.get("ok"):
+            confirmation = execute_estate_miniapp_request(
+                build_estate_miniapp_request("details", token=token, init_data=init_data), transport,
+            )
+            _append_event(events, "reveal_confirm", confirmation)
+            observed_run = _as_dict(_as_dict(confirmation.get("data")).get("huntRun"))
+            if confirmation.get("ok") and observed_run.get("sessionId") == session_id and any(
+                isinstance(cell, dict) and cell.get("index") == index and cell.get("revealed") for cell in observed_run.get("cells") or []
+            ):
+                revealed_indices.append(index)
+                run = _remember_hunt_hints(observed_run, hints, index)
+                continue
             hunt = _build_hunt_state(
                 status="failed",
                 run=run,
@@ -1189,7 +1229,9 @@ def run_estate_miniapp_hunt_flow(
             )
         revealed_indices.append(index)
         reveal_data = _as_dict(reveal_result.get("data"))
-        run = _as_dict(reveal_data.get("huntRun")) or run
+        run = _remember_hunt_hints(
+            _as_dict(reveal_data.get("huntRun")) or run, hints, index
+        )
 
     settle_request = build_estate_miniapp_request(
         "hunt_settle",

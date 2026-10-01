@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 
 from telethon import functions
+from tg_game.services.runtime_drain import tracked_flow
 from tg_game.features.estate import biz_estate_miniapp as estate_miniapp
 from tg_game.features.fishing.biz_fishing_miniapp_entry import (
     MAX_FISHING_RESULT_TEXT_LENGTH,
@@ -1658,6 +1659,7 @@ async def run_fishing_miniapp_production_flow(
         return _flow_result(False, "failed", error=exc)
 
 
+@tracked_flow
 async def run_fishing_miniapp_public_production_flow(
     client: object,
     *,

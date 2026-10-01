@@ -24,6 +24,7 @@ from telethon import functions
 from tg_game.config import get_settings
 from tg_game.services.automation_switch import is_automation_paused
 from tg_game.services.external_sync import is_authorized_profile
+from tg_game.services.runtime_drain import drain_requested, tracked_flow
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +192,8 @@ def track_ldc_red_packet(context, storage, *, now=None):
         _brake(storage, profile.id, "天道封禁点了这个号")
         _spawn(_notify(context.client, f"⚠️ 天道封禁点了这个号，已自动关掉抢红包开关\n原文：{text[:300]}"))
         return "brake"
+    if drain_requested(storage):
+        return "draining"
     now = time.time() if now is None else now
     live = _live.setdefault(int(profile.id), {})
     for packet_id in [key for key, info in live.items() if now - info["seen"] > PACKET_TTL_SECONDS]:
@@ -253,6 +256,7 @@ def _track_notice(context, storage, live, switch, got, left, shares, left_total)
     return "armed"
 
 
+@tracked_flow
 async def _grab(client, storage, profile_id, packet_id, delay):
     await asyncio.sleep(delay)
     info = _live.get(profile_id, {}).get(packet_id)

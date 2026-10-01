@@ -2,6 +2,7 @@ import hashlib
 import time
 from copy import deepcopy
 from typing import Optional
+from tg_game.game_clock import game_day, game_time_text
 
 
 REQUEST_LEASE_SECONDS = 30 * 60
@@ -34,15 +35,12 @@ def _safe_text(value: object, limit: int = 160) -> str:
 
 
 def _now_text(value: object = None) -> str:
-    return time.strftime(
-        "%Y-%m-%d %H:%M:%S",
-        time.localtime(_float(value, time.time())),
-    )
+    return game_time_text(_float(value, time.time()))
 
 
 def _day_key(value: object = None) -> str:
     try:
-        return time.strftime("%Y-%m-%d", time.localtime(float(value if value is not None else time.time())))
+        return game_day(value)
     except (TypeError, ValueError, OSError):
         return ""
 
@@ -113,6 +111,8 @@ def get_pending_beast_merge_request(payload: object) -> dict:
     request_day = _request_day(request)
     if request_day and request_day != _day_key():
         return {}
+    if _float(request.get("not_before")) > time.time():
+        return {}
     return request
 
 
@@ -136,6 +136,8 @@ def mark_beast_merge_request_status(
     if not request or str(request.get("execution_owner") or "") != str(execution_owner or ""):
         return updated
     current_time = _float(now, time.time())
+    if _float(request.get("not_before")) > current_time:
+        return updated
     request.update(
         {
             "status": status,
@@ -172,10 +174,12 @@ def claim_beast_merge_request(
         return updated
     request_day = _request_day(request)
     current_time = _float(now, time.time())
+    if _float(request.get("not_before")) > current_time:
+        return updated
     if request_day and request_day != _day_key(current_time):
         return updated
     current_owner = str(request.get("execution_owner") or "")
-    if status == "queued" or current_owner == str(execution_owner or ""):
+    if status == "queued" or current_owner == str(execution_owner or "") or (status == "resolving" and not _request_active(request, now=current_time)):
         request["execution_owner"] = str(execution_owner or "")
         request["claimed_at"] = request.get("claimed_at") or current_time
         state["request"] = request
@@ -340,6 +344,11 @@ def finish_beast_merge_request(
             "error": _safe_text(source.get("error"), 220),
         }
     )
+    retries = _int(request.get("retry_count"))
+    if not ok and source.get("retry_safe") and retries < 3:
+        request.update(status="queued", retry_count=retries + 1,
+                       not_before=current_time + 300 * (retries + 1), execution_owner="")
+        run.update(status="retry_pending", status_label="入口读取失败，稍后同日重试")
     state["request"] = request
     state["run"] = run
     updated["beast_merge"] = state

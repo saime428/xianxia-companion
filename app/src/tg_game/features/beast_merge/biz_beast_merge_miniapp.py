@@ -4,7 +4,9 @@ import json
 import re
 import time
 from typing import Optional
+from tg_game.game_clock import game_time_text
 from urllib.parse import parse_qs, urljoin, urlsplit
+import urllib.error
 import urllib.request
 
 from tg_game.features.estate import biz_estate_miniapp as estate_miniapp
@@ -214,8 +216,12 @@ def _urllib_transport(request: dict):
         headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
         method="POST",
     )
-    with urllib.request.urlopen(http_request, timeout=20) as response:
-        return int(getattr(response, "status", 200) or 200), response.read()
+    try:
+        with urllib.request.urlopen(http_request, timeout=20) as response:
+            return int(getattr(response, "status", 200) or 200), response.read()
+    except urllib.error.HTTPError as exc:
+        with exc:
+            return int(exc.code or 0), exc.read()
 
 
 def _coerce_response(raw_response) -> tuple[int, object]:
@@ -235,11 +241,13 @@ def _coerce_response(raw_response) -> tuple[int, object]:
 
 
 def _classify_response(status_code: int, body: object) -> dict:
+    from tg_game.miniapp_contract import action_failure
     source = body if isinstance(body, dict) else {"value": body}
     data = source.get("data") if isinstance(source.get("data"), dict) else source
-    if 200 <= int(status_code or 0) < 300 and source.get("ok") is not False:
+    rejected = action_failure(source)
+    if 200 <= int(status_code or 0) < 300 and source.get("ok") is not False and not rejected:
         return {"ok": True, "status_code": int(status_code), "data": data, "error": ""}
-    error = source.get("error") or source.get("message") or f"http_{status_code}"
+    error = rejected or source.get("error") or source.get("message") or f"http_{status_code}"
     return {
         "ok": False,
         "status_code": int(status_code or 0),
@@ -267,8 +275,7 @@ def _execute_with_retry(request: dict, transport, sleeper) -> dict:
     if error == "run_too_fast":
         sleeper(1.5)
         return execute_beast_merge_request(request, transport)
-    if status_code == 0 or status_code >= 500:
-        return execute_beast_merge_request(request, transport)
+    # Network failure does not prove that a move/settlement was rejected.
     return result
 
 
@@ -323,7 +330,7 @@ def _round_summary(data: dict, *, number: int, state: dict) -> dict:
         "trace_reward": max(0, _int(reward.get("tianjiTrace"), _int(reward.get("tianji_trace")))),
         "rank": _rank(data),
         "improved": bool(data.get("improved")),
-        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "updated_at": game_time_text(),
     }
 
 
@@ -398,7 +405,7 @@ def run_beast_merge_flow(
     start_request = build_beast_merge_request("start", token=token, init_data=init_data)
     start_result = execute_beast_merge_request(start_request, transport)
     if not start_result.get("ok"):
-        return {"ok": False, "status_label": "读取虫巢状态失败", "error": start_result.get("error")}
+        return {"ok": False, "retry_safe": True, "status_label": "读取虫巢状态失败", "error": start_result.get("error")}
 
     start_data = start_result.get("data") if isinstance(start_result.get("data"), dict) else {}
     used, limit = _attempts(start_data)
@@ -744,7 +751,7 @@ async def run_beast_merge_public_production_flow(
             sleeper=sleeper,
         )
         if not launch.get("ok"):
-            return {"ok": False, "status_label": "公共洞府入口解析失败", "error": launch.get("error")}
+            return {"ok": False, "retry_safe": True, "status_label": "公共洞府入口解析失败", "error": launch.get("error")}
         return await asyncio.to_thread(
             run_beast_merge_flow,
             token=launch.get("token"),

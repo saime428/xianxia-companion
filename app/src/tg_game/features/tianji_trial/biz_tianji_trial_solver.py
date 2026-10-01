@@ -281,6 +281,48 @@ def build_memory_trial_proof(challenge: dict) -> dict:
     }
 
 
+def build_stargaze_trial_proof(challenge: dict) -> dict:
+    stars = challenge.get("stars")
+    if not isinstance(stars, list) or not stars:
+        raise ValueError("stargaze stars missing")
+    angles = {}
+    moves = 0
+    for star in stars:
+        if not isinstance(star, dict) or star.get("id") in (None, ""):
+            raise ValueError("stargaze star invalid")
+        target = star.get("targetAngle", star.get("target_angle"))
+        if target is None or not math.isfinite(float(target)):
+            raise ValueError("stargaze target angle missing or invalid")
+        key = str(star["id"])
+        if key in angles:
+            raise ValueError("stargaze duplicate star")
+        angles[key] = float(target) % 360
+        current = float(star.get("angle") or 0) % 360
+        if abs((angles[key] - current + 180) % 360 - 180) > 0.01:
+            moves += 1
+    duration = max(int(challenge.get("minDurationMs") or 0) + 700, 1000 + moves * 700)
+    return {"mode": "tianjiStargazeV1", "challengeId": challenge.get("challengeId"),
+            "durationMs": duration, "angles": angles, "moves": moves, "misses": 0}
+
+
+def build_meridian_trial_proof(challenge: dict) -> dict:
+    sequence = challenge.get("sequence")
+    if not isinstance(sequence, list) or not sequence or any(item in (None, "") for item in sequence):
+        raise ValueError("meridian sequence missing or invalid")
+    points = challenge.get("points")
+    if isinstance(points, list) and points:
+        point_ids = {str(item.get("id")) for item in points if isinstance(item, dict)}
+        if any(str(item) not in point_ids for item in sequence):
+            raise ValueError("meridian sequence refers to missing point")
+    # The page blocks taps until its sequence preview has finished.
+    preview_end = max(620 + len(sequence) * 430, int(challenge.get("previewMs") or 0))
+    events = [{"id": str(point), "index": index, "t": preview_end + 500 + index * 560}
+              for index, point in enumerate(sequence)]
+    duration = max(int(challenge.get("minDurationMs") or 0) + 700, events[-1]["t"] + 700)
+    return {"mode": "tianjiMeridianV1", "challengeId": challenge.get("challengeId"),
+            "durationMs": duration, "events": events, "moves": len(events), "misses": 0}
+
+
 def build_tianji_trial_proof(challenge: object) -> dict:
     data = challenge if isinstance(challenge, dict) else {}
     mode = str(data.get("mode") or "").strip()
@@ -290,4 +332,8 @@ def build_tianji_trial_proof(challenge: object) -> dict:
         return build_lightsout_trial_proof(data)
     if mode == "tianjiMemoryV1":
         return build_memory_trial_proof(data)
+    if mode == "tianjiStargazeV1":
+        return build_stargaze_trial_proof(data)
+    if mode == "tianjiMeridianV1":
+        return build_meridian_trial_proof(data)
     raise ValueError(f"unsupported tianji trial mode: {mode}")

@@ -94,11 +94,11 @@ beg = observe(ctx(sender=BEG_BOT, text="🧧 @x 向 @demo_main 讨红包", reply
     KeyboardButtonCallback(text="打发 2 块钱", data=b"ldcbeg:200"))))
 assert beg["kind"] == "buttons" and beg["buttons"][0][0]["data"] == "ldcbeg:200", beg
 
-assert observe(ctx(text="🧧 恭喜 lucky_player 抢到 72.28 LDC！"))["kind"] == "notice"
+assert observe(ctx(text="🧧 恭喜 someone 抢到 72.28 LDC！"))["kind"] == "notice"
 assert observe(ctx(sender=7965897083, text="⌛ 【LDC 讨红包已收摊】"))["kind"] == "notice", "游戏 bot 也发过 LDC 通知"
 assert observe(ctx(sender=BEG_BOT, is_bot=False, text="🧧 【LDC 讨红包到账】"))["kind"] == "notice", "更新包没带发送者实体时按 ID 认"
-command = observe(ctx(sender=-1001000000031, is_bot=False, text=".发红包 1000 10"))
-assert command["kind"] == "command" and command["sender"] == -1001000000031 and "buttons" not in command, command
+command = observe(ctx(sender=-1005550000555, is_bot=False, text=".发红包 1000 10"))
+assert command["kind"] == "command" and command["sender"] == -1005550000555 and "buttons" not in command, command
 
 assert observe(ctx(alt, text="发了 1000 LDC", reply_markup=grab)) is None, "同一条每个号都收得到，只让大号记"
 assert observe(ctx(chat_id=-100123, text="发了 1000 LDC", reply_markup=grab)) is None, "别的群不记"

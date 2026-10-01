@@ -1,6 +1,7 @@
 from copy import deepcopy
 import time
 from typing import Optional
+from tg_game.game_clock import game_time_text
 from .biz_estate_constants import MINIAPP_HUNT_SAFETY_BOUNDARY, MINIAPP_SAFETY_BOUNDARY
 from .biz_estate_safety import _safe_text
 
@@ -23,7 +24,7 @@ def _format_sync_time(value: object) -> str:
         if timestamp > 10_000_000_000:
             timestamp = timestamp / 1000
         try:
-            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+            return game_time_text(timestamp)
         except (OverflowError, OSError, ValueError):
             return ""
     text = _miniapp_safe_text(value, 40)
@@ -183,6 +184,7 @@ def _build_hunt_round_summary(hunt: object, *, round_number: int) -> dict:
     failure_step = _hunt_failure_step(hunt_data.get("events"))
     if failure_step == "-":
         failure_step = _miniapp_safe_text(hunt_data.get("failure_step") or "-", 40)
+    found_main = bool(hunt_data.get("found_main"))
     return {
         "number": max(1, _int_or_zero(round_number)),
         "title": f"第{max(1, _int_or_zero(round_number))}轮",
@@ -204,7 +206,9 @@ def _build_hunt_round_summary(hunt: object, *, round_number: int) -> dict:
         "contribution": str(_int_or_zero(hunt_data.get("contribution")))
         if hunt_data.get("contribution") not in (None, "")
         else "0",
-        "found_main_label": "已命中" if hunt_data.get("found_main") else "未命中",
+        # 摘要会被 _normalize_hunt_rounds 再过一遍：不把 found_main 存下来，第二遍就只剩「未命中」
+        "found_main": found_main,
+        "found_main_label": "已命中" if found_main else "未命中",
         "loot": loot,
         "loot_text": loot_text,
         "error": _sanitize_estate_miniapp_secret_text(hunt_data.get("error") or ""),
@@ -304,13 +308,14 @@ def _format_number(value: object) -> str:
     return str(round(number, 2)).rstrip("0").rstrip(".")
 
 
+def _first_present(*values):
+    return next((value for value in values if value is not None and value != ""), None)
+
+
 def _format_pool(value: object) -> str:
     if isinstance(value, dict):
         current = _format_number(
-            value.get("current")
-            or value.get("value")
-            or value.get("amount")
-            or value.get("used")
+            _first_present(value.get("current"), value.get("value"), value.get("amount"), value.get("used"))
         )
         maximum = _format_number(
             value.get("max")
@@ -321,25 +326,21 @@ def _format_pool(value: object) -> str:
         if current and maximum:
             return f"{current} / {maximum}"
         return current or maximum
-    return _miniapp_safe_text(value, 40)
+    return _format_number(value)
 
 
 def _format_count(value: object) -> str:
     if isinstance(value, dict):
-        used = _format_number(value.get("used") or value.get("current") or value.get("count"))
+        used = _format_number(_first_present(value.get("used"), value.get("current"), value.get("count")))
         maximum = _format_number(value.get("max") or value.get("maximum") or value.get("total"))
         if used and maximum:
             return f"{used}/{maximum}"
         return used or maximum
-    return _miniapp_safe_text(value, 40)
+    return _format_number(value)
 
 
 def _format_scenery_count(raw: dict, metrics: dict) -> str:
-    explicit = (
-        raw.get("scenery_count")
-        or raw.get("sceneryCount")
-        or metrics.get("sceneryCount")
-    )
+    explicit = _first_present(raw.get("scenery_count"), raw.get("sceneryCount"), metrics.get("sceneryCount"))
     text = _format_count(explicit)
     if text:
         return text
@@ -348,8 +349,7 @@ def _format_scenery_count(raw: dict, metrics: dict) -> str:
     if isinstance(placed, list) and isinstance(scenery, list):
         return f"{len(placed)}/{len(scenery)}"
     if isinstance(placed, list):
-        maximum = _format_number(raw.get("visualCapacity"))
-        return f"{len(placed)}/{maximum}" if maximum else str(len(placed))
+        return str(len(placed))
     return ""
 
 
@@ -362,6 +362,8 @@ def _material_text(value: object) -> str:
 def _upgrade_materials_text(value: object) -> str:
     upgrade = _coerce_dict(value)
     if not upgrade:
+        return ""
+    if upgrade.get("available") is False:
         return ""
     if upgrade.get("maxed"):
         return "已满级"
@@ -379,6 +381,8 @@ def _upgrade_materials_text(value: object) -> str:
 def _facility_view(value: object) -> dict:
     facility = _coerce_dict(value)
     upgrade = _coerce_dict(facility.get("upgrade"))
+    if upgrade.get("available") is False:
+        upgrade = {}
     name = _first_text(
         facility.get("name"),
         facility.get("label"),
@@ -389,6 +393,7 @@ def _facility_view(value: object) -> dict:
     if level and level.isdigit():
         level = f"Lv. {level}"
     return {
+        "key": _first_text(facility.get("key"), name),
         "name": name or "-",
         "level": level or "-",
         "summary": _first_text(
@@ -419,7 +424,7 @@ def default_estate_miniapp_hunt() -> dict:
         "status": "not_requested",
         "status_label": "未执行",
         "updated_at": "-",
-        "strategy_label": "耗尽神识",
+        "strategy_label": "循线索找主宝匣",
         "automation_status": "未启动",
         "automation_runs": 0,
         "automation_total_loot": [],
@@ -596,12 +601,18 @@ def build_estate_miniapp_snapshot(raw_value: object) -> dict:
     base = default_estate_miniapp_snapshot()
     if not raw:
         return base
+    if raw.get("snapshot_version") == 2:
+        base.update({key: deepcopy(raw[key]) for key in base if key in raw})
+        for key in ("snapshot_version", "snapshot_level", "present_fields", "field_updated_at"):
+            base[key] = deepcopy(raw.get(key))
+        return base
     metrics = _coerce_dict(raw.get("metrics"))
     formation = _coerce_dict(raw.get("formation"))
-    pool = raw.get("lingqiPool") or raw.get("lingqi_pool") or raw.get("auraPool")
+    meditation = _coerce_dict(raw.get("meditation"))
+    pool = _first_present(raw.get("lingqiPool"), raw.get("lingqi_pool"), raw.get("auraPool"))
     facilities = [
         _facility_view(item)
-        for item in _coerce_list(raw.get("facilities") or raw.get("buildings"))
+        for item in _coerce_list(_first_present(raw.get("facilities"), raw.get("buildings")))
     ]
     base.update(
         {
@@ -616,6 +627,7 @@ def build_estate_miniapp_snapshot(raw_value: object) -> dict:
                 raw.get("lingmaiRate"),
                 metrics.get("lingmaiRate"),
                 _format_number(raw.get("productionHint")),
+                _format_number(meditation.get("productionRate")),
             )
             or "-",
             "jingshi_conversion": _first_text(
@@ -623,6 +635,7 @@ def build_estate_miniapp_snapshot(raw_value: object) -> dict:
                 raw.get("jingshiConversion"),
                 metrics.get("jingshiConversion"),
                 _format_number(raw.get("conversionHint")),
+                _format_number(meditation.get("conversionRate")),
             )
             or "-",
             "array_mode": _first_text(
@@ -640,7 +653,58 @@ def build_estate_miniapp_snapshot(raw_value: object) -> dict:
             or "-",
         }
     )
+    sources = {
+        "name": (raw, ("name", "title", "dongfuName")),
+        "owner": (raw, ("owner", "master", "username")),
+        "stage": (raw, ("stage", "realm", "levelName")),
+        "lingqi_pool": (raw, ("lingqiPool", "lingqi_pool", "auraPool")),
+        "lingmai_rate": (raw, ("lingmai_rate", "lingmaiRate", "productionHint")),
+        "jingshi_conversion": (raw, ("jingshi_conversion", "jingshiConversion", "conversionHint")),
+        "array_mode": (raw, ("array_mode", "arrayMode", "dazhenMode", "formation")),
+        "scenery_count": (raw, ("scenery_count", "sceneryCount", "placedScenery")),
+        "facilities": (raw, ("facilities", "buildings")),
+    }
+    present = {field for field, (source, keys) in sources.items() if any(key in source for key in keys)}
+    for field, key in (("lingmai_rate", "lingmaiRate"), ("jingshi_conversion", "jingshiConversion"),
+                       ("array_mode", "arrayMode"), ("scenery_count", "sceneryCount")):
+        if key in metrics:
+            present.add(field)
+    for field, key in (("lingmai_rate", "productionRate"), ("jingshi_conversion", "conversionRate")):
+        if key in meditation:
+            present.add(field)
+    base.update({
+        "snapshot_version": 2,
+        "snapshot_level": str(_coerce_dict(raw.get("_snapshot")).get("level") or "partial"),
+        "present_fields": sorted(present),
+        "field_updated_at": {field: base["updated_at"] for field in present},
+    })
+    if not present:
+        base["status"], base["status_label"] = "not_seen", "未同步"
     return base
+
+
+def merge_estate_snapshots(previous: object, incoming: object) -> dict:
+    old = build_estate_miniapp_snapshot(previous)
+    new = build_estate_miniapp_snapshot(incoming)
+    fields = set(new.get("present_fields") or [])
+    fields = {field for field in fields if not (old.get("field_updated_at", {}).get(field) not in (None, "", "-")
+              and new.get("field_updated_at", {}).get(field, "") < old["field_updated_at"][field])}
+    if not fields:
+        return old
+    for field in fields:
+        if field == "facilities" and new[field] and new.get("snapshot_level") != "full":
+            by_key = {item.get("key") or item.get("name"): dict(item) for item in old[field]}
+            for item in new[field]:
+                key = item.get("key") or item.get("name")
+                existing = by_key.setdefault(key, {})
+                existing.update({k: v for k, v in item.items() if v not in (None, "", "-")})
+            old[field] = list(by_key.values())[:6]
+        else:
+            old[field] = new[field]
+    old.update({key: new[key] for key in ("status", "status_label", "updated_at", "snapshot_version", "snapshot_level")})
+    old["present_fields"] = sorted(set(old.get("present_fields") or []) | fields)
+    old["field_updated_at"] = {**(old.get("field_updated_at") or {}), **{field: new["field_updated_at"][field] for field in fields}}
+    return old
 
 
 def merge_estate_miniapp_payload(
@@ -665,7 +729,8 @@ def merge_estate_miniapp_payload(
     if entry:
         dongfu["miniapp_entry"] = build_estate_miniapp_entry_view(entry)
     if snapshot:
-        dongfu["miniapp_snapshot"] = build_estate_miniapp_snapshot(
+        dongfu["miniapp_snapshot"] = merge_estate_snapshots(
+            dongfu.get("miniapp_snapshot"),
             _stamp_snapshot_sync_time(snapshot)
         )
     if hunt_limits:

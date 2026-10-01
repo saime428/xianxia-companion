@@ -156,6 +156,7 @@ def _actor(client, storage, profile_id, me):
             storage.update_companion_auto_task(int(task["id"]), **fields)
 
     return SimpleNamespace(
+        runtime_storage=storage,
         client=client, config={"world_boss": {"enabled": True}}, state=state,
         save_state=save_state, has_unsaved_state=lambda: unsaved[0], my_info=me, avatars=[],
         identity_usernames={"主魂": [profile.telegram_username]},

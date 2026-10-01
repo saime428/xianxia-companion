@@ -175,6 +175,7 @@ from tg_game.features.estate.biz_estate_miniapp import (
     resolve_estate_public_entry_override,
 )
 from tg_game.features.estate import biz_estate_hunt_daily_auto
+from tg_game.features.estate import biz_estate_resources
 from tg_game.features.tianji_trial import queue_tianji_trial_request
 from tg_game.features.tianji_trial import biz_tianji_trial_daily_auto
 from tg_game.features.luoyun_spirit_tree import biz_luoyun_spirit_tree_daily_auto
@@ -2888,6 +2889,7 @@ def create_app() -> FastAPI:
             "pagoda_auto_state": pagoda_auto_state,
             "tianji_trial_daily_auto_state": tianji_trial_daily_auto_state,
             "estate_hunt_daily_auto_state": estate_hunt_daily_auto_state,
+            "estate_resources": biz_estate_resources.build_view(payload),
             "artifact_touch_auto_state": artifact_touch_auto_state,
             "artifact_trial_auto_state": artifact_trial_auto_state,
             "artifact_nurture_auto_state": artifact_nurture_auto_state,
@@ -3953,6 +3955,57 @@ def create_app() -> FastAPI:
         )
         return RedirectResponse(url=redirect_to, status_code=303)
 
+    @application.post("/runtime/estate/resources/policy")
+    async def runtime_estate_resource_policy(
+        request: Request, observe_enabled: str = Form("0"), durability_threshold: float = Form(30),
+        auto_repair: str = Form("0"), repair_target: str = Form("all"), stone_budget: float = Form(0),
+        cultivation_budget: float = Form(0), meditation_enabled: str = Form("0"),
+        meditation_verified: str = Form("0"), lingqi_reserve: float = Form(0), skip_full_sermon: str = Form("0"),
+    ):
+        profile = _get_request_profile(request)
+        if not profile:
+            raise HTTPException(status_code=401, detail="Profile not active")
+        try:
+            settings = biz_estate_resources.policy({"observe_enabled": observe_enabled == "1", "durability_threshold": durability_threshold,
+                "auto_repair": auto_repair == "1", "repair_target": repair_target, "stone_budget": stone_budget,
+                "cultivation_budget": cultivation_budget, "meditation_enabled": meditation_enabled == "1",
+                "meditation_verified": meditation_verified == "1", "lingqi_reserve": lingqi_reserve, "skip_full_sermon": skip_full_sermon == "1"})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        def save(latest):
+            latest.setdefault("dongfu_resources", {})["policy"] = settings
+            return latest
+        storage.update_external_account_payload(profile.id, ASC_PROVIDER, save)
+        return RedirectResponse(url="/modules/estate", status_code=303)
+
+    @application.post("/runtime/estate/resources/action")
+    async def runtime_estate_resource_action(request: Request, action: str = Form(...),
+        owner_id: str = Form(""), interaction: str = Form("{}")):
+        profile = _get_request_profile(request)
+        if not profile:
+            raise HTTPException(status_code=401, detail="Profile not active")
+        expired_redirect = _ensure_external_session_active(profile)
+        if expired_redirect:
+            return expired_redirect
+        try:
+            position = json.loads(interaction)
+            if not isinstance(position, dict) or len(interaction) > 2000:
+                raise ValueError("交互请求格式无效")
+            def enqueue(latest):
+                if action == "acknowledge":
+                    board = latest.setdefault("dongfu_resources", {})
+                    if (board.get("request") or {}).get("status") == "needs_review":
+                        board.pop("request", None)
+                        board.pop("checkpoint", None)
+                        board.pop("needs_review", None)
+                        board["last_result"] = {"status": "reviewed", "error": "已由用户核对，允许后续动作"}
+                    return latest
+                return biz_estate_resources.queue(latest, action, owner_id=owner_id, interaction=position)
+            storage.update_external_account_payload(profile.id, ASC_PROVIDER, enqueue)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(url="/modules/estate", status_code=303)
+
     @application.post("/runtime/estate/miniapp-hunt-canary")
     async def runtime_start_estate_miniapp_hunt_canary(
         request: Request,
@@ -4021,25 +4074,14 @@ def create_app() -> FastAPI:
         payload = read_cached_external_payload(storage, profile.id)
         if luoyun_spirit_tree_miniapp.get_pending_luoyun_spirit_tree_request(payload):
             raise HTTPException(status_code=409, detail="已有云梦山灵眼赛请求在运行")
-        updated_payload = luoyun_spirit_tree_miniapp.queue_luoyun_spirit_tree_request(
-            payload,
-            chat_id=resolved_chat_id,
-            thread_id=resolved_thread_id,
-            chat_type=chat_type,
-            bot_username=bot_username,
-            run_mode="canary",
-        )
-        external_account = storage.get_external_account(profile.id, ASC_PROVIDER) or {}
-        storage.upsert_external_account(
-            profile.id,
-            ASC_PROVIDER,
-            str(external_account.get("telegram_user_id") or profile.telegram_user_id or ""),
-            str(external_account.get("telegram_username") or profile.telegram_username or ""),
-            str(external_account.get("status") or "connected"),
-            str(external_account.get("cookie_text") or ""),
-            updated_payload,
-            str(external_account.get("api_token") or ""),
-        )
+        def queue_canary(latest):
+            if luoyun_spirit_tree_miniapp.get_pending_luoyun_spirit_tree_request(latest):
+                raise HTTPException(status_code=409, detail="已有云梦山灵眼赛请求在运行")
+            return luoyun_spirit_tree_miniapp.queue_luoyun_spirit_tree_request(
+                latest, chat_id=resolved_chat_id, thread_id=resolved_thread_id,
+                chat_type=chat_type, bot_username=bot_username, run_mode="canary",
+            )
+        storage.update_external_account_payload(profile.id, ASC_PROVIDER, queue_canary)
         return RedirectResponse(url=redirect_to, status_code=303)
 
     @application.post("/runtime/sect/luoyun-spirit-tree-daily-auto")
@@ -4087,24 +4129,13 @@ def create_app() -> FastAPI:
             if not luoyun_spirit_tree_miniapp.get_pending_luoyun_spirit_tree_submission(
                 payload
             ):
-                updated_payload = luoyun_spirit_tree_miniapp.cancel_luoyun_spirit_tree_request(
-                    payload,
-                    reason="用户手动关闭每日云梦山灵眼赛。",
-                )
-                external_account = storage.get_external_account(
-                    profile.id,
-                    ASC_PROVIDER,
-                ) or {}
-                storage.upsert_external_account(
-                    profile.id,
-                    ASC_PROVIDER,
-                    str(external_account.get("telegram_user_id") or profile.telegram_user_id or ""),
-                    str(external_account.get("telegram_username") or profile.telegram_username or ""),
-                    str(external_account.get("status") or "connected"),
-                    str(external_account.get("cookie_text") or ""),
-                    updated_payload,
-                    str(external_account.get("api_token") or ""),
-                )
+                def cancel_tree(latest):
+                    if luoyun_spirit_tree_miniapp.get_pending_luoyun_spirit_tree_submission(latest):
+                        return latest
+                    return luoyun_spirit_tree_miniapp.cancel_luoyun_spirit_tree_request(
+                        latest, reason="用户手动关闭每日云梦山灵眼赛。",
+                    )
+                storage.update_external_account_payload(profile.id, ASC_PROVIDER, cancel_tree)
             return RedirectResponse(url=redirect_to, status_code=303)
 
         board = (

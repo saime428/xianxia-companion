@@ -83,6 +83,8 @@ def _json_loads_object(value) -> dict:
 def _merge_local_external_payload_fields(existing_json: object, me_payload: dict) -> dict:
     payload = dict(me_payload or {})
     existing = _json_loads_object(existing_json)
+    if isinstance(existing.get("dongfu_resources"), dict):
+        payload["dongfu_resources"] = existing["dongfu_resources"]
     if isinstance(existing.get("beast_merge"), dict):
         # Only local workflow updates own requests, leases and results.
         payload["beast_merge"] = existing["beast_merge"]
@@ -104,8 +106,11 @@ def _merge_local_external_payload_fields(existing_json: object, me_payload: dict
             payload["tianji_trial"] = existing_tianji_trial
         else:
             merged_trial = dict(payload_tianji_trial)
-            for key in ("miniapp_entry", "miniapp_run"):
-                if not merged_trial.get(key) and existing_tianji_trial.get(key):
+            # External snapshots do not own local requests or run results.
+            # Absence in local state also matters: never resurrect an old request.
+            for key in ("miniapp_entry", "miniapp_run", "miniapp_request", "pending_submission"):
+                merged_trial.pop(key, None)
+                if key in existing_tianji_trial:
                     merged_trial[key] = existing_tianji_trial[key]
             payload["tianji_trial"] = merged_trial
     if isinstance(existing_xinggong, dict):
@@ -118,26 +123,16 @@ def _merge_local_external_payload_fields(existing_json: object, me_payload: dict
                     merged_xinggong[key] = existing_xinggong[key]
             payload["xinggong_starboard"] = merged_xinggong
     if isinstance(existing_pagoda, dict):
-        existing_request = (
-            existing_pagoda.get("request")
-            if isinstance(existing_pagoda.get("request"), dict)
-            else {}
-        )
-        request_status = str(existing_request.get("status") or "")
-        lease_expires_at = float(existing_request.get("lease_expires_at") or 0)
-        queued_at = float(existing_request.get("queued_at") or 0)
-        request_is_active = (
-            request_status == "queued"
-            and time.strftime("%Y-%m-%d", time.localtime(queued_at))
-            == time.strftime("%Y-%m-%d", time.localtime())
-        ) or (
-            request_status in {"resolving", "running"}
-            and lease_expires_at > time.time()
-        )
-        if request_is_active or not isinstance(payload_pagoda, dict) or not payload_pagoda:
-            payload["pagoda_miniapp"] = existing_pagoda
-    if isinstance(existing_luoyun, dict) and not isinstance(payload_luoyun, dict):
-        payload["luoyun_spirit_tree"] = existing_luoyun
+        # This domain is produced locally, including expired and unconfirmed requests.
+        payload["pagoda_miniapp"] = existing_pagoda
+    if isinstance(existing_luoyun, dict):
+        merged_luoyun = dict(payload_luoyun) if isinstance(payload_luoyun, dict) else {}
+        for key in ("miniapp_entry", "miniapp_request", "miniapp_run", "pending_submission",
+                    "history", "canary", "daily", "season", "ranking", "needs_review"):
+            merged_luoyun.pop(key, None)
+            if key in existing_luoyun:
+                merged_luoyun[key] = existing_luoyun[key]
+        payload["luoyun_spirit_tree"] = merged_luoyun
     if not isinstance(existing_dongfu, dict):
         return payload
     if not isinstance(payload_dongfu, dict):
@@ -2817,6 +2812,10 @@ class Storage:
                 """,
                 (key or "", value or "", now),
             )
+
+    def delete_runtime_state(self, key: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM app_runtime_state WHERE key=?", (key,))
 
     def delete_bound_messages_older_than(
         self,

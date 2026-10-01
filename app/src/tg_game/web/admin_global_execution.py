@@ -29,7 +29,7 @@ from tg_game.features.tianxing.biz_tianxing_runtime import (
 from tg_game.features.wild_experience import (
     biz_wild_experience_miniapp as wild_experience_miniapp,
 )
-from tg_game.storage import Storage
+from tg_game.storage import ASC_EXTERNAL_PROVIDER, Storage
 
 
 STATE_KEY = "admin_global_execution"
@@ -871,6 +871,17 @@ def _refresh_pagoda_item(storage: Storage, item: dict) -> None:
     request = pagoda_state.get_pagoda_request(payload)
     request_status = str(request.get("status") or "")
     if request_status in {"queued", "resolving", "running"}:
+        started = max(float(item.get("scheduled_at") or 0), float(request.get("not_before") or 0))
+        if started and time.time() - started >= BATCH_TIMEOUT_SECONDS and float(request.get("lease_expires_at") or 0) <= time.time():
+            def expire(latest):
+                root = latest.get("pagoda_miniapp") or {}
+                if root.get("request") == request:
+                    root["request"] = {**request, "status": "interrupted", "execution_owner": ""}
+                return latest
+            storage.update_external_account_payload(int(item["profile_id"]), ASC_EXTERNAL_PROVIDER, expire)
+            item["status"] = "failed"
+            item["phase"] = "timeout"
+            return
         item["status"] = request_status
         item["phase"] = str(request.get("phase") or request_status)
         return
@@ -878,7 +889,11 @@ def _refresh_pagoda_item(storage: Storage, item: dict) -> None:
     run = root.get("run") if isinstance(root.get("run"), dict) else {}
     status = str(run.get("status") or "")
     item["phase"] = str(run.get("phase") or status)
-    if status in {"failed", "interrupted"}:
+    if request_status == "cancelled" or status == "cancelled":
+        item["status"] = "skipped"
+        item["phase"] = "cancelled"
+        return
+    if request_status in {"interrupted", "needs_review"} or status in {"failed", "interrupted", "settlement_unknown"}:
         item["status"] = "failed"
         return
     if status == "skipped":

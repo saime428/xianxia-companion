@@ -195,6 +195,9 @@ from tg_game.storage import (
 )
 from tg_game.telegram.network_guard import is_network_paused
 from tg_game.services.automation_switch import is_automation_paused
+from tg_game.services.runtime_drain import begin_flow, drain_requested, end_flow, tracked_flow
+from tg_game.game_clock import game_day
+from tg_game.features.estate import biz_estate_resources as estate_resources
 from tg_game.telegram.send_utils import send_message_with_thread_fallback
 from tg_game.services import group_activity
 
@@ -625,37 +628,11 @@ def _record_estate_miniapp_payload(
     entry = entry or extract_estate_miniapp_entry(context.event, context.text)
     if not entry and not snapshot and not hunt_limits:
         return False
-    external_account = storage.get_external_account(context.profile.id, ASC_PROVIDER) or {}
-    try:
-        payload = json.loads(external_account.get("me_json") or "{}")
-    except json.JSONDecodeError:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    updated_payload = merge_estate_miniapp_payload(
-        payload,
-        entry=entry,
-        snapshot=snapshot,
-        hunt=hunt,
-        hunt_limits=hunt_limits,
-    )
-    storage.upsert_external_account(
-        context.profile.id,
-        ASC_PROVIDER,
-        str(
-            external_account.get("telegram_user_id")
-            or context.profile.telegram_user_id
-            or ""
+    storage.update_external_account_payload(
+        context.profile.id, ASC_PROVIDER,
+        lambda latest: merge_estate_miniapp_payload(
+            latest, entry=entry, snapshot=snapshot, hunt=hunt, hunt_limits=hunt_limits,
         ),
-        str(
-            external_account.get("telegram_username")
-            or context.profile.telegram_username
-            or ""
-        ),
-        str(external_account.get("status") or "connected"),
-        str(external_account.get("cookie_text") or ""),
-        updated_payload,
-        str(external_account.get("api_token") or ""),
     )
     return True
 
@@ -727,6 +704,23 @@ def _disable_legacy_wild_experience(storage: Storage, profile_id: int) -> int:
     return disabled
 
 
+def _request_readiness(get_request):
+    """Read-only check for runners that already use a pending-request accessor."""
+    def ready(client, storage, profile_id, payload=None):
+        current = payload if isinstance(payload, dict) else read_cached_external_payload(storage, int(profile_id))
+        return bool(get_request(current))
+    return ready
+
+
+def _claim_readiness(claim):
+    """Reuse pure claim rules, including expired-lease cleanup, without writing a row."""
+    def ready(client, storage, profile_id, payload=None):
+        current = read_cached_external_payload(storage, int(profile_id))
+        return claim(current, "drain-readiness") != current
+    return ready
+
+
+@tracked_flow(ready=_request_readiness(lambda payload: wild_experience_miniapp.get_active_request(payload, due_only=True)))
 async def _run_pending_wild_experience(
     client: object,
     storage: Storage,
@@ -814,6 +808,7 @@ async def _run_pending_wild_experience(
     return True
 
 
+@tracked_flow(ready=_claim_readiness(estate_miniapp.claim_estate_miniapp_hunt_request))
 async def _run_pending_estate_public_hunt(
     client: object,
     storage: Storage,
@@ -891,6 +886,7 @@ async def _run_pending_estate_public_hunt(
     return True
 
 
+@tracked_flow(ready=_claim_readiness(biz_beast_merge_state.claim_beast_merge_request))
 async def _run_pending_beast_merge_public(
     client: object,
     storage: Storage,
@@ -949,6 +945,22 @@ async def _run_pending_beast_merge_public(
     return True
 
 
+def _fate_cards_ready(client, storage, profile_id, payload=None):
+    try:
+        state = json.loads(storage.get_runtime_state(f"fate_cards:{int(profile_id)}") or "{}")
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(state, dict) or not state.get("enabled"):
+        return False
+    now = time.time()
+    if time.strftime("%H:%M", time.localtime(now)) < FATE_CARDS_EARLIEST_TIME:
+        return False
+    if state.get("date") != time.strftime("%Y-%m-%d", time.localtime(now)):
+        return True
+    return state.get("status") not in FATE_CARDS_DONE_STATUSES and float(state.get("next_at") or 0) <= now
+
+
+@tracked_flow(ready=_fate_cards_ready)
 async def _run_pending_fate_cards(
     client: object,
     storage: Storage,
@@ -1088,6 +1100,7 @@ async def _run_wild_experience_report(
     return False  # 只读 payload，不用让调度器重读
 
 
+@tracked_flow(ready=_claim_readiness(pagoda_state.claim_pagoda_request))
 async def _run_pending_pagoda_public(
     client: object,
     storage: Storage,
@@ -1123,6 +1136,7 @@ async def _run_pending_pagoda_public(
         pagoda_miniapp.run_pagoda_public_production_flow(
             client,
             discovery_storage=storage,
+            reconcile_only=bool(pagoda_state.get_pagoda_request(current_payload).get("reconcile_only")),
             progress_callback=mark_running,
         )
     )
@@ -1216,6 +1230,7 @@ def _save_xinggong_starboard_profile_payload(
     )
 
 
+@tracked_flow(ready=_request_readiness(xinggong_miniapp.get_pending_xinggong_starboard_request))
 async def _run_pending_xinggong_public_starboard(
     client: object,
     storage: Storage,
@@ -1305,29 +1320,28 @@ def _save_luoyun_spirit_tree_profile_payload(
     storage: Storage,
     profile_id: int,
     payload: dict,
-) -> None:
-    external_account = storage.get_external_account(int(profile_id), ASC_PROVIDER) or {}
-    profile = storage.get_profile(int(profile_id))
-    storage.upsert_external_account(
-        int(profile_id),
-        ASC_PROVIDER,
-        str(
-            external_account.get("telegram_user_id")
-            or (profile.telegram_user_id if profile else "")
-            or ""
-        ),
-        str(
-            external_account.get("telegram_username")
-            or (profile.telegram_username if profile else "")
-            or ""
-        ),
-        str(external_account.get("status") or "connected"),
-        str(external_account.get("cookie_text") or ""),
-        payload,
-        str(external_account.get("api_token") or ""),
+    *,
+    expected_request: Optional[dict] = None,
+) -> bool:
+    saved = False
+
+    def update(latest: dict) -> dict:
+        nonlocal saved
+        board = latest.get("luoyun_spirit_tree") or {}
+        if expected_request is not None and board.get("miniapp_request") != expected_request:
+            return latest
+        # Keep other domains and identity metadata written while the HTTP flow awaited.
+        latest["luoyun_spirit_tree"] = dict(payload.get("luoyun_spirit_tree") or {})
+        saved = True
+        return latest
+
+    storage.update_external_account_payload(
+        int(profile_id), ASC_PROVIDER, update,
     )
+    return saved
 
 
+@tracked_flow(ready=_request_readiness(luoyun_spirit_tree_miniapp.get_pending_luoyun_spirit_tree_request))
 async def _run_pending_luoyun_spirit_tree(
     client: object,
     storage: Storage,
@@ -1350,11 +1364,14 @@ async def _run_pending_luoyun_spirit_tree(
             current_payload,
             reason="当前角色已不是落云宗，已取消云梦山灵眼赛请求。",
         )
-        _save_luoyun_spirit_tree_profile_payload(
+        saved = _save_luoyun_spirit_tree_profile_payload(
             storage,
             int(profile_id),
             updated_payload,
+            expected_request=request,
         )
+        if not saved:
+            return True
         chat_id = int(request.get("chat_id") or 0)
         if chat_id:
             storage.disable_companion_auto_task(
@@ -1365,10 +1382,30 @@ async def _run_pending_luoyun_spirit_tree(
             )
         return True
 
+    tree_owner = secrets.token_hex(16)
+    current_payload = _update_external_payload(storage, int(profile_id),
+        lambda latest: luoyun_spirit_tree_miniapp.claim_luoyun_spirit_tree_request(latest, tree_owner))
+    request = (current_payload.get("luoyun_spirit_tree") or {}).get("miniapp_request") or {}
+    if request.get("execution_owner") != tree_owner:
+        return False
+
+    def save_tree_checkpoint(checkpoint):
+        def update(latest):
+            board = latest.get("luoyun_spirit_tree") or {}
+            if board.get("miniapp_request") != request:
+                raise RuntimeError("spirit tree request replaced")
+            request["lease_expires_at"] = time.time() + 900
+            board["miniapp_request"] = dict(request)
+            board["pending_submission"] = dict(checkpoint)
+            latest["luoyun_spirit_tree"] = board
+            return latest
+        _update_external_payload(storage, int(profile_id), update)
+
     result = await luoyun_spirit_tree_miniapp.run_luoyun_spirit_tree_public_production_flow(
         client,
         discovery_storage=storage,
         run_mode=request.get("run_mode"),
+        checkpoint_callback=save_tree_checkpoint,
         pending_submission=(
             luoyun_spirit_tree_miniapp.get_pending_luoyun_spirit_tree_submission(
                 current_payload
@@ -1387,7 +1424,7 @@ async def _run_pending_luoyun_spirit_tree(
         else None
     )
     retry_request = None
-    if str(result.get("status") or "") == "retry_pending":
+    if str(result.get("status") or "") == "retry_pending" and int(request.get("retry_count") or 0) < 3:
         retry_count = max(int(request.get("retry_count") or 0) + 1, 1)
         retry_delay = (
             luoyun_spirit_tree_miniapp.resolve_luoyun_spirit_tree_retry_delay(
@@ -1404,17 +1441,19 @@ async def _run_pending_luoyun_spirit_tree(
             retry_count=retry_count,
             day_key=str(request.get("day_key") or ""),
         )
-    updated_payload = luoyun_spirit_tree_miniapp.merge_luoyun_spirit_tree_payload(
-        current_payload,
-        result,
-        request=retry_request,
-        clear_request=retry_request is None,
-    )
-    _save_luoyun_spirit_tree_profile_payload(
-        storage,
-        int(profile_id),
-        updated_payload,
-    )
+    saved = False
+    def finish_tree(latest):
+        nonlocal saved
+        if (latest.get("luoyun_spirit_tree") or {}).get("miniapp_request") != request:
+            return latest
+        saved = True
+        return luoyun_spirit_tree_miniapp.merge_luoyun_spirit_tree_payload(
+            latest, result, request=retry_request, clear_request=retry_request is None,
+        )
+    updated_payload = _update_external_payload(storage, int(profile_id), finish_tree)
+    if not saved:
+        # A cancelled/replaced request must not be resurrected by the old worker.
+        return True
 
     if task and str(result.get("failure_kind") or "") == "proof_rejected":
         storage.update_companion_auto_task(
@@ -1557,6 +1596,7 @@ def _stamp_daily_auto_result(
     storage.update_companion_auto_task(int(task["id"]), **fields)
 
 
+@tracked_flow(ready=_claim_readiness(tianji_trial_miniapp.claim_tianji_trial_request))
 async def _run_pending_tianji_public_trial(
     client: object,
     storage: Storage,
@@ -1651,6 +1691,11 @@ async def _run_pending_tianji_public_trial(
         ),
         target_runs=target_runs,
         progress_callback=mark_running,
+        recovery=(current_payload.get("tianji_trial") or {}).get("pending_submission"),
+        checkpoint_callback=lambda checkpoint: _update_external_payload(
+            storage, int(profile_id),
+            lambda latest: tianji_trial_miniapp.recovery_state.checkpoint_payload(latest, execution_owner, checkpoint),
+        ),
     )
     if not result.get("ok"):
         logger.warning(
@@ -1666,15 +1711,16 @@ async def _run_pending_tianji_public_trial(
     _update_external_payload(
         storage,
         int(profile_id),
-        lambda latest: tianji_trial_miniapp.merge_tianji_trial_payload(
+        lambda latest: tianji_trial_miniapp.recovery_state.finish_payload(
             latest,
+            execution_owner,
+            result,
+            run,
             entry=(
                 result.get("entry")
                 if isinstance(result.get("entry"), dict)
                 else None
             ),
-            run=run,
-            clear_request=True,
         )
         if tianji_trial_miniapp.is_tianji_trial_request_owned(
             latest,
@@ -1735,6 +1781,7 @@ def _trusted_estate_parent(context: EventContext, storage: Storage) -> Optional[
     return parent
 
 
+@tracked_flow
 async def _maybe_handle_estate_miniapp_snapshot(
     context: EventContext,
     storage: Storage,
@@ -1991,6 +2038,7 @@ def _build_xinggong_starboard_missing_entry_run() -> dict:
     }
 
 
+@tracked_flow
 async def _maybe_handle_xinggong_starboard_miniapp_entry(
     context: EventContext,
     storage: Storage,
@@ -2205,6 +2253,7 @@ def _load_tianji_trial_payload(context: EventContext, storage: Storage) -> tuple
     return external_account, payload
 
 
+@tracked_flow
 async def _maybe_handle_tianji_trial_miniapp_entry(
     context: EventContext,
     storage: Storage,
@@ -2312,6 +2361,11 @@ async def _maybe_handle_tianji_trial_miniapp_entry(
         webview_url=launch.get("webview_url"),
         capture_sink=captures,
         capture_source=f"tianji-trial:{context.profile.id}:{int(context.message_id or 0)}",
+        recovery=(claimed_payload.get("tianji_trial") or {}).get("pending_submission"),
+        checkpoint_callback=lambda checkpoint: _update_external_payload(
+            storage, context.profile.id,
+            lambda latest: tianji_trial_miniapp.recovery_state.checkpoint_payload(latest, execution_owner, checkpoint),
+        ),
         target_runs=tianji_trial_miniapp._miniapp_int(
             pending_request.get("target_runs"),
             tianji_trial_miniapp.TIANJI_TRIAL_DEFAULT_BATCH_RUNS,
@@ -2331,11 +2385,12 @@ async def _maybe_handle_tianji_trial_miniapp_entry(
     _update_external_payload(
         storage,
         context.profile.id,
-        lambda latest: tianji_trial_miniapp.merge_tianji_trial_payload(
+        lambda latest: tianji_trial_miniapp.recovery_state.finish_payload(
             latest,
+            execution_owner,
+            result,
+            run,
             entry=entry,
-            run=run,
-            clear_request=True,
         )
         if tianji_trial_miniapp.is_tianji_trial_request_owned(
             latest,
@@ -2752,6 +2807,10 @@ def _resolve_small_world_miracle_state(
             cooldown_until = max(cooldown_until, until)
         else:
             blocked_until[command_text] = until
+    resource_snapshot = (read_cached_external_payload(storage, profile_id).get("dongfu_resources") or {}).get("snapshot") or {}
+    remaining = estate_resources.number(((resource_snapshot.get("small_world") or {}).get("actions") or {}).get("edictRemainingSeconds"))
+    if remaining is not None:
+        cooldown_until = max(cooldown_until, float(resource_snapshot.get("updated_at") or 0) + remaining)
     return {"cooldown_until": cooldown_until, "blocked_until": blocked_until}
 
 
@@ -4456,6 +4515,9 @@ async def _run_companion_heart_tribulation_scheduler(
                 if workflow_state not in {"", COMPANION_HEART_TRIBULATION_IDLE_STATE}:
                     continue
 
+                if drain_requested(storage):
+                    continue
+
                 if next_run_at > now:
                     if earliest_idle_next_run_at is None or next_run_at < earliest_idle_next_run_at:
                         earliest_idle_next_run_at = next_run_at
@@ -4525,6 +4587,8 @@ async def _run_companion_heart_tribulation_scheduler(
                     )
                     continue
 
+                if drain_requested(storage):
+                    continue
                 run_id = secrets.token_hex(8)
                 updated_task = storage.update_companion_heart_tribulation_task(
                     task_id,
@@ -5953,8 +6017,17 @@ async def _run_companion_auto_scheduler(
     resume_last_task_at = 0.0
 
     while True:
+        flow_key = ""
         try:
             current_task_id = 0
+            if drain_requested(storage):
+                if run_once:
+                    return
+                await asyncio.sleep(COMPANION_AUTO_POLL_SECONDS)
+                continue
+            flow_key = begin_flow(storage, "companion_schedule_pass")
+            if not flow_key:
+                continue
             _disable_legacy_wild_experience(storage, int(profile_id))
             tasks = storage.list_active_companion_auto_tasks(int(profile_id))
             if task_ids is not None:
@@ -5993,6 +6066,8 @@ async def _run_companion_auto_scheduler(
             )
             resume_active = resume_until > now
             for task in tasks:
+                if drain_requested(storage):
+                    break
                 task_id = int(task.get("id") or 0)
                 current_task_id = task_id
                 feature_key = str(task.get("feature_key") or "").strip()
@@ -6371,20 +6446,28 @@ async def _run_companion_auto_scheduler(
                             ),
                         )
                         continue
-                    if luoyun_spirit_tree_miniapp.get_pending_luoyun_spirit_tree_request(
-                        latest_payload
-                    ):
+                    tree_board = latest_payload.get("luoyun_spirit_tree") or {}
+                    tree_request = tree_board.get("miniapp_request") or {}
+                    tree_pending = tree_board.get("pending_submission") or {}
+                    if tree_board.get("needs_review") and tree_pending and game_day(tree_pending.get("created_at")) == game_day(now):
+                        storage.update_companion_auto_task(task_id, next_run_at=tomorrow_run_at,
+                            workflow_state="needs_review", last_error="灵眼赛上次结算待核对，今日不再自动开局")
+                        continue
+                    if tree_request.get("status") in {"queued", "running"} and tree_request.get("day_key") == game_day(now):
                         storage.update_companion_auto_task(
                             task_id,
-                            next_run_at=now
-                            + luoyun_spirit_tree_miniapp.LUOYUN_SPIRIT_TREE_PENDING_RETRY_SECONDS,
+                            next_run_at=max(now + luoyun_spirit_tree_miniapp.LUOYUN_SPIRIT_TREE_PENDING_RETRY_SECONDS,
+                                            float(tree_request.get("not_before") or 0)),
                             workflow_state=(
                                 str(task.get("workflow_state") or "") or "running"
                             ),
                         )
                         continue
-                    updated_payload = luoyun_spirit_tree_miniapp.queue_luoyun_spirit_tree_request(
-                        latest_payload,
+                    _update_external_payload(
+                        storage,
+                        int(profile_id),
+                        lambda latest: luoyun_spirit_tree_miniapp.queue_luoyun_spirit_tree_request(
+                        latest,
                         chat_id=chat_id,
                         thread_id=(
                             int(task.get("thread_id"))
@@ -6394,11 +6477,7 @@ async def _run_companion_auto_scheduler(
                         chat_type=str(task.get("chat_type") or "group"),
                         bot_username=str(task.get("bot_username") or "fanrenxiuxian_bot"),
                         run_mode="daily",
-                    )
-                    _save_luoyun_spirit_tree_profile_payload(
-                        storage,
-                        int(profile_id),
-                        updated_payload,
+                        ),
                     )
                     storage.update_companion_auto_task(
                         task_id,
@@ -6985,6 +7064,16 @@ async def _run_companion_auto_scheduler(
                     continue
 
                 if feature_key == biz_small_world_game.SMALL_WORLD_PREACH_AUTO_FEATURE_KEY:
+                    resource_root = payload.get("dongfu_resources") or {}
+                    resource_snapshot = resource_root.get("snapshot") or {}
+                    resource_policy = estate_resources.policy(resource_root.get("policy"))
+                    http_active = (resource_root.get("request") or {}).get("status") in {"queued", "running", "needs_review"}
+                    full = time.time() - float(resource_snapshot.get("updated_at") or 0) <= 900 and estate_resources.full_sermon_resources(
+                        (resource_snapshot.get("small_world") or {}).get("summary") or {})
+                    if http_active or (resource_policy["skip_full_sermon"] and full):
+                        storage.update_companion_auto_task(task_id, next_run_at=now + 900,
+                            last_error="等待洞府HTTP任务核对" if http_active else "信仰、稳定、人口全满，本轮跳过布道")
+                        continue
                     chat_id = int(task.get("chat_id") or 0)
                     if not chat_id:
                         storage.update_companion_auto_task(
@@ -7053,6 +7142,11 @@ async def _run_companion_auto_scheduler(
                         and (now - last_run_at) < COMPANION_AUTO_POST_SEND_GRACE_SECONDS
                     ):
                         continue
+                    if resource_policy["skip_full_sermon"] and time.time() - float(resource_snapshot.get("updated_at") or 0) > 900:
+                        _update_external_payload(storage, int(profile_id), lambda latest: estate_resources.queue(latest, "refresh"))
+                        storage.update_companion_auto_task(task_id, next_run_at=now + 60,
+                            last_error="布道前先读取资源，确认是否已全满")
+                        continue
                     storage.enqueue_outgoing_command(
                         profile_id=int(profile_id),
                         chat_id=chat_id,
@@ -7070,6 +7164,9 @@ async def _run_companion_auto_scheduler(
                     continue
 
                 if feature_key == biz_small_world_game.SMALL_WORLD_AUTO_FEATURE_KEY:
+                    if ((payload.get("dongfu_resources") or {}).get("request") or {}).get("status") in {"queued", "running", "needs_review"}:
+                        storage.update_companion_auto_task(task_id, next_run_at=now + 60, last_error="等待洞府HTTP任务核对")
+                        continue
                     chat_id = int(task.get("chat_id") or 0)
                     if not chat_id:
                         storage.update_companion_auto_task(
@@ -7085,6 +7182,7 @@ async def _run_companion_auto_scheduler(
                     strategy = biz_small_world_game.unpack_auto_strategy(
                         task.get("strategy") or ""
                     )
+                    strategy["skip_full_sermon"] = estate_resources.policy((payload.get("dongfu_resources") or {}).get("policy"))["skip_full_sermon"]
                     small_world_commands = [
                         biz_small_world_game.SMALL_WORLD_PANEL_COMMAND,
                         *SMALL_WORLD_ACTION_COMMANDS,
@@ -8400,6 +8498,10 @@ async def _run_companion_auto_scheduler(
             await asyncio.sleep(10)
 
 
+        finally:
+            end_flow(storage, flow_key)
+
+
 async def _run_miniapp_pending_scheduler(client: object, storage: Storage) -> None:
     """独立执行小程序 pending 流程，与指令调度循环解耦（后者不再被分钟级慢活阻塞）。"""
     profile_id = getattr(client, "_tg_game_profile_id", None)
@@ -8410,6 +8512,7 @@ async def _run_miniapp_pending_scheduler(client: object, storage: Storage) -> No
         try:
             payload = read_cached_external_payload(storage, int(profile_id))
             for runner in (
+                estate_resources.run_pending,
                 _run_pending_wild_experience,
                 _run_pending_estate_public_hunt,
                 _run_pending_beast_merge_public,
@@ -8427,6 +8530,7 @@ async def _run_miniapp_pending_scheduler(client: object, storage: Storage) -> No
                     profile_rebirth.is_profile_rebirth_locked(storage, int(profile_id))
                     or is_network_paused(storage, int(profile_id), now=time.time())
                     or is_automation_paused(storage)
+                    or drain_requested(storage)
                 ):
                     break
                 if await runner(client, storage, int(profile_id), payload):
@@ -8454,6 +8558,11 @@ async def _run_admin_battle_scheduler(
 
     while True:
         try:
+            if drain_requested(storage):
+                if run_once:
+                    return
+                await asyncio.sleep(biz_battle_schedule.POLL_SECONDS)
+                continue
             biz_battle_schedule.tick(
                 storage,
                 storage.list_profiles(),
@@ -8483,7 +8592,16 @@ async def _run_divination_batch_scheduler(
         return
 
     while True:
+        flow_key = ""
         try:
+            if drain_requested(storage):
+                if run_once:
+                    return
+                await asyncio.sleep(DIVINATION_BATCH_POLL_SECONDS)
+                continue
+            flow_key = begin_flow(storage, "divination_schedule_pass")
+            if not flow_key:
+                continue
             if profile_rebirth.is_profile_rebirth_locked(
                 storage, int(profile_id)
             ) or is_automation_paused(storage):
@@ -8667,6 +8785,10 @@ async def _run_divination_batch_scheduler(
             if run_once:
                 raise
             await asyncio.sleep(10)
+
+
+        finally:
+            end_flow(storage, flow_key)
 
 
 def _build_fishing_session_updates_from_reply(
@@ -9108,6 +9230,7 @@ def _build_fishing_miniapp_result_updates(session: dict, result: dict, *, now: f
     return updates
 
 
+@tracked_flow
 async def _maybe_handle_fishing_miniapp_entry(context: EventContext, storage: Storage) -> bool:
     parent = _trusted_fishing_parent(context, storage)
     if not parent:
@@ -9224,6 +9347,7 @@ async def _run_fishing_auto_scheduler(
         return
 
     while True:
+        flow_key = ""
         try:
             if profile_rebirth.is_profile_rebirth_locked(
                 storage, int(profile_id)
@@ -9233,6 +9357,14 @@ async def _run_fishing_auto_scheduler(
                 await asyncio.sleep(FISHING_AUTO_POLL_SECONDS)
                 continue
             sessions = storage.list_active_fishing_sessions(int(profile_id))
+            if drain_requested(storage):
+                if run_once:
+                    return
+                await asyncio.sleep(FISHING_AUTO_POLL_SECONDS)
+                continue
+            flow_key = begin_flow(storage, "fishing_schedule_pass")
+            if not flow_key:
+                continue
             if session_ids is not None:
                 sessions = [
                     session
@@ -9240,6 +9372,8 @@ async def _run_fishing_auto_scheduler(
                     if int(session.get("id") or 0) in session_ids
                 ]
             for session in sessions:
+                if drain_requested(storage):
+                    break
                 chat_id = int(session.get("chat_id") or 0)
                 if not chat_id:
                     continue
@@ -9298,6 +9432,10 @@ async def _run_fishing_auto_scheduler(
                         capture_sink=captures,
                         capture_source=f"fishing-public:{profile_id}:{int(session['id'])}",
                     )
+                    if result.get("status") == "draining":
+                        storage.update_fishing_session(int(session["id"]), state=state,
+                            next_action_at=time.time() + 60, last_error="部署排空中，稍后执行")
+                        continue
                     fresh_session = (
                         storage.get_fishing_session(int(profile_id), chat_id) or session
                     )
@@ -9423,6 +9561,10 @@ async def _run_fishing_auto_scheduler(
             if run_once:
                 raise
             await asyncio.sleep(FISHING_AUTO_POLL_SECONDS)
+
+
+        finally:
+            end_flow(storage, flow_key)
 
 
 async def run_queue_backed_schedules_once(

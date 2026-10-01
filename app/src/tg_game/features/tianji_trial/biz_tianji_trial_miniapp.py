@@ -5,10 +5,13 @@ import re
 import time
 from typing import Optional
 from urllib.parse import parse_qsl, quote, unquote, urljoin, urlsplit
+import urllib.error
 import urllib.request
 
 from telethon import functions
 from tg_game.features.estate import biz_estate_miniapp as estate_miniapp
+from tg_game.game_clock import game_day
+from . import biz_tianji_trial_recovery as recovery_state
 from .biz_tianji_trial_solver import (
     build_lightsout_trial_proof,
     build_memory_trial_proof,
@@ -62,6 +65,19 @@ _START_TOKEN_PATTERN = re.compile(
     r"\b(?P<kind>trial)_[A-Za-z0-9_-]{4,}\b",
     re.IGNORECASE,
 )
+# Public protocol error codes share the entry-token prefix. Only these known
+# diagnostic identifiers may pass; actual credentials still use field redaction.
+TRIAL_ERROR_CODES = frozenset({
+    "trial_token_missing", "trial_token_used", "trial_token_expired", "trial_daily_limit",
+    "trial_token_user_mismatch", "trial_token_channel_unbound", "trial_challenge_expired",
+    "trial_too_fast", "trial_too_slow", "trial_crossings_remain", "trial_positions_invalid",
+    "trial_position_out_of_bounds", "trial_nodes_too_close", "trial_locked_node_moved",
+    "trial_angles_invalid", "trial_orbits_misaligned", "trial_lights_invalid",
+    "trial_lights_remain", "trial_lights_unstable", "trial_memory_invalid",
+    "trial_memory_time_invalid", "trial_memory_incomplete", "trial_memory_unstable",
+    "trial_sequence_invalid", "trial_sequence_time_invalid", "trial_sequence_incomplete",
+    "trial_sequence_unstable", "trial_duration_invalid",
+})
 _START_PARAM_KEYS = {
     "startapp",
     "start_param",
@@ -403,7 +419,7 @@ def sanitize_tianji_trial_secret_text(text: object, *, limit: int = 220) -> str:
         flags=re.IGNORECASE,
     )
     raw = _START_TOKEN_PATTERN.sub(
-        lambda match: f"{match.group('kind').lower()}_<redacted>",
+        lambda match: match.group(0) if match.group(0) in TRIAL_ERROR_CODES else f"{match.group('kind').lower()}_<redacted>",
         raw,
     )
     raw = re.sub(r"\s+", " ", raw).strip()
@@ -525,8 +541,12 @@ def _urllib_transport(request: dict):
         headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
         method=str(request.get("method") or "POST"),
     )
-    with urllib.request.urlopen(http_request, timeout=20) as response:
-        return int(getattr(response, "status", 200) or 200), response.read()
+    try:
+        with urllib.request.urlopen(http_request, timeout=20) as response:
+            return int(getattr(response, "status", 200) or 200), response.read()
+    except urllib.error.HTTPError as exc:
+        with exc:
+            return int(exc.code or 0), exc.read()
 
 
 def _coerce_response(raw_response) -> tuple[int, object]:
@@ -550,12 +570,14 @@ def _coerce_response(raw_response) -> tuple[int, object]:
 
 
 def _classify_http_response(status_code: int, body: object) -> dict:
+    from tg_game.miniapp_contract import action_failure
     if not isinstance(body, dict):
         body = {"value": body}
     data = body.get("data") if isinstance(body.get("data"), dict) else body
-    if 200 <= int(status_code or 0) < 300 and body.get("ok") is not False:
+    rejected = action_failure(body)
+    if 200 <= int(status_code or 0) < 300 and body.get("ok") is not False and not rejected:
         return {"ok": True, "status_code": int(status_code), "data": data, "error": ""}
-    error = body.get("error") or body.get("message") or f"http_{status_code}"
+    error = rejected or body.get("error") or body.get("message") or f"http_{status_code}"
     return {
         "ok": False,
         "status_code": int(status_code or 0),
@@ -713,6 +735,8 @@ def run_tianji_trial_miniapp_flow(
     capture_source: str = "",
     challenge: Optional[dict] = None,
     trial: Optional[dict] = None,
+    recovery: Optional[dict] = None,
+    checkpoint_callback=None,
 ) -> dict:
     if not str(token or "").strip():
         return _flow_result(False, "failed", error="token missing")
@@ -721,6 +745,11 @@ def run_tianji_trial_miniapp_flow(
     events: list[dict] = []
     current_challenge = dict(challenge or {})
     current_trial = dict(trial or {})
+    pending = dict(recovery or {})
+    if pending.get("stage") == "settled" and pending.get("day") == game_day():
+        return dict(pending["result"])
+    if pending:
+        current_challenge = {}
     if not current_challenge:
         start_request = build_tianji_trial_miniapp_request(
             "start",
@@ -736,14 +765,28 @@ def run_tianji_trial_miniapp_flow(
         )
         _append_event(events, "start", start_result)
         if not start_result.get("ok"):
-            return _flow_result(False, "failed", error=start_result.get("error"), events=events)
+            code = int(start_result.get("status_code") or 0)
+            status = "retry_pending" if code == 0 or code >= 500 or code in {401, 403, 429} else "failed"
+            if pending and status == "failed":
+                status = "settlement_unknown"
+            return _flow_result(False, status, error=start_result.get("error"), data=start_result.get("data"), events=events)
         start_data = start_result.get("data") or {}
         current_challenge = _extract_challenge(start_data)
         current_trial = _extract_trial_meta(start_data)
+        if pending:
+            reconciliation = recovery_state.reconcile_checkpoint(pending, start_data)
+            if reconciliation == "confirmed":
+                return _flow_result(True, "reconciled", data={
+                    "dailyProgress": start_data.get("dailyProgress") or {"completed": current_trial.get("completedToday"), "limit": current_trial.get("dailyLimit")},
+                    "nextChallenge": current_challenge, "nextTrial": current_trial,
+                    "reward_unconfirmed": True,
+                }, events=events)
+            if reconciliation != "prepared":
+                return _flow_result(False, "settlement_unknown", error="提交结果待核对；已保留题目与凭据摘要，未重发 finish", data={"trial": current_trial}, events=events)
     if not current_challenge:
         return _flow_result(False, "failed", error="challenge missing", events=events)
     try:
-        proof = build_tianji_trial_proof(current_challenge)
+        proof = dict(pending.get("proof") or {}) or build_tianji_trial_proof(current_challenge)
     except Exception as exc:
         return _flow_result(False, "solver_failed", error=exc, data={"challenge_mode": current_challenge.get("mode")}, events=events)
     events.append(
@@ -754,6 +797,10 @@ def run_tianji_trial_miniapp_flow(
             "durationMs": proof.get("durationMs"),
         }
     )
+    checkpoint = {"day": game_day(), "stage": "prepared", "challenge": current_challenge,
+                  "trial": current_trial, "proof": proof}
+    if checkpoint_callback:
+        checkpoint_callback(checkpoint)
     _wait_for_trial_duration(proof, sleeper)
     finish_request = build_tianji_trial_miniapp_request(
         "finish",
@@ -761,6 +808,9 @@ def run_tianji_trial_miniapp_flow(
         init_data=init_data,
         payload={"trialProof": proof},
     )
+    checkpoint["stage"] = "submitting"
+    if checkpoint_callback:
+        checkpoint_callback(checkpoint)
     finish_result = execute_tianji_trial_miniapp_request(
         finish_request,
         transport,
@@ -770,7 +820,15 @@ def run_tianji_trial_miniapp_flow(
     )
     _append_event(events, "finish", finish_result)
     if not finish_result.get("ok"):
-        return _flow_result(False, "failed", error=finish_result.get("error"), events=events, proof=proof)
+        code = int(finish_result.get("status_code") or 0)
+        uncertain = code == 0 or code >= 500
+        retryable = code in {401, 403, 429}
+        if retryable:
+            checkpoint["stage"] = "prepared"
+            if checkpoint_callback:
+                checkpoint_callback(checkpoint)
+        return _flow_result(False, "retry_pending" if uncertain or retryable else "failed", error=finish_result.get("error"),
+                            data={**dict(finish_result.get("data") or {}), "trial": current_trial}, events=events, proof=proof)
     finish_data = dict(finish_result.get("data") or {})
     finish_data["challenge"] = {
         "challengeId": current_challenge.get("challengeId"),
@@ -780,7 +838,10 @@ def run_tianji_trial_miniapp_flow(
         "difficultyLabel": current_challenge.get("difficultyLabel"),
     }
     finish_data["trial"] = current_trial
-    return _flow_result(True, "settled", data=finish_data, events=events, proof=proof)
+    result = _flow_result(True, "settled", data=finish_data, events=events, proof=proof)
+    if checkpoint_callback:
+        checkpoint_callback({**checkpoint, "stage": "settled", "result": result})
+    return result
 
 
 def run_tianji_trial_miniapp_batch_flow(
@@ -792,12 +853,21 @@ def run_tianji_trial_miniapp_batch_flow(
     capture_sink=None,
     capture_source: str = "",
     target_runs: int = TIANJI_TRIAL_DEFAULT_BATCH_RUNS,
+    recovery: Optional[dict] = None,
+    checkpoint_callback=None,
 ) -> dict:
     target = max(1, min(TIANJI_TRIAL_DEFAULT_BATCH_RUNS, _miniapp_int(target_runs, TIANJI_TRIAL_DEFAULT_BATCH_RUNS)))
-    round_results: list[dict] = []
+    pending = dict(recovery or {})
+    round_results: list[dict] = list(pending.get("round_results") or [])
+    def checkpoint(value):
+        nonlocal pending
+        pending = {**value, "round_results": list(round_results)}
+        if checkpoint_callback:
+            checkpoint_callback(pending)
     next_challenge: Optional[dict] = None
     next_trial: Optional[dict] = None
-    for round_number in range(1, target + 1):
+    remaining = max(0, target - sum(bool(item.get("ok")) for item in round_results))
+    for round_number in range(1, remaining + 1):
         result = run_tianji_trial_miniapp_flow(
             token=token,
             init_data=init_data,
@@ -807,9 +877,13 @@ def run_tianji_trial_miniapp_batch_flow(
             capture_source=f"{capture_source}:round-{round_number}",
             challenge=next_challenge,
             trial=next_trial,
+            recovery=pending if round_number == 1 else None,
+            checkpoint_callback=checkpoint,
         )
         round_results.append(result)
         if not result.get("ok"):
+            if pending and result.get("status") in {"retry_pending", "settlement_unknown"}:
+                checkpoint(pending)
             return {
                 "ok": False,
                 "status": str(result.get("status") or "failed"),
@@ -887,6 +961,8 @@ async def run_tianji_trial_miniapp_production_flow(
     capture_sink=None,
     capture_source: str = "",
     target_runs: int = TIANJI_TRIAL_DEFAULT_BATCH_RUNS,
+    recovery: Optional[dict] = None,
+    checkpoint_callback=None,
 ) -> dict:
     try:
         init_data = await request_tianji_trial_miniapp_init_data(
@@ -903,9 +979,11 @@ async def run_tianji_trial_miniapp_production_flow(
             capture_sink=capture_sink,
             capture_source=capture_source,
             target_runs=target_runs,
+            recovery=recovery,
+            checkpoint_callback=checkpoint_callback,
         )
     except Exception as exc:
-        return _flow_result(False, "failed", error=exc)
+        return _flow_result(False, "retry_pending", error=exc)
 
 
 async def run_tianji_trial_public_miniapp_production_flow(
@@ -918,6 +996,8 @@ async def run_tianji_trial_public_miniapp_production_flow(
     capture_source: str = "",
     target_runs: int = TIANJI_TRIAL_DEFAULT_BATCH_RUNS,
     progress_callback=None,
+    recovery: Optional[dict] = None,
+    checkpoint_callback=None,
 ) -> dict:
     try:
         if discovery_storage is not None:
@@ -982,9 +1062,11 @@ async def run_tianji_trial_public_miniapp_production_flow(
             capture_sink=capture_sink,
             capture_source=capture_source,
             target_runs=target_runs,
+            recovery=recovery,
+            checkpoint_callback=checkpoint_callback,
         )
         result = dict(result)
         result["entry"] = trial_launch.get("entry")
         return result
     except Exception as exc:
-        return _flow_result(False, "failed", error=exc)
+        return _flow_result(False, "retry_pending", error=exc)

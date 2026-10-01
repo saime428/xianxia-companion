@@ -4,6 +4,7 @@ import json
 import re
 import time
 from urllib.parse import parse_qs, urljoin, urlsplit
+import urllib.error
 import urllib.request
 
 from tg_game.features.estate import biz_estate_miniapp as estate_miniapp
@@ -175,8 +176,12 @@ def _urllib_transport(request: dict):
     )
     endpoint = str((request.get("safe_summary") or {}).get("endpoint") or "")
     timeout_seconds = 90 if endpoint == "challenge" else PAGODA_HTTP_RESPONSE_WAIT_SECONDS
-    with urllib.request.urlopen(http_request, timeout=timeout_seconds) as response:
-        return int(getattr(response, "status", 200) or 200), response.read()
+    try:
+        with urllib.request.urlopen(http_request, timeout=timeout_seconds) as response:
+            return int(getattr(response, "status", 200) or 200), response.read()
+    except urllib.error.HTTPError as exc:
+        with exc:
+            return int(exc.code or 0), exc.read()
 
 
 def _coerce_response(raw_response) -> tuple[int, object]:
@@ -196,6 +201,7 @@ def _coerce_response(raw_response) -> tuple[int, object]:
 
 
 def execute_pagoda_request(request: dict, transport) -> dict:
+    from tg_game.miniapp_contract import action_failure
     if transport is None:
         raise ValueError("pagoda miniapp transport missing")
     try:
@@ -204,12 +210,13 @@ def execute_pagoda_request(request: dict, transport) -> dict:
         return {"ok": False, "status_code": 0, "data": {}, "error": _safe_text(exc)}
     root = body if isinstance(body, dict) else {"value": body}
     data = root.get("data") if isinstance(root.get("data"), dict) else root
-    ok = 200 <= status_code < 300 and root.get("ok") is not False
+    rejected = action_failure(root)
+    ok = 200 <= status_code < 300 and root.get("ok") is not False and not rejected
     return {
         "ok": ok,
         "status_code": status_code,
         "data": data if isinstance(data, dict) else {},
-        "error": "" if ok else _safe_text(root.get("message") or root.get("error") or f"http_{status_code}"),
+        "error": "" if ok else _safe_text(rejected or root.get("message") or root.get("error") or f"http_{status_code}"),
     }
 
 
@@ -346,6 +353,7 @@ async def run_pagoda_flow_with_reconciliation(
     init_data: str,
     transport,
     progress_callback=None,
+    reconcile_only: bool = False,
 ) -> dict:
     start_request = build_pagoda_request("start", token=token, init_data=init_data)
     if progress_callback is not None:
@@ -359,6 +367,7 @@ async def run_pagoda_flow_with_reconciliation(
             "state": state,
             "replay": {},
             "error": start_result.get("error"),
+            "retry_safe": True,
         }
     if not state.get("canChallenge"):
         return {
@@ -369,6 +378,10 @@ async def run_pagoda_flow_with_reconciliation(
             "error": "今日已闯塔，服务端当前不可再次挑战。",
         }
 
+    if reconcile_only:
+        return {"ok": False, "status": "settlement_unknown", "state": state, "replay": {},
+                "error": "旧挑战结算仍未确认，仅查询状态，未重复挑战。"}
+
     if progress_callback is not None:
         progress_callback("challenge")
     challenge_task = asyncio.create_task(
@@ -378,6 +391,19 @@ async def run_pagoda_flow_with_reconciliation(
             transport,
         )
     )
+    try:
+        return await _observe_pagoda_challenge(challenge_task, start_request, state, transport, progress_callback)
+    finally:
+        # to_thread keeps running after cancellation; do not release the flow marker early.
+        while not challenge_task.done():
+            try:
+                await asyncio.shield(challenge_task)
+            except asyncio.CancelledError:
+                if challenge_task.done():
+                    raise
+
+
+async def _observe_pagoda_challenge(challenge_task, start_request, state, transport, progress_callback):
     challenge_result = None
     last_error = "challenge 回包超时"
     try:
@@ -423,7 +449,7 @@ async def run_pagoda_flow_with_reconciliation(
         if loop.time() >= deadline:
             return {
                 "ok": False,
-                "status": "failed",
+                "status": "settlement_unknown",
                 "state": confirmed_state or state,
                 "replay": {},
                 "error": f"{_safe_text(last_error)}；服务端结算确认超时。",
@@ -493,6 +519,7 @@ async def run_pagoda_public_production_flow(
     transport=None,
     progress_callback=None,
     sleeper=time.sleep,
+    reconcile_only: bool = False,
 ) -> dict:
     try:
         launch = await resolve_pagoda_public_launch(
@@ -502,12 +529,13 @@ async def run_pagoda_public_production_flow(
             sleeper=sleeper,
         )
         if not launch.get("ok"):
-            return {"ok": False, "status": "failed", "state": {}, "replay": {}, "error": launch.get("error")}
+            return {"ok": False, "retry_safe": True, "status": "failed", "state": {}, "replay": {}, "error": launch.get("error")}
         result = await run_pagoda_flow_with_reconciliation(
             token=launch.get("token"),
             init_data=launch.get("init_data"),
             transport=transport or _urllib_transport,
             progress_callback=progress_callback,
+            reconcile_only=reconcile_only,
         )
         result = dict(result)
         result["entry"] = launch.get("entry")

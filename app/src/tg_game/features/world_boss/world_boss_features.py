@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from telethon import events
+from tg_game.services.runtime_drain import tracked_flow
 
 from .world_boss_support import (
     world_boss_identities_for_account,
@@ -954,6 +955,9 @@ class WorldBossMonitor:
         return -30 <= age <= WORLD_BOSS_RECOVERY_WINDOW_SECONDS
 
     async def process_message(self, message: Any, *, source: str = "new") -> bool:
+        from tg_game.services.runtime_drain import drain_requested
+        if drain_requested(getattr(self.actor, "runtime_storage", None)):
+            return False
         if not self._is_enabled():
             return False
         entry = extract_world_boss_entry(message)
@@ -1012,6 +1016,7 @@ class WorldBossMonitor:
         task.add_done_callback(done)
         return True
 
+    @tracked_flow
     async def _run_entry(
         self,
         entry: WorldBossEntry,

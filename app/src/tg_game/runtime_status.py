@@ -32,6 +32,7 @@ def build_runtime_status(component: str, *, started_at: float) -> dict:
         "started_at": float(started_at),
         "updated_at": time.time(),
         "code_fingerprint": compute_runtime_code_fingerprint(),
+        "capabilities": ["deployment_drain_v1"],
     }
 
 

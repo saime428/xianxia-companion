@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import parse_qsl, quote, unquote, urljoin, urlsplit
+import urllib.error
 import urllib.request
 
 from telethon import functions
@@ -427,8 +428,12 @@ def _urllib_transport(request: dict):
         headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
         method=str(request.get("method") or "POST"),
     )
-    with urllib.request.urlopen(http_request, timeout=20) as response:
-        return int(getattr(response, "status", 200) or 200), response.read()
+    try:
+        with urllib.request.urlopen(http_request, timeout=20) as response:
+            return int(getattr(response, "status", 200) or 200), response.read()
+    except urllib.error.HTTPError as exc:
+        with exc:
+            return int(exc.code or 0), exc.read()
 
 
 def _coerce_response(raw_response) -> tuple[int, object]:
@@ -452,12 +457,14 @@ def _coerce_response(raw_response) -> tuple[int, object]:
 
 
 def _classify_http_response(status_code: int, body: object) -> dict:
+    from tg_game.miniapp_contract import action_failure
     if not isinstance(body, dict):
         body = {"value": body}
     data = body.get("data") if isinstance(body.get("data"), dict) else body
-    if 200 <= int(status_code or 0) < 300 and body.get("ok") is not False:
+    rejected = action_failure(body)
+    if 200 <= int(status_code or 0) < 300 and body.get("ok") is not False and not rejected:
         return {"ok": True, "status_code": int(status_code), "data": data, "error": ""}
-    error = body.get("error") or body.get("message") or f"http_{status_code}"
+    error = rejected or body.get("error") or body.get("message") or f"http_{status_code}"
     return {
         "ok": False,
         "status_code": int(status_code or 0),

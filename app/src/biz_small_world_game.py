@@ -250,7 +250,7 @@ def resolve_next_wakeup_from_payload(
         candidates.append(prayer_at + PRAYER_COOLDOWN_SECONDS)
 
     if settings["relief_enabled"] or settings["preach_enabled"]:
-        # 神迹现在只看神谕冷却，不再管信仰/稳定，所以这里能一路睡到冷却结束
+        # 冷却未结束就先等待；冷却结束后再按开关及全满跳过策略判断。
         edict_at = _parse_iso_ts(small_world.get("last_edict_time"))
         if not edict_at:
             return 0.0
@@ -306,6 +306,7 @@ def pack_auto_strategy(
     manifest_enabled: bool = False,
     relief_enabled: bool = False,
     preach_enabled: bool = False,
+    skip_full_sermon: bool = False,
     refresh_interval_seconds: int = SMALL_WORLD_DEFAULT_REFRESH_INTERVAL_SECONDS,
 ) -> str:
     return json.dumps(
@@ -316,6 +317,7 @@ def pack_auto_strategy(
             "m": 1 if manifest_enabled else 0,
             "r": 1 if relief_enabled else 0,
             "p": 1 if preach_enabled else 0,
+            "skip_full_sermon": bool(skip_full_sermon),
             "i": max(
                 int(refresh_interval_seconds or 0),
                 SMALL_WORLD_MIN_REFRESH_INTERVAL_SECONDS,
@@ -367,6 +369,7 @@ def unpack_auto_strategy(value: object) -> dict:
         "manifest_enabled": bool(raw.get("m", raw.get("manifest_enabled"))),
         "relief_enabled": bool(raw.get("r", raw.get("relief_enabled"))),
         "preach_enabled": bool(raw.get("p", raw.get("preach_enabled"))),
+        "skip_full_sermon": bool(raw.get("skip_full_sermon", False)),
         "refresh_interval_seconds": max(
             interval_seconds, SMALL_WORLD_MIN_REFRESH_INTERVAL_SECONDS
         ),
@@ -388,9 +391,8 @@ def build_auto_commands(
 
     优先级：收割香火 > 显灵 > 赈灾 > 布道。
     显灵走自己的 6 小时祈愿冷却，和神迹不抢；赈灾和布道共用一个 3 小时神谕
-    冷却，只能二选一——发哪个**只看开关**：两个都开时赈灾优先（额外恢复约
-    930 人口，20 条【天降甘霖】实测 635~1269），赈灾关掉或被"国库空虚"挡住
-    才退回布道。
+    冷却，只能二选一。两个都开时赈灾优先；布道可选择在信仰、稳定、人口
+    全满时跳过，关闭该策略则继续按冷却执行。
     """
     if not panel_state or not panel_state.get("opened"):
         return []
@@ -427,15 +429,13 @@ def build_auto_commands(
     ):
         commands.append(SMALL_WORLD_MANIFEST_COMMAND)
 
-    # 神迹只有一格，发什么由开关决定，不再判断"值不值得发"：
-    # 原来还会看信仰/稳定是否双百、人口缺口够不够，结果是信仰稳定一旦顶到
-    # 100 就再也不回落，布道那条分支等于永久死掉（2026-09-08 实测）。用户要
-    # 的是按冷却定时发，所以只保留两个真实的闸门：共用的 3 小时神谕冷却，
-    # 以及上一次因灵石/修为不够被拒后的退避。
+    # 两种神迹共享冷却，预算不足时退避；资源全满跳过仅影响显式启用该策略的布道。
     if float(miracle_cooldown_until or 0) <= now:
         if settings["relief_enabled"] and float(relief_blocked_until or 0) <= now:
             commands.append(SMALL_WORLD_RELIEF_COMMAND)
-        elif settings["preach_enabled"] and float(preach_blocked_until or 0) <= now:
+        elif settings["preach_enabled"] and float(preach_blocked_until or 0) <= now and not (
+            settings["skip_full_sermon"] and population_full and faith_full and stability_full
+        ):
             commands.append(SMALL_WORLD_PREACH_COMMAND)
 
     return commands

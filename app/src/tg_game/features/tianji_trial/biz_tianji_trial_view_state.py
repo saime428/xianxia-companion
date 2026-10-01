@@ -2,6 +2,7 @@ import json
 import time
 from copy import deepcopy
 from typing import Optional
+from tg_game.game_clock import game_day, game_time_text
 
 
 TIANJI_TRIAL_REQUEST_LEASE_SECONDS = 15 * 60
@@ -15,12 +16,12 @@ def _now_text(value: object = None) -> str:
         ts = float(value if value is not None else time.time())
     except (TypeError, ValueError):
         ts = time.time()
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+    return game_time_text(ts)
 
 
 def _day_key_from_timestamp(value: object) -> str:
     try:
-        return time.strftime("%Y-%m-%d", time.localtime(float(value)))
+        return game_day(float(value))
     except (TypeError, ValueError, OSError):
         return ""
 
@@ -50,9 +51,9 @@ def _tianji_trial_request_day_key(request: object) -> str:
     )
 
 
-def _is_stale_tianji_trial_request(request: object) -> bool:
+def _is_stale_tianji_trial_request(request: object, *, now=None) -> bool:
     request_day = _tianji_trial_request_day_key(request)
-    return bool(request_day and request_day != _current_day_key())
+    return bool(request_day and request_day != game_day(now))
 
 
 def _timestamp_or_zero(value: object) -> float:
@@ -70,7 +71,7 @@ def _tianji_trial_request_is_active(
     source = request if isinstance(request, dict) else {}
     status = str(source.get("status") or "")
     if status == "queued":
-        return not _is_stale_tianji_trial_request(source)
+        return not _is_stale_tianji_trial_request(source, now=now)
     if status not in {"resolving", "running"}:
         return False
     current_time = float(time.time() if now is None else now)
@@ -109,6 +110,19 @@ def queue_tianji_trial_request(
     trial = dict(updated.get("tianji_trial") or {})
     if _tianji_trial_request_is_active(trial.get("miniapp_request")):
         return updated
+    recovery = trial.get("pending_submission") or {}
+    if recovery and recovery.get("day") == game_day():
+        # A manual requeue must reconcile the previous submission first.
+        previous = dict(trial.get("miniapp_request") or {})
+        previous.update(status="queued", not_before=0, execution_owner="", lease_expires_at=0)
+        previous.setdefault("queued_at", time.time())
+        previous.setdefault("target_runs", _target_runs(target_runs))
+        previous.setdefault("chat_id", int(chat_id or 0))
+        previous.setdefault("thread_id", thread_id)
+        trial["miniapp_request"] = previous
+        updated["tianji_trial"] = trial
+        return updated
+    trial.pop("pending_submission", None)
     now = time.time()
     target = _target_runs(target_runs)
     trial["miniapp_request"] = {
@@ -143,6 +157,8 @@ def get_pending_tianji_trial_request(payload: object) -> dict:
     trial = payload.get("tianji_trial") if isinstance(payload.get("tianji_trial"), dict) else {}
     request = trial.get("miniapp_request") if isinstance(trial.get("miniapp_request"), dict) else {}
     if str(request.get("status") or "") not in {"queued", "resolving", "running"}:
+        return {}
+    if _timestamp_or_zero(request.get("not_before")) > time.time():
         return {}
     return {} if _is_stale_tianji_trial_request(request) else request
 
@@ -209,12 +225,15 @@ def claim_tianji_trial_request(
     if (
         not request
         or status not in {"queued", "resolving", "running"}
-        or _is_stale_tianji_trial_request(request)
+        or _is_stale_tianji_trial_request(request, now=now)
     ):
         return updated
     current_time = float(time.time() if now is None else now)
+    if _timestamp_or_zero(request.get("not_before")) > current_time:
+        return updated
     current_owner = str(request.get("execution_owner") or "")
-    if status == "queued" or current_owner == execution_owner:
+    recoverable = bool(trial.get("pending_submission")) or status == "resolving"
+    if status == "queued" or current_owner == execution_owner or (recoverable and not _tianji_trial_request_is_active(request, now=current_time)):
         request["execution_owner"] = execution_owner
         request["claimed_at"] = request.get("claimed_at") or current_time
         trial["miniapp_request"] = request
@@ -261,7 +280,7 @@ def _normalize_tianji_trial_rounds(value: object) -> list[dict]:
     rounds: list[dict] = []
     if not isinstance(value, list):
         return rounds
-    for index, item in enumerate(value[:TIANJI_TRIAL_DEFAULT_BATCH_RUNS], start=1):
+    for index, item in enumerate(value[-30:], start=1):
         if not isinstance(item, dict):
             continue
         number = _miniapp_int(item.get("number"), index) or index
@@ -274,6 +293,7 @@ def _normalize_tianji_trial_rounds(value: object) -> list[dict]:
                 "daily_limit": _miniapp_int(item.get("daily_limit"), TIANJI_TRIAL_DEFAULT_BATCH_RUNS)
                 or TIANJI_TRIAL_DEFAULT_BATCH_RUNS,
                 "completed_today": _miniapp_int(item.get("completed_today")),
+                "daily_progress_known": bool(item.get("daily_progress_known", False)),
                 "status": status,
                 "status_label": _safe_text(
                     item.get("status_label") or ("已完成" if ok else "失败"),
@@ -297,7 +317,7 @@ def _normalize_tianji_trial_rounds(value: object) -> list[dict]:
 def _result_settlement_data(result: object) -> tuple[dict, dict, dict]:
     data = result if isinstance(result, dict) else {}
     result_data = data.get("data") if isinstance(data.get("data"), dict) else {}
-    settlement = result_data.get("result") if isinstance(result_data.get("result"), dict) else result_data
+    settlement = next((result_data[key] for key in ("settlement", "result") if isinstance(result_data.get(key), dict)), result_data)
     challenge = result_data.get("challenge") if isinstance(result_data.get("challenge"), dict) else {}
     trial = result_data.get("trial") if isinstance(result_data.get("trial"), dict) else {}
     return settlement if isinstance(settlement, dict) else {}, challenge, trial
@@ -350,6 +370,7 @@ def build_tianji_trial_round(result: object, *, round_number: int) -> dict:
         "trial_index": trial_index,
         "daily_limit": daily_limit,
         "completed_today": completed_today,
+        "daily_progress_known": "completed" in progress or "completedToday" in trial,
         "status": status,
         "status_label": "已完成" if ok else "失败",
         "ok": ok,
@@ -388,7 +409,8 @@ def build_next_tianji_trial_request(
             "queued_at": now,
             "queued_at_display": _now_text(now),
             "target_runs": _target_runs(target_runs),
-            "completed_runs": len(normalized_rounds),
+            "completed_runs": sum(bool(item.get("ok")) for item in normalized_rounds),
+            "attempted_runs": len(normalized_rounds),
             "rounds": normalized_rounds,
         }
     )
@@ -405,12 +427,13 @@ def build_tianji_trial_batch_run(
 ) -> dict:
     run = build_tianji_trial_run(result, captures=captures)
     normalized_rounds = _normalize_tianji_trial_rounds(rounds)
-    completed = len(normalized_rounds)
+    attempted = len(normalized_rounds)
+    completed = sum(bool(item.get("ok")) for item in normalized_rounds)
     target = _target_runs(target_runs)
     total_reward = sum(_miniapp_int(round_item.get("reward_trace")) for round_item in normalized_rounds)
     total_duration = sum(_miniapp_int(round_item.get("duration_ms")) for round_item in normalized_rounds)
     latest = normalized_rounds[-1] if normalized_rounds else {}
-    all_ok = bool(normalized_rounds) and all(bool(round_item.get("ok")) for round_item in normalized_rounds)
+    all_ok = completed >= target
     if pending_next:
         run["status"] = "queued"
         run["status_label"] = f"已完成{completed}/{target}，等待下一关入口"
@@ -420,11 +443,13 @@ def build_tianji_trial_batch_run(
         run["status_label"] = f"已完成{completed}/{target}"
         run["ok"] = True
     elif not run.get("ok"):
-        run["status_label"] = f"第{completed}关失败" if completed else "失败"
+        outcome = {"retry_pending": "等待同日重试", "settlement_unknown": "结算待核对"}.get(run.get("status"), "本次失败")
+        run["status_label"] = f"尝试{attempted}次，成功{completed}关；{outcome}"
     else:
         run["status_label"] = f"已完成{completed}/{target}"
     run["rounds"] = normalized_rounds
     run["completed_runs"] = completed
+    run["attempted_runs"] = attempted
     run["target_runs"] = target
     run["progress_text"] = f"{completed}/{target}"
     run["reward_trace"] = total_reward
@@ -433,8 +458,11 @@ def build_tianji_trial_batch_run(
         run["trial_title"] = latest.get("trial_title") or run.get("trial_title") or "-"
         run["grade"] = latest.get("grade") or run.get("grade") or "-"
         run["score"] = latest.get("score") or run.get("score") or 0
-        run["completed_today"] = _miniapp_int(latest.get("completed_today"), 0)
-        run["daily_limit"] = _miniapp_int(latest.get("daily_limit"), 0)
+    confirmed = next((item for item in reversed(normalized_rounds) if item.get("daily_progress_known")), {})
+    if confirmed:
+        run["completed_today"] = _miniapp_int(confirmed.get("completed_today"), 0)
+        run["daily_limit"] = _miniapp_int(confirmed.get("daily_limit"), 0)
+        run["daily_progress_known"] = True
     return run
 
 
@@ -447,6 +475,7 @@ def build_tianji_trial_run(result: object, *, captures: Optional[list] = None, e
 
     data = result if isinstance(result, dict) else {}
     settlement, _challenge, _trial = _result_settlement_data(data)
+    progress = (data.get("data") or {}).get("dailyProgress") or {}
     details = settlement.get("details") if isinstance(settlement.get("details"), dict) else {}
     ok = bool(data.get("ok"))
     status = str(data.get("status") or ("settled" if ok else "failed")).strip() or "unknown"
@@ -464,6 +493,10 @@ def build_tianji_trial_run(result: object, *, captures: Optional[list] = None, e
         "duration_ms": int(settlement.get("duration_ms") or (data.get("proof") or {}).get("durationMs") or 0),
         "rounds": _normalize_tianji_trial_rounds(data.get("rounds")),
         "completed_runs": _miniapp_int(data.get("completed_runs")),
+        "attempted_runs": _miniapp_int(data.get("attempted_runs")),
+        "completed_today": _miniapp_int(progress.get("completed"), _miniapp_int(_trial.get("completedToday"))),
+        "daily_limit": _miniapp_int(progress.get("limit"), _miniapp_int(_trial.get("dailyLimit"))),
+        "daily_progress_known": "completed" in progress or "completedToday" in _trial,
         "target_runs": _miniapp_int(data.get("target_runs"), TIANJI_TRIAL_DEFAULT_BATCH_RUNS),
         "progress_text": _safe_text(data.get("progress_text") or "", 40),
         "updated_at": _now_text(),
@@ -488,6 +521,10 @@ def default_tianji_trial_run() -> dict:
         "duration_ms": 0,
         "rounds": [],
         "completed_runs": 0,
+        "attempted_runs": 0,
+        "completed_today": 0,
+        "daily_limit": 0,
+        "daily_progress_known": False,
         "target_runs": TIANJI_TRIAL_DEFAULT_BATCH_RUNS,
         "progress_text": "",
         "updated_at": "",
@@ -520,6 +557,10 @@ def build_tianji_trial_run_view(value: object) -> dict:
             "duration_ms": int(value.get("duration_ms") or 0),
             "rounds": _normalize_tianji_trial_rounds(value.get("rounds")),
             "completed_runs": _miniapp_int(value.get("completed_runs")),
+            "attempted_runs": _miniapp_int(value.get("attempted_runs")),
+            "completed_today": _miniapp_int(value.get("completed_today")),
+            "daily_limit": _miniapp_int(value.get("daily_limit")),
+            "daily_progress_known": bool(value.get("daily_progress_known")),
             "target_runs": _miniapp_int(value.get("target_runs"), TIANJI_TRIAL_DEFAULT_BATCH_RUNS),
             "progress_text": _safe_text(value.get("progress_text") or "", 40),
             "updated_at": _safe_text(value.get("updated_at") or "", 40),
@@ -543,11 +584,18 @@ def merge_tianji_trial_payload(
     if entry:
         trial["miniapp_entry"] = build_tianji_trial_entry_view(entry)
     if run:
-        trial["miniapp_run"] = build_tianji_trial_run_view(run)
+        incoming = build_tianji_trial_run_view(run)
+        previous = trial.get("miniapp_run") or {}
+        if not incoming.get("daily_progress_known") and _day_key_from_text(previous.get("updated_at")) == game_day():
+            for key in ("completed_today", "daily_limit", "daily_progress_known"):
+                if key in previous:
+                    incoming[key] = previous[key]
+        trial["miniapp_run"] = incoming
     if request is not None:
         trial["miniapp_request"] = deepcopy(request)
     if clear_request:
         trial.pop("miniapp_request", None)
+        trial.pop("pending_submission", None)
     updated["tianji_trial"] = trial
     return updated
 

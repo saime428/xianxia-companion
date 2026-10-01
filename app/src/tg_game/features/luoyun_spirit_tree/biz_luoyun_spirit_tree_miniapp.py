@@ -83,7 +83,8 @@ def sanitize_luoyun_spirit_tree_secret_text(text: object, *, limit: int = 220) -
         raw,
         flags=re.IGNORECASE,
     )
-    raw = _TREE_TOKEN_TEXT_PATTERN.sub("tree_<redacted>", raw)
+    known_errors = {"tree_token_invalid", "tree_token_expired", "tree_token_missing", "tree_account_required"}
+    raw = _TREE_TOKEN_TEXT_PATTERN.sub(lambda match: match.group(0) if match.group(0) in known_errors else "tree_<redacted>", raw)
     return _safe_text(raw, limit)
 
 
@@ -265,6 +266,40 @@ def _needs_luoyun_spirit_tree_turnstile(result: object) -> bool:
     return status in LUOYUN_SPIRIT_TREE_TURNSTILE_RETRY_STATUSES
 
 
+def classify_luoyun_submission_failure(result: dict) -> tuple[str, str, bool]:
+    """Return workflow status, failure kind, and whether to keep this submission."""
+    status = _int_or_zero(result.get("status_code"))
+    error = str(result.get("error") or "")
+    if status == 0 or status >= 500:
+        return "settlement_unknown", "submit_network_error", True
+    if status == 429 or error == "run_rate_limited":
+        return "retry_pending", "rate_limited", True
+    if error.startswith("turnstile_"):
+        return "retry_pending", "verification_unavailable", True
+    if error in {"run_missing", "run_mismatch"}:
+        return "failed", "run_invalid", False
+    if error == "run_submitted":
+        # Do not open another run while the accepted result is still unconfirmed.
+        return "failed", "settlement_unconfirmed", True
+    proof_errors = {
+        "proof_invalid", "jump_proof_too_long", "jump_step_limit",
+        "jump_timing_invalid", "jump_timing_anomaly", "jump_charge_timing_mismatch",
+        "jump_precision_anomaly", "duration_missing", "duration_too_short",
+        "duration_impossible", "jump_proof_invalid", "jump_event_count_mismatch",
+        "fly_proof_invalid", "fly_proof_too_long", "fly_step_mismatch",
+        "fly_timing_grid_mismatch", "fly_timing_out_of_range", "tap_interval_anomaly",
+    }
+    if error in proof_errors:
+        return "failed", "proof_rejected", False
+    if status in {401, 403} or error.startswith(("auth_date_", "tree_token_")) or error in {
+        "invalid_init_data", "init_data_missing", "hash_missing", "hash_mismatch",
+        "start_param_mismatch", "tree_account_required",
+    }:
+        return "retry_pending", "identity_expired", True
+    # Unknown business errors require diagnosis; retain the run without retrying blindly.
+    return "failed", "submit_rejected", True
+
+
 def wait_luoyun_spirit_tree_turnstile_token(
     storage: object,
     *,
@@ -320,6 +355,8 @@ def execute_luoyun_spirit_tree_miniapp_request_with_turnstile(
     acquire_token=None,
 ) -> dict:
     result = execute_luoyun_spirit_tree_miniapp_request(request, transport)
+    if str(request.get("url") or "").endswith(("/run/start", "/run/submit")) and not _is_luoyun_spirit_tree_turnstile_error(result):
+        return result
     if result.get("ok") or acquire_token is None or not _needs_luoyun_spirit_tree_turnstile(
         result
     ):
@@ -381,7 +418,7 @@ def _mode_state(daily: object, mode: str) -> dict:
     return {
         "best": _int_or_zero(value.get("best")),
         "used": _int_or_zero(value.get("used")),
-        "limit": limit if limit > 0 else 3,
+        "limit": limit if "limit" in value else 3,
     }
 
 
@@ -440,14 +477,15 @@ def _snapshot_from_data(data: object, previous: Optional[dict] = None) -> dict:
     ranking = season_state.get("ranking") if isinstance(season_state.get("ranking"), dict) else root.get("ranking")
     season = season_state.get("season") if isinstance(season_state.get("season"), dict) else council.get("season")
     old = previous if isinstance(previous, dict) else {}
-    normalized_daily = {
-        "jump": _mode_state(daily, "jump"),
-        "fly": _mode_state(daily, "fly"),
-    }
+    normalized_daily = deepcopy(old.get("daily") or {})
+    for mode in LUOYUN_SPIRIT_TREE_MODE_ORDER:
+        if isinstance(daily, dict) and isinstance(daily.get(mode), dict):
+            normalized_daily[mode] = {**_mode_state(daily, mode),
+                "quota_known": all(key in daily[mode] for key in ("used", "limit"))}
     day_key = _safe_text(
         (season or {}).get("today") if isinstance(season, dict) else "",
         16,
-    ) or _safe_text(old.get("day_key") or "", 16)
+    ) or _safe_text((old.get("daily") or {}).get("day_key") or "", 16)
     normalized_daily["day_key"] = day_key
     return {
         "daily": normalized_daily,
@@ -502,17 +540,10 @@ def _wait_for_claimed_duration(proof: object, started_at: object, sleeper) -> No
 
 
 def _submit_with_same_run_retry(request: dict, transport, acquire_token=None) -> dict:
-    result = execute_luoyun_spirit_tree_miniapp_request_with_turnstile(
+    # Only explicit verification rejections are safe to retry; ambiguous writes stop.
+    return execute_luoyun_spirit_tree_miniapp_request_with_turnstile(
         request, transport, acquire_token
     )
-    if result.get("ok"):
-        return result
-    status_code = int(result.get("status_code") or 0)
-    if status_code == 0 or status_code >= 500:
-        return execute_luoyun_spirit_tree_miniapp_request_with_turnstile(
-            request, transport, acquire_token
-        )
-    return result
 
 
 def resolve_luoyun_spirit_tree_retry_delay(retry_count: object) -> int:
@@ -572,10 +603,13 @@ def run_luoyun_spirit_tree_flow(
     pending_submission: Optional[dict] = None,
     sleeper=time.sleep,
     acquire_turnstile_token=None,
+    checkpoint_callback=None,
 ) -> dict:
     mode = "canary" if str(run_mode or "").strip() == "canary" else "daily"
     max_attempts_per_mode = 1 if mode == "canary" else 3
     recovery = pending_submission if isinstance(pending_submission, dict) else {}
+    if recovery and _today_key(recovery.get("created_at")) != _today_key():
+        recovery = {}
     dwelling_request = estate_miniapp.build_estate_miniapp_request(
         "start",
         token=estate_token,
@@ -647,12 +681,19 @@ def run_luoyun_spirit_tree_flow(
         )
     snapshot = _snapshot_from_data(start_data)
     events: list[dict] = []
+    if recovery and recovery.get("stage") not in {"prepared"}:
+        return _flow_result(False, "settlement_unknown", run_mode=mode, snapshot=snapshot,
+            entry=launch.get("entry"), pending_submission=recovery,
+            error="上一局是否受理尚未确认；已读取最新成绩，未重发开局或提交", failure_kind="settlement_unconfirmed")
     accepted_modes: list[str] = [
         str(item)
         for item in (recovery.get("accepted_modes") or [])
         if item in LUOYUN_SPIRIT_TREE_MODE_ORDER
     ]
     if recovery.get("runToken") and recovery.get("mode") in LUOYUN_SPIRIT_TREE_MODE_ORDER:
+        if str(recovery.get("accountId") or "") != str(account_id):
+            return _flow_result(False, "settlement_unknown", run_mode=mode, snapshot=snapshot,
+                pending_submission=recovery, error="恢复局账号不一致，未提交", failure_kind="identity_mismatch")
         submit_request = build_luoyun_spirit_tree_miniapp_request(
             "run_submit",
             token=token,
@@ -665,24 +706,25 @@ def run_luoyun_spirit_tree_flow(
             },
         )
         _wait_for_claimed_duration(recovery.get("proof"), recovery.get("created_at"), sleeper)
+        recovery = {**recovery, "stage": "submitting"}
+        if checkpoint_callback:
+            checkpoint_callback(recovery)
         submit_result = _submit_with_same_run_retry(
             submit_request, transport, acquire_turnstile_token
         )
         if not submit_result.get("ok"):
-            status_code = int(submit_result.get("status_code") or 0)
+            failure_status, failure_kind, keep_pending = classify_luoyun_submission_failure(submit_result)
+            if failure_status == "retry_pending":
+                recovery["stage"] = "prepared"
             return _flow_result(
                 False,
-                "retry_pending" if status_code == 0 or status_code >= 500 else "failed",
+                failure_status,
                 run_mode=mode,
                 snapshot=snapshot,
                 entry=launch.get("entry"),
                 error=submit_result.get("error") or "断线局重提失败。",
-                failure_kind=(
-                    "submit_network_error"
-                    if status_code == 0 or status_code >= 500
-                    else "proof_rejected"
-                ),
-                pending_submission=(recovery if status_code == 0 or status_code >= 500 else {}),
+                failure_kind=failure_kind,
+                pending_submission=recovery if keep_pending else {},
             )
         submit_data = submit_result.get("data") or {}
         snapshot = _snapshot_from_data(submit_data, snapshot)
@@ -695,8 +737,13 @@ def run_luoyun_spirit_tree_flow(
             }
         )
         recovery = {}
+        if checkpoint_callback:
+            checkpoint_callback({})
 
     for game_mode in LUOYUN_SPIRIT_TREE_MODE_ORDER:
+        if not ((snapshot.get("daily") or {}).get(game_mode) or {}).get("quota_known"):
+            return _flow_result(False, "retry_pending", run_mode=mode, snapshot=snapshot,
+                entry=launch.get("entry"), error=f"{game_mode} 次数未返回，未自动开局", failure_kind="daily_state_missing")
         current = _mode_state(snapshot.get("daily") or {}, game_mode)
         if mode == "canary" and game_mode in accepted_modes:
             events.append({"mode": game_mode, "status": "already_accepted", "score": current["best"]})
@@ -717,6 +764,10 @@ def run_luoyun_spirit_tree_flow(
             continue
         for _attempt in range(available_attempts):
             attempt_number = current["used"] + 1
+            starting = {"stage": "starting", "mode": game_mode, "created_at": time.time(),
+                        "accepted_modes": list(accepted_modes)}
+            if checkpoint_callback:
+                checkpoint_callback(starting)
             run_start_request = build_luoyun_spirit_tree_miniapp_request(
                 "run_start",
                 token=token,
@@ -727,9 +778,13 @@ def run_luoyun_spirit_tree_flow(
                 run_start_request, transport, acquire_turnstile_token
             )
             if not run_start_result.get("ok"):
+                failure_status, failure_kind, keep_pending = classify_luoyun_submission_failure(run_start_result)
+                uncertain = failure_status == "settlement_unknown"
+                if not uncertain and checkpoint_callback:
+                    checkpoint_callback({})
                 return _flow_result(
                     False,
-                    "retry_pending",
+                    "settlement_unknown" if uncertain else failure_status,
                     run_mode=mode,
                     snapshot=snapshot,
                     entry=launch.get("entry"),
@@ -737,6 +792,7 @@ def run_luoyun_spirit_tree_flow(
                     accepted_modes=accepted_modes,
                     error=run_start_result.get("error") or f"{game_mode} 开局失败。",
                     failure_kind="run_start_failed",
+                    pending_submission=starting if uncertain else {},
                 )
             started_at = time.time()
             run_data = run_start_result.get("data") or {}
@@ -747,7 +803,7 @@ def run_luoyun_spirit_tree_flow(
             if not run_token or seed in (None, ""):
                 return _flow_result(
                     False,
-                    "retry_pending",
+                    "settlement_unknown",
                     run_mode=mode,
                     snapshot=snapshot,
                     entry=launch.get("entry"),
@@ -755,6 +811,7 @@ def run_luoyun_spirit_tree_flow(
                     accepted_modes=accepted_modes,
                     error=f"{game_mode} 开局未返回 runToken 或 seed。",
                     failure_kind="run_contract_invalid",
+                    pending_submission=starting,
                 )
             try:
                 proof = _proof_for_mode(
@@ -773,14 +830,19 @@ def run_luoyun_spirit_tree_flow(
                     accepted_modes=accepted_modes,
                     error=exc,
                     failure_kind="proof_generation_failed",
+                    pending_submission={**starting, "runToken": run_token},
                 )
             pending = {
+                "stage": "prepared",
+                "accountId": account_id,
                 "mode": game_mode,
                 "runToken": run_token,
                 "proof": proof,
                 "accepted_modes": list(accepted_modes),
                 "created_at": started_at,
             }
+            if checkpoint_callback:
+                checkpoint_callback(pending)
             _wait_for_claimed_duration(proof, started_at, sleeper)
             submit_request = build_luoyun_spirit_tree_miniapp_request(
                 "run_submit",
@@ -793,28 +855,34 @@ def run_luoyun_spirit_tree_flow(
                     "accountId": account_id,
                 },
             )
+            pending["stage"] = "submitting"
+            if checkpoint_callback:
+                checkpoint_callback(pending)
             submit_result = _submit_with_same_run_retry(
                 submit_request, transport, acquire_turnstile_token
             )
             if not submit_result.get("ok"):
-                status_code = int(submit_result.get("status_code") or 0)
-                retryable = status_code == 0 or status_code >= 500
+                failure_status, failure_kind, keep_pending = classify_luoyun_submission_failure(submit_result)
+                if failure_status == "retry_pending":
+                    pending["stage"] = "prepared"
                 return _flow_result(
                     False,
-                    "retry_pending" if retryable else "failed",
+                    failure_status,
                     run_mode=mode,
                     snapshot=snapshot,
                     entry=launch.get("entry"),
                     events=events,
                     accepted_modes=accepted_modes,
                     error=submit_result.get("error") or f"{game_mode} proof 提交失败。",
-                    failure_kind="submit_network_error" if retryable else "proof_rejected",
-                    pending_submission=pending if retryable else {},
+                    failure_kind=failure_kind,
+                    pending_submission=pending if keep_pending else {},
                 )
             submit_data = submit_result.get("data") or {}
             snapshot = _snapshot_from_data(submit_data, snapshot)
             score = _int_or_zero(submit_data.get("score"))
             accepted_modes.append(game_mode)
+            if checkpoint_callback:
+                checkpoint_callback({})
             events.append({"mode": game_mode, "status": "accepted", "score": score})
             current = _mode_state(snapshot.get("daily") or {}, game_mode)
 
@@ -840,7 +908,13 @@ async def run_luoyun_spirit_tree_public_production_flow(
     run_mode: str = "daily",
     pending_submission: Optional[dict] = None,
     sleeper=time.sleep,
+    checkpoint_callback=None,
 ) -> dict:
+    def persist(value):
+        nonlocal pending_submission
+        pending_submission = dict(value)
+        if checkpoint_callback:
+            checkpoint_callback(value)
     try:
         discovery = await estate_miniapp.resolve_estate_public_miniapp_launch(
             client,
@@ -873,6 +947,7 @@ async def run_luoyun_spirit_tree_public_production_flow(
             pending_submission=pending_submission,
             sleeper=sleeper,
             acquire_turnstile_token=acquire_turnstile_token,
+            checkpoint_callback=persist,
         )
     except Exception as exc:
         return _flow_result(
@@ -923,14 +998,20 @@ def queue_luoyun_spirit_tree_request(
     updated = deepcopy(payload if isinstance(payload, dict) else {})
     board = dict(updated.get("luoyun_spirit_tree") or {})
     request = build_luoyun_spirit_tree_request(**request_kwargs)
+    current_request = board.get("miniapp_request") or {}
+    if current_request.get("status") in {"queued", "running"} and current_request.get("day_key") == request["day_key"]:
+        return updated
     pending = (
         board.get("pending_submission")
         if isinstance(board.get("pending_submission"), dict)
         else {}
     )
     pending_created_at = float(pending.get("created_at") or 0)
+    if board.get("needs_review") and pending_created_at and _today_key(pending_created_at) == request["day_key"]:
+        return updated
     if not pending_created_at or _today_key(pending_created_at) != request["day_key"]:
         board.pop("pending_submission", None)
+        board.pop("needs_review", None)
     board["miniapp_request"] = request
     board["miniapp_run"] = {
         "status": "queued",
@@ -945,12 +1026,22 @@ def queue_luoyun_spirit_tree_request(
     return updated
 
 
+def claim_luoyun_spirit_tree_request(payload, owner):
+    updated = deepcopy(payload)
+    request = get_pending_luoyun_spirit_tree_request(updated)
+    if request:
+        request.update(status="running", execution_owner=owner, lease_expires_at=time.time() + 900)
+    return updated
+
+
 def get_pending_luoyun_spirit_tree_request(payload: object) -> dict:
     if not isinstance(payload, dict):
         return {}
     board = payload.get("luoyun_spirit_tree") if isinstance(payload.get("luoyun_spirit_tree"), dict) else {}
     request = board.get("miniapp_request") if isinstance(board.get("miniapp_request"), dict) else {}
     if str(request.get("status") or "") not in {"queued", "running"}:
+        return {}
+    if request.get("status") == "running" and float(request.get("lease_expires_at") or 0) > time.time():
         return {}
     requested_at = float(request.get("requested_at") or 0)
     if requested_at and time.time() - requested_at > LUOYUN_SPIRIT_TREE_REQUEST_TTL_SECONDS:
@@ -972,7 +1063,7 @@ def get_pending_luoyun_spirit_tree_submission(payload: object) -> dict:
         return {}
     board = payload.get("luoyun_spirit_tree") if isinstance(payload.get("luoyun_spirit_tree"), dict) else {}
     pending = board.get("pending_submission") if isinstance(board.get("pending_submission"), dict) else {}
-    return pending if pending.get("runToken") and pending.get("mode") else {}
+    return pending if pending.get("mode") and (pending.get("runToken") or pending.get("stage") == "starting") else {}
 
 
 def build_luoyun_spirit_tree_run_view(value: object) -> dict:
@@ -1019,8 +1110,10 @@ def merge_luoyun_spirit_tree_payload(
     pending = run_result.get("pending_submission") if isinstance(run_result.get("pending_submission"), dict) else {}
     if pending:
         board["pending_submission"] = pending
+        board["needs_review"] = run_result.get("status") != "retry_pending" or request is None
     else:
         board.pop("pending_submission", None)
+        board.pop("needs_review", None)
     if run_result.get("run_mode") == "canary":
         passed = bool(run_result.get("ok"))
         board["canary"] = {

@@ -10,6 +10,7 @@ from telethon.errors import FloodWaitError, SlowModeWaitError
 
 from tg_game.config import get_settings
 from tg_game.services.automation_switch import is_automation_paused
+from tg_game.services.runtime_drain import tracked_flow
 from tg_game.services.profile_rebirth import is_profile_rebirth_locked
 from tg_game.telegram import send_utils
 from tg_game.telegram.network_guard import is_network_paused
@@ -107,7 +108,11 @@ def retry_seconds(exc):
     return 600
 
 
+@tracked_flow
 async def tick(client, storage, profile_id, owner_id):
+    from tg_game.services.runtime_drain import drain_requested
+    if drain_requested(storage):
+        return
     now = time.time()
     if is_network_paused(storage, profile_id, now=now):
         task = get_task(storage, profile_id)
