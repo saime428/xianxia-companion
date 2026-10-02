@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import re
 import socket
 import threading
@@ -12,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from email.utils import parsedate_to_datetime
 
 try:
     import httpx
@@ -38,13 +40,25 @@ WORLD_BOSS_WARM_DELAY_SECONDS = 2.0
 LOG = logging.getLogger(__name__)
 
 
+def _retry_after_seconds(value):
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        try:
+            seconds = parsedate_to_datetime(str(value)).timestamp() - time.time()
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+    return max(0.0, seconds) if math.isfinite(seconds) else 0.0
+
+
 class MiniAppBeastError(RuntimeError):
     # Keep the reference engine's exception contract, without importing its host app.
-    def __init__(self, code, status=0, *, details=None):
+    def __init__(self, code, status=0, *, details=None, retry_after=None):
         text = str(code or "request_failed").lower()
         self.code = text if re.fullmatch(r"[a-z0-9_]{1,100}", text) else "api_error"
         self.status = int(status or 0)
         self.details = details if isinstance(details, dict) else {}
+        self.retry_after = _retry_after_seconds(retry_after)
         super().__init__(self.code)
 
 
@@ -104,6 +118,41 @@ _HTTP_TRACE_PHASES = {
 _HTTP_TIMING_KEYS = frozenset(_HTTP_TRACE_PHASES.values()) | {
     "http_pool_dispatch_ms", "http_encode_ms", "http_decode_ms",
 }
+# These describe one attempt. They must never be summed across retries.
+WORLD_BOSS_HTTP_OBSERVATION_KEYS = frozenset({
+    "request_started_unix_ms", "request_started_monotonic_ms",
+    "request_resumed_monotonic_ms", "request_clock_step_ms",
+    "http_response_headers_monotonic_ms", "http_server_date_unix_ms",
+    "http_cf_ray", "http_server_timing_cf_edge_ms", "http_server_timing_cf_origin_ms",
+})
+
+
+def _response_observations(headers, timing):
+    """Keep only typed, bounded response metadata; never store raw headers."""
+    if timing is None:
+        return
+    date = headers.get("Date", "")
+    if len(date) <= 64:
+        try:
+            parsed = parsedate_to_datetime(date)
+            if parsed.tzinfo is not None and 2000 <= parsed.year <= 2100:
+                timing["http_server_date_unix_ms"] = round(parsed.timestamp() * 1000)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    ray = headers.get("CF-Ray", "")
+    if re.fullmatch(r"[0-9a-fA-F]{16,32}-[A-Z]{3}", ray):
+        timing["http_cf_ray"] = ray
+    # Cloudflare's optional durations are observations, not proof of where a
+    # request waited. Descriptions and unrecognized metric names are discarded.
+    server_timing = headers.get("Server-Timing", "")
+    if len(server_timing) <= 2048:
+        for item in server_timing.split(",")[:16]:
+            match = re.fullmatch(r"\s*(cfEdge|cfOrigin)\s*;\s*dur=([0-9]+(?:\.[0-9]+)?)\s*", item)
+            if match:
+                duration = float(match[2])
+                if math.isfinite(duration) and 0 <= duration <= 60000:
+                    key = "cf_edge" if match[1] == "cfEdge" else "cf_origin"
+                    timing["http_server_timing_" + key + "_ms"] = duration
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -215,7 +264,7 @@ def _close_world_boss_http_client() -> None:
 atexit.register(_close_world_boss_http_client)
 
 
-def _raise_from_http_body(status: int, raw: bytes | str) -> None:
+def _raise_from_http_body(status: int, raw: bytes | str, *, retry_after=None) -> None:
     try:
         if isinstance(raw, bytes):
             body = json.loads(raw[:64_000].decode("utf-8"))
@@ -230,6 +279,7 @@ def _raise_from_http_body(status: int, raw: bytes | str) -> None:
         body.get("error") or "request_failed",
         status,
         details=details,
+        retry_after=retry_after,
     )
 
 
@@ -259,6 +309,8 @@ def _json_post_with_client(client, origin, path, payload, timeout, *, timing=Non
         elif status in {"complete", "failed"} and phase in phase_starts:
             key = _HTTP_TRACE_PHASES[phase]
             timing[key] = round(timing.get(key, 0) + max(0, now - phase_starts.pop(phase)) * 1000, 3)
+            if phase == "receive_response_headers" and status == "complete":
+                timing["http_response_headers_monotonic_ms"] = round(now * 1000, 3)
     request_timeout = max(0.2, min(60.0, float(timeout)))
     try:
         response = client.post(
@@ -272,13 +324,14 @@ def _json_post_with_client(client, origin, path, payload, timeout, *, timing=Non
         raise MiniAppBeastError("api_timeout") from exc
     except httpx.HTTPError as exc:
         raise MiniAppBeastError("api_unreachable") from exc
+    _response_observations(response.headers, timing)
     if 300 <= int(response.status_code) < 400:
         raise MiniAppBeastError("api_redirect_rejected", status=response.status_code)
     raw = response.content[:2_000_001]
     if len(raw) > 2_000_000:
         raise MiniAppBeastError("bad_response")
     if response.status_code >= 400:
-        _raise_from_http_body(response.status_code, raw)
+        _raise_from_http_body(response.status_code, raw, retry_after=response.headers.get("Retry-After"))
     decode_started_at = time.monotonic()
     try:
         return json.loads(raw.decode("utf-8"))
@@ -311,7 +364,7 @@ def _json_post_urllib(origin, path, payload, timeout):
             raw = exc.read(64_000)
         except Exception:
             raw = b""
-        _raise_from_http_body(exc.code, raw)
+        _raise_from_http_body(exc.code, raw, retry_after=exc.headers.get("Retry-After") if exc.headers else None)
     except urllib.error.URLError as exc:
         if isinstance(getattr(exc, "reason", None), (TimeoutError, socket.timeout)):
             raise MiniAppBeastError("api_timeout") from exc
@@ -356,15 +409,22 @@ async def _post_json(origin, path, payload, timeout, *, post_json=None,
                 worker_times["finished"] = time.monotonic()
 
         submitted = time.monotonic()
+        submitted_unix = time.time()
         try:
             result = await asyncio.get_running_loop().run_in_executor(executor, send)
         finally:
             recorded = worker_times.copy()
             resumed = time.monotonic()
-            # Copy numeric timings on the event loop only. A cancelled await
+            # Copy allowlisted observations on the event loop only. A cancelled await
             # may leave the worker running; it must never mutate a saved trace.
             if timing is not None:
-                timing.update({key: recorded[key] for key in _HTTP_TIMING_KEYS if key in recorded})
+                timing.update({key: recorded[key] for key in _HTTP_TIMING_KEYS | WORLD_BOSS_HTTP_OBSERVATION_KEYS if key in recorded})
+                timing.update(
+                    request_started_unix_ms=round(submitted_unix * 1000, 3),
+                    request_started_monotonic_ms=round(submitted * 1000, 3),
+                    request_resumed_monotonic_ms=round(resumed * 1000, 3),
+                    request_clock_step_ms=round(((time.time() - submitted_unix) - (resumed - submitted)) * 1000, 3),
+                )
                 started = recorded.get("started")
                 finished = recorded.get("finished")
                 if started is not None:

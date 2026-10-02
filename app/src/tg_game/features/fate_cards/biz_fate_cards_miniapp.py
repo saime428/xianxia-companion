@@ -121,13 +121,19 @@ def run_fate_cards_flow(
             transport,
         )
 
+    question_options = []
+
     def result(status: str, record: dict, **extra) -> dict:
-        return {"ok": status != "failed", "status": status, **_summary(record), **extra}
+        return {"ok": status != "failed", "status": status, "questions": question_options, **_summary(record), **extra}
 
     started = call("start")
     if not started.get("ok"):
         return result("failed", {}, error=started.get("error") or "start 失败")
     data = started.get("data") or {}
+    question_options = [
+        {"key": str(q["key"]), "name": str(q.get("name") or q["key"])}
+        for q in data.get("questions") or [] if isinstance(q, dict) and q.get("key")
+    ]
     choices = [_scalars(c) for c in data.get("choices") or [] if isinstance(c, dict)]
     record = data.get("record") if data.get("hasDrawn") and isinstance(data.get("record"), dict) else None
     if record is None:

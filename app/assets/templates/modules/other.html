@@ -1,3 +1,5 @@
+{% include 'modules/other_automation_settings.html' %}
+
 <section class="other-low-frequency-toolbar">
     <button type="button" class="inline-button other-low-frequency-toggle" id="other-low-frequency-toggle" aria-controls="other-low-frequency-panel" aria-expanded="false">显示低频玩法</button>
 </section>
@@ -823,6 +825,27 @@
                 <h2>{{ play.command if play.type == 'button' else play.template }}</h2>
             </div>
             <p class="muted">{{ play.description }}</p>
+            {% if play.key == 'divination' %}
+            <div class="stack-list compact-stack">
+                <div class="kv-row"><span>今日累计</span><strong>{{ other_play_state.divination_count_today }} 次</strong></div>
+                <div class="kv-row"><span>批次</span><strong>{{ {'active': '进行中', 'completed': '已完成', 'cancelled': '已停止', 'failed': '失败'}.get(divination_batch_state.status, '尚无批次') }}</strong></div>
+                {% if divination_batch_state.target_count %}<div class="kv-row"><span>本批进度</span><strong>{{ divination_batch_state.completed_count }} / {{ divination_batch_state.planned_rounds }} 次，今日目标 {{ divination_batch_state.target_count }} 次</strong></div>{% endif %}
+            </div>
+            <form method="post" action="/runtime/commands/divination-batch" class="form-grid top-gap">
+                <input type="hidden" name="chat_id" value="{{ bound_chat_id or '' }}">
+                <input type="hidden" name="thread_id" value="{{ bound_thread_id or '' }}">
+                <input type="hidden" name="chat_type" value="{{ bound_chat_type or 'group' }}">
+                <input type="hidden" name="bot_username" value="{{ bound_bot_username or 'fanrenxiuxian_bot' }}">
+                <label>今日累计目标次数<input type="number" name="target_count" min="1" value="{{ divination_batch_state.target_count or ((other_play_state.divination_count_today or 0) + 1) }}" required></label>
+                <button type="submit" {% if not command_chat_ready or divination_batch_state.active %}disabled{% endif %}>开始批量卜筮</button>
+            </form>
+            <form method="post" action="/runtime/commands/divination-batch/cancel" class="top-gap">
+                <input type="hidden" name="chat_id" value="{{ divination_batch_state.raw.chat_id or bound_chat_id or '' }}">
+                <button type="submit" {% if not divination_batch_state.active %}disabled{% endif %}>停止批量卜筮</button>
+            </form>
+            <p class="muted top-gap">目标包含今天已经完成的次数，每次至少间隔一分钟，并核对天机阁累计次数；每次按游戏规则消耗。停止会取消尚未发送的卜筮，已发送的无法撤回。</p>
+            {% if divination_batch_state.last_error %}<p class="muted">{{ divination_batch_state.last_error }}</p>{% endif %}
+            {% endif %}
             {% if play.type == 'button' %}
             <form class="top-gap" method="post" action="/runtime/commands/send-raw">
                 <input type="hidden" name="chat_id" value="{{ bound_chat_id or '' }}">

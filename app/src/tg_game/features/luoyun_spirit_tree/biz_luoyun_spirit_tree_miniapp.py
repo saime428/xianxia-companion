@@ -4,6 +4,7 @@ import json
 import re
 import time
 import uuid
+from tg_game.miniapp_http import pooled_miniapp_transport
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -480,8 +481,8 @@ def _snapshot_from_data(data: object, previous: Optional[dict] = None) -> dict:
     normalized_daily = deepcopy(old.get("daily") or {})
     for mode in LUOYUN_SPIRIT_TREE_MODE_ORDER:
         if isinstance(daily, dict) and isinstance(daily.get(mode), dict):
-            normalized_daily[mode] = {**_mode_state(daily, mode),
-                "quota_known": all(key in daily[mode] for key in ("used", "limit"))}
+            # 已用次数必须由服务器给出；上限页面写死每天 3 次、从不读 limit，回包没有就按 3（_mode_state）
+            normalized_daily[mode] = {**_mode_state(daily, mode), "quota_known": "used" in daily[mode]}
     day_key = _safe_text(
         (season or {}).get("today") if isinstance(season, dict) else "",
         16,
@@ -598,13 +599,22 @@ def run_luoyun_spirit_tree_flow(
     *,
     estate_token: str,
     init_data: str,
-    transport,
+    transport=None,
     run_mode: str = "daily",
     pending_submission: Optional[dict] = None,
     sleeper=time.sleep,
     acquire_turnstile_token=None,
     checkpoint_callback=None,
 ) -> dict:
+    if transport is None:
+        origin = LUOYUN_SPIRIT_TREE_MINIAPP_DEFAULT_API_BASE_URL
+        with pooled_miniapp_transport(timeout=25, origin=origin,
+                                      referer=origin + LUOYUN_SPIRIT_TREE_MINIAPP_WEB_PATH) as pooled:
+            return run_luoyun_spirit_tree_flow(
+                estate_token=estate_token, init_data=init_data, transport=pooled,
+                run_mode=run_mode, pending_submission=pending_submission, sleeper=sleeper,
+                acquire_turnstile_token=acquire_turnstile_token, checkpoint_callback=checkpoint_callback,
+            )
     mode = "canary" if str(run_mode or "").strip() == "canary" else "daily"
     max_attempts_per_mode = 1 if mode == "canary" else 3
     recovery = pending_submission if isinstance(pending_submission, dict) else {}
@@ -942,7 +952,7 @@ async def run_luoyun_spirit_tree_public_production_flow(
             run_luoyun_spirit_tree_flow,
             estate_token=launch.get("token"),
             init_data=init_data,
-            transport=transport or _urllib_transport,
+            transport=transport,
             run_mode=run_mode,
             pending_submission=pending_submission,
             sleeper=sleeper,

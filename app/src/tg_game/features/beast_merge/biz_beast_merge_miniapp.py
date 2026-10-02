@@ -5,6 +5,7 @@ import re
 import time
 from typing import Optional
 from tg_game.game_clock import game_time_text
+from tg_game.miniapp_http import pooled_miniapp_transport
 from urllib.parse import parse_qs, urljoin, urlsplit
 import urllib.error
 import urllib.request
@@ -266,7 +267,7 @@ def execute_beast_merge_request(request: dict, transport) -> dict:
         return {"ok": False, "status_code": 0, "data": {}, "error": _safe_text(exc)}
 
 
-def _execute_with_retry(request: dict, transport, sleeper) -> dict:
+def _execute_with_retry(request: dict, transport, sleeper, *, retry_network: bool = False) -> dict:
     result = execute_beast_merge_request(request, transport)
     if result.get("ok"):
         return result
@@ -275,7 +276,10 @@ def _execute_with_retry(request: dict, transport, sleeper) -> dict:
     if error == "run_too_fast":
         sleeper(1.5)
         return execute_beast_merge_request(request, transport)
-    # Network failure does not prove that a move/settlement was rejected.
+    # 断网/5xx 不代表被拒。落子带 seq：重发一次，服务器已受理的那步会被拒并带回权威盘面，调用方按它续上；
+    # 结算不重发（retry_network 默认关）。
+    if retry_network and (status_code == 0 or status_code >= 500):
+        return execute_beast_merge_request(request, transport)
     return result
 
 
@@ -389,7 +393,7 @@ def run_beast_merge_flow(
     *,
     token: str,
     init_data: str,
-    transport,
+    transport=None,
     entry: Optional[dict] = None,
     solver_depth: int = solver.DEFAULT_SEARCH_DEPTH,
     sleeper=time.sleep,
@@ -397,6 +401,13 @@ def run_beast_merge_flow(
     move_interval_seconds: float = DEFAULT_MOVE_INTERVAL_SECONDS,
     progress_callback=None,
 ) -> dict:
+    if transport is None:
+        with pooled_miniapp_transport(timeout=20, origin=ESTATE_MINIAPP_DEFAULT_API_BASE_URL) as pooled:
+            return run_beast_merge_flow(
+                token=token, init_data=init_data, transport=pooled, entry=entry,
+                solver_depth=solver_depth, sleeper=sleeper, monotonic=monotonic,
+                move_interval_seconds=move_interval_seconds, progress_callback=progress_callback,
+            )
     if not BEAST_MERGE_TOKEN_PATTERN.match(str(token or "").strip()):
         return {"ok": False, "status_label": "入口无效", "error": "beast merge token missing"}
     if not str(init_data or "").strip():
@@ -520,7 +531,7 @@ def run_beast_merge_flow(
                 payload={"runToken": run_token, "column": column, "seq": state["seq"]},
             )
             last_move_started = monotonic()
-            move_result = _execute_with_retry(request, transport, sleeper)
+            move_result = _execute_with_retry(request, transport, sleeper, retry_network=True)
             if not move_result.get("ok"):
                 error_data = move_result.get("data") if isinstance(move_result.get("data"), dict) else {}
                 authority = error_data.get("state") if isinstance(error_data.get("state"), dict) else None
@@ -756,7 +767,7 @@ async def run_beast_merge_public_production_flow(
             run_beast_merge_flow,
             token=launch.get("token"),
             init_data=launch.get("init_data"),
-            transport=transport or _urllib_transport,
+            transport=transport,
             entry=launch.get("entry"),
             solver_depth=solver_depth,
             sleeper=sleeper,

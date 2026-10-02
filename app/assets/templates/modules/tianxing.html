@@ -500,7 +500,7 @@
     <div class="detail-card">
         <div class="section-header compact">
             <p>自动化调度</p>
-            <h2>探索风险动作</h2>
+            <h2>探索与闭关设置</h2>
         </div>
         {% if active_profile %}
         <form class="form-grid tianxing-config-form" method="post" action="/modules/tianxing/config">
@@ -509,10 +509,13 @@
             <input type="hidden" name="redirect_to" value="{{ tianxing_config_redirect_to or '/modules/sect' }}">
             <input type="hidden" name="route_priority" value="探索">
             <input type="hidden" name="change_route_priority" value="探索">
+            <input type="hidden" name="deep_retreat_consume_enabled" value="{{ '1' if config.deep_retreat_consume_enabled else '0' }}">
             <p class="tianxing-flow-note">当前探索链路：观命 -> 定命 -> 推命探索 -> 天机盘 -> 改命探索 -> 天机盘；炼制请使用上方“推命炼制循环”。</p>
             <label class="tianxing-check-row"><input type="checkbox" name="auto_set_star_enabled" value="1" {% if config.auto_set_star_enabled %}checked{% endif %}><span class="tianxing-check-box"></span><span>自动定命</span></label>
             <label class="tianxing-check-row"><input type="checkbox" name="auto_predict_enabled" value="1" {% if config.auto_predict_enabled %}checked{% endif %}><span class="tianxing-check-box"></span><span>自动推命</span></label>
             <label class="tianxing-check-row"><input type="checkbox" name="auto_change_fate_enabled" value="1" {% if config.auto_change_fate_enabled %}checked{% endif %}><span class="tianxing-check-box"></span><span>自动改命</span></label>
+            <label class="tianxing-check-row"><input type="checkbox" name="retreat_farm_enabled" value="1" {% if config.retreat_farm_enabled %}checked{% endif %}><span class="tianxing-check-box"></span><span>普通闭关前推命</span></label>
+            <p class="muted full-span">闭关前推命需同时开启“时间线调度”和“自动推命”；普通闭关会等待“推命 闭关”确认后执行，闭关本身仍由闭关设置控制。</p>
             <label>
                 定命策略
                 {% set selected_star = config.set_star_name if config.set_star_name in tianxing_stars else '' %}
@@ -545,6 +548,7 @@
             <div class="kv-row"><span>当前路线</span><strong><span class="tianxing-route-chip">探索</span></strong></div>
             <div class="kv-row"><span>时间线</span><strong class="tianxing-summary-value {{ 'tianxing-status-on' if config.timeline_enabled else 'tianxing-status-off' }}">{{ '开启' if config.timeline_enabled else '关闭' }}</strong></div>
             <div class="kv-row"><span>炼制循环</span><strong class="tianxing-summary-value {{ 'tianxing-status-on' if state.craft_loop_enabled else 'tianxing-status-off' }}">{{ '开启' if state.craft_loop_enabled else '关闭' }}</strong></div>
+            <div class="kv-row"><span>普通闭关前推命</span><strong class="tianxing-summary-value {{ 'tianxing-status-on' if config.retreat_farm_enabled else 'tianxing-status-off' }}">{{ '开启' if config.retreat_farm_enabled else '关闭' }}</strong></div>
         </div>
     </div>
 </section>

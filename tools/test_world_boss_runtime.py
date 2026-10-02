@@ -256,7 +256,8 @@ def main():
             try:
                 for fails in (False, True):
                     ticks = iter((100.0, 102.0, 107.0, 110.0))
-                    support.time = SimpleNamespace(monotonic=lambda: next(ticks))
+                    wall_ticks = iter((1000.0, 1010.0))
+                    support.time = SimpleNamespace(monotonic=lambda: next(ticks), time=lambda: next(wall_ticks))
                     def transport(*args, timing=None):
                         timing["http_headers_wait_ms"] = 4000.0
                         if fails:
@@ -272,7 +273,9 @@ def main():
                         except support.MiniAppBeastError as exc:
                             assert fails and exc.code == "server_error"
                     assert timing == {"executor_queue_ms": 2000.0, "transport_ms": 5000.0,
-                                      "loop_resume_ms": 3000.0, "http_headers_wait_ms": 4000.0}, timing
+                                      "loop_resume_ms": 3000.0, "http_headers_wait_ms": 4000.0,
+                                      "request_started_unix_ms": 1000000.0, "request_started_monotonic_ms": 100000.0,
+                                      "request_resumed_monotonic_ms": 110000.0, "request_clock_step_ms": 0.0}, timing
 
                 support.time = original_time
                 started, release = threading.Event(), threading.Event()

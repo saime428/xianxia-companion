@@ -3450,6 +3450,21 @@ body.is-global-loading {
 }
 
 /* Forms & Inputs */
+.profile-automation-settings .form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.profile-automation-settings label,
+.profile-automation-settings input,
+.profile-automation-settings select {
+    min-width: 0;
+}
+
+.profile-automation-settings input:not([type="checkbox"]),
+.profile-automation-settings select {
+    width: 100%;
+}
+
 .form-grid {
     display: grid;
     grid-template-columns: repeat(2, 1fr);

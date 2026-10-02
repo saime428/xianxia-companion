@@ -83,6 +83,9 @@ def _json_loads_object(value) -> dict:
 def _merge_local_external_payload_fields(existing_json: object, me_payload: dict) -> dict:
     payload = dict(me_payload or {})
     existing = _json_loads_object(existing_json)
+    if isinstance(existing.get("recovery_history"), list):
+        # Recovery evidence is local; periodic external snapshots cannot replace it.
+        payload["recovery_history"] = existing["recovery_history"]
     if isinstance(existing.get("dongfu_resources"), dict):
         payload["dongfu_resources"] = existing["dongfu_resources"]
     if isinstance(existing.get("beast_merge"), dict):
@@ -2813,6 +2816,24 @@ class Storage:
                 (key or "", value or "", now),
             )
 
+    def update_runtime_state_fields(self, key: str, fields: dict, *, expected_fields: Optional[dict] = None) -> dict:
+        """Merge JSON fields under one write lock, preserving unrelated settings/results."""
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT value FROM app_runtime_state WHERE key=?", (key,)).fetchone()
+            state = json.loads(row[0] if row else "{}")
+            if not isinstance(state, dict):
+                raise ValueError("现有设置格式异常，请先核对。")
+            if expected_fields and any(state.get(k) != v for k, v in expected_fields.items()):
+                raise ValueError("设置已被后台更新，请刷新页面后重试。")
+            state.update(fields)
+            conn.execute(
+                "INSERT INTO app_runtime_state(key,value,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (key, json.dumps(state, ensure_ascii=False), time.time()),
+            )
+        return state
+
     def delete_runtime_state(self, key: str) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM app_runtime_state WHERE key=?", (key,))
@@ -4622,10 +4643,13 @@ class Storage:
         *,
         thread_id: Optional[int] = None,
         require_exact_thread: bool = False,
+        pending_only: bool = False,
     ) -> int:
         now = time.time()
         query = "UPDATE outgoing_commands SET status='failed', error_text=?, updated_at=? WHERE chat_id=? AND status IN ('pending', 'sending', 'awaiting_confirm', 'needs_manual_confirm')"
         params = ["Cancelled by user", now, int(chat_id)]
+        if pending_only:
+            query += " AND status='pending'"
         if profile_id is not None:
             query += " AND profile_id=?"
             params.append(int(profile_id))

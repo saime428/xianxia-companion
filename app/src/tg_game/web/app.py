@@ -251,7 +251,8 @@ from tg_game.web.biz_web_display_formatting import (
     resolve_scenery_display_name as _resolve_scenery_display_name,
     stringify_payload_stat_value as _stringify_payload_stat_value,
 )
-from tg_game.web import admin_battle_schedule, admin_global_execution
+from tg_game.web import admin_battle_schedule, admin_global_execution, daily_report_settings
+from tg_game.web import profile_automation_settings
 from tg_game.web.biz_artifact_view_model import (
     build_artifact_nurture_auto_view as _artifact_build_artifact_nurture_auto_view,
     build_artifact_nurture_command as _artifact_build_artifact_nurture_command,
@@ -1939,9 +1940,27 @@ def create_app() -> FastAPI:
                 "app_name": settings.app_name,
                 "active_profile": active_profile,
                 "admin_execution": dashboard,
+                "daily_report": daily_report_settings.build_view(storage),
+                "report_saved": request.query_params.get("report_saved") == "1",
+                "report_error": request.query_params.get("report_error") or "",
                 **_build_shared_template_context(active_profile),
             },
         )
+
+    @application.post("/admin/daily-task-report")
+    async def admin_daily_task_report(
+        request: Request, enabled: str = Form("0"), run_time: str = Form("23:50"),
+        sender_profile_id: int = Form(0),
+    ) -> RedirectResponse:
+        if not _is_admin_profile(_get_request_profile(request)):
+            raise HTTPException(status_code=403, detail="Only admin can manage daily reports")
+        from urllib.parse import urlencode
+        try:
+            daily_report_settings.save_settings(storage, enabled=enabled == "1", run_time=run_time, sender_profile_id=sender_profile_id)
+            query = {"report_saved": "1"}
+        except ValueError as exc:
+            query = {"report_error": str(exc)}
+        return RedirectResponse(url="/admin/global-execution?" + urlencode(query) + "#daily-task-report", status_code=303)
 
     @application.get("/admin/battle-schedule", response_class=HTMLResponse)
     async def admin_battle_schedule_page(request: Request) -> HTMLResponse:
@@ -2900,6 +2919,7 @@ def create_app() -> FastAPI:
             "companion_heart_tribulation_state": companion_heart_tribulation_state,
                 **other_module_state,
                 "stock_state": stock_state,
+                "automation_settings": profile_automation_settings.build_view(storage, active_profile.id) if active_profile and module_key in {"other", "stock"} else {},
                 "dungeon_definitions": DUNGEON_DEFINITIONS,
                 "selected_dungeon": selected_dungeon,
                 "dungeon_command_buttons": dungeon_command_buttons,
@@ -2959,6 +2979,20 @@ def create_app() -> FastAPI:
                 profile_id=active_profile.id if active_profile else None,
             ),
         }
+
+    @application.post("/runtime/automation-settings/{feature}")
+    async def runtime_save_automation_settings(request: Request, feature: str) -> RedirectResponse:
+        profile = _get_request_profile(request)
+        if not profile:
+            raise HTTPException(status_code=401, detail="Profile not active")
+        page = profile_automation_settings.FEATURE_PAGES.get(feature)
+        if not page:
+            raise HTTPException(status_code=404, detail="Unknown automation")
+        try:
+            profile_automation_settings.save_settings(storage, profile.id, feature, await request.form())
+        except ValueError as exc:
+            return RedirectResponse(url=f"/modules/{page}?settings_error={quote_plus(str(exc))}#automation-settings", status_code=303)
+        return RedirectResponse(url=f"/modules/{page}?settings_saved=1#automation-settings", status_code=303)
 
     @application.post("/runtime/stock/now")
     async def runtime_stock_now(
@@ -4354,11 +4388,14 @@ def create_app() -> FastAPI:
                 status="cancelled",
                 last_error="Cancelled by user",
             )
-        storage.cancel_pending_outgoing_commands(
-            profile.id,
-            resolved_chat_id,
-            text=".卜筮问天",
-        )
+            storage.cancel_pending_outgoing_commands(
+                profile.id,
+                resolved_chat_id,
+                text=".卜筮问天",
+                thread_id=active_batch.get("thread_id"),
+                require_exact_thread=True,
+                pending_only=True,
+            )
         return RedirectResponse(url=redirect_to, status_code=303)
 
     @application.post("/runtime/fishing/auto")

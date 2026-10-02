@@ -1,3 +1,15 @@
+<section class="detail-card profile-automation-settings" id="automation-settings">
+    {% include 'modules/automation_settings_notice.html' %}
+    <div class="section-header compact"><p>收藏夹提醒</p><h2>股市定时分析</h2></div>
+    <p class="muted">定时读取行情，变化时提醒；北京时间 08:00 后每日发送一份股市日报。买卖仍由你手动执行。</p>
+    <form method="post" action="/runtime/automation-settings/stock-schedule" class="form-grid">
+        <label class="admin-execution-schedule-toggle"><input type="checkbox" role="switch" name="enabled" value="1" {% if automation_settings.stock.enabled %}checked{% endif %}><span>定时分析</span></label>
+        <label>间隔（分钟）<input type="number" name="interval_minutes" min="1" max="1440" step="any" value="{{ automation_settings.stock.interval_minutes }}" required></label>
+        <button type="submit">保存定时分析</button>
+    </form>
+    <p class="muted top-gap">关闭后停止后续定时分析，已开始的分析会完成；「立刻分析并发我」可单独使用。</p>
+</section>
+
 <section class="detail-grid three-column-grid">
     <div class="detail-card other-overview-card">
         <p>追踪股票</p>

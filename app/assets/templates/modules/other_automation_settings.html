@@ -1,0 +1,41 @@
+<section id="automation-settings" class="detail-grid three-column-grid profile-automation-settings">
+    <div class="full-span">{% include 'modules/automation_settings_notice.html' %}</div>
+    {% set fate = automation_settings.fate %}
+    <div class="detail-card">
+        <div class="section-header compact"><p>每日问天</p><h2>天机命脉</h2></div>
+        <p class="muted">北京时间 00:01 后每日自动启牌、承命、验命。关闭后停止后续检查，正在执行的请求不会撤回；未验命的本轮可重新开启后继续。</p>
+        <div class="kv-row"><span>最近结果</span><strong>{{ fate.date or '-' }} · {{ fate.status_label }}</strong></div>
+        <form method="post" action="/runtime/automation-settings/fate-cards" class="form-grid top-gap">
+            <label class="full-span admin-execution-schedule-toggle"><input type="checkbox" role="switch" name="enabled" value="1" {% if fate.enabled %}checked{% endif %}><span>每日自动</span></label>
+            <label class="full-span">命择<select name="choice">{% for key, title in fate.choices.items() %}<option value="{{ key }}" {% if fate.choice == key %}selected{% endif %}>{{ title }}</option>{% endfor %}</select></label>
+            <label class="full-span">问天主题<select name="question">{% for key, title in fate.questions.items() %}<option value="{{ key }}" {% if fate.question == key %}selected{% endif %}>{{ title }}</option>{% endfor %}</select></label>
+            <button type="submit" class="full-span">保存命脉设置</button>
+        </form>
+        <p class="muted top-gap">命择和主题在下次启牌时生效；可选主题随运行结果更新。逆势改命需要之后再完成虫巢；没有当天后续自动虫巢机会时改为藏锋避劫。</p>
+    </div>
+    {% set packet = automation_settings.ldc %}
+    <div class="detail-card">
+        <div class="section-header compact"><p>群内红包</p><h2>LDC 自动抢红包</h2></div>
+        <p class="muted">只抢总额超过门槛、至少两份的红包，等别人先抢后再随机等待；不抢自己的包，每包最多点一次。</p>
+        {% if packet.braked %}<p role="status">上次自动停用：{{ packet.braked }}。重新开启需主动勾选。</p>{% endif %}
+        <form method="post" action="/runtime/automation-settings/ldc-red-packet" class="form-grid top-gap">
+            <input type="hidden" name="braked_at" value="{{ packet.braked_at or '' }}">
+            <label class="full-span admin-execution-schedule-toggle"><input type="checkbox" role="switch" name="enabled" value="1" {% if packet.enabled %}checked{% endif %}><span>自动抢红包</span></label>
+            <label class="full-span">总额门槛（LDC）<input type="number" name="min_total" min="200" max="1000000000000" step="any" value="{{ packet.min_total }}" required></label>
+            <label>最短等待（秒）<input type="number" name="delay_low" min="1" max="300" step="any" value="{{ packet.delay_low }}" required></label>
+            <label>最长等待（秒）<input type="number" name="delay_high" min="1" max="300" step="any" value="{{ packet.delay_high }}" required></label>
+            <button type="submit" class="full-span">保存红包设置</button>
+        </form>
+        <p class="muted top-gap">关闭后取消尚未点击的等待。出现封禁、天牢或未绑定提示时自动停用。</p>
+    </div>
+    <div class="detail-card">
+        <div class="section-header compact"><p>收藏夹通知</p><h2>野外历练完成通知</h2></div>
+        <p class="muted">当天野外历练打满后，向本号收藏夹发一次总结；与诸元神巡令的任务结果日报独立。</p>
+        <div class="kv-row"><span>最近发送日期</span><strong>{{ automation_settings.wild.sent or '尚未发送' }}</strong></div>
+        <form method="post" action="/runtime/automation-settings/wild-report" class="form-grid top-gap">
+            <label class="full-span admin-execution-schedule-toggle"><input type="checkbox" role="switch" name="enabled" value="1" {% if automation_settings.wild.enabled %}checked{% endif %}><span>完成后通知</span></label>
+            <button type="submit" class="full-span">保存历练通知</button>
+        </form>
+        <p class="muted top-gap">重新开启保留当天发送记录，不会重复发送已完成的通知。</p>
+    </div>
+</section>

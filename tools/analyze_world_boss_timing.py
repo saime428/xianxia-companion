@@ -5,11 +5,55 @@ python tools/analyze_world_boss_timing.py --self-check
 """
 import argparse
 import csv
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
 from pathlib import Path
 import statistics
+
+
+def request_timeline(data):
+    """Export v5 anchors without inventing wall times for older diagnostics.
+
+    The bounded window log may only retain the last attempt's metadata alongside
+    summed durations. Mark those summaries rather than presenting them as raw
+    individual attempts. Server Date has second precision, not a combat clock.
+    """
+    rows = []
+    for profile, state in data['profiles'].items():
+        for event in state.get('world_boss_events', []):
+            for result in event.get('identity_results', []):
+                diag = result.get('diagnostics') or {}
+                requests = [('begin', None, (diag.get('clock_sync') or {}).get('request') or {})]
+                requests += [('start', item.get('sequence'), item.get('request') or {}) for item in (diag.get('entry') or {}).get('entry_requests', [])]
+                requests += [('window', item.get('sequence'), item.get('request') or {}) for item in (diag.get('window_reveal') or {}).get('log', [])]
+                for hit in diag.get('hits', []):
+                    requests += [('charge-start', hit.get('sequence'), (hit.get('charge') or {}).get('request') or {}),
+                                 ('hit', hit.get('sequence'), hit.get('request') or {})]
+                requests += [('finish', None, (diag.get('finish') or {}).get('request') or {})]
+                for endpoint, sequence, trace in requests:
+                    if not trace:
+                        continue
+                    attempts = [a for a in trace.get('attempts', []) if isinstance(a, dict)]
+                    for attempt in attempts or [trace]:
+                        row = {'profile': profile, 'event': (result.get('server_result') or {}).get('event_id'),
+                               'endpoint': endpoint, 'sequence': sequence,
+                               'scope': 'attempt' if attempts else 'summary_last_attempt_metadata',
+                               'attempt': attempt.get('attempt', trace.get('attempt_count'))}
+                        keys = ('request_started_unix_ms', 'request_started_monotonic_ms',
+                                'request_resumed_monotonic_ms', 'request_clock_step_ms',
+                                'http_response_headers_monotonic_ms', 'http_server_date_unix_ms',
+                                'http_cf_ray', 'http_server_timing_cf_edge_ms', 'http_server_timing_cf_origin_ms',
+                                'executor_queue_ms', 'transport_ms', 'loop_resume_ms',
+                                'http_pool_dispatch_ms', 'http_connect_ms', 'http_tls_ms', 'http_headers_wait_ms')
+                        row.update({key: attempt.get(key) for key in keys})
+                        timestamp = row['request_started_unix_ms']
+                        row['started_utc'] = None
+                        if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool) and 0 <= timestamp <= 4102444800000:
+                            row['started_utc'] = datetime.fromtimestamp(timestamp / 1000, timezone.utc).isoformat(timespec='milliseconds')
+                        rows.append(row)
+    return sorted(rows, key=lambda r: (r['request_started_unix_ms'] if r['started_utc'] else float('inf'), r['profile']))
 
 
 def merge(intervals):
@@ -125,6 +169,16 @@ def self_check():
     assert bias_intervals(hit(1070,1050,30)) == []
     assert bias_intervals(hit(1050,1070,float('nan'))) == []
     assert merge([[2,1],[0,2],[1,3],[5,6]]) == [[0,3],[5,6]]
+    data = {'profiles': {'2': {'world_boss_events': [{'identity_results': [{
+        'server_result': {'event_id': 143}, 'diagnostics': {'hits': [{'sequence': 1, 'request': {
+            'attempts': ['<truncated>'], 'attempt_count': 2, 'transport_ms': 500,
+            'request_started_unix_ms': 1790947800123, 'http_cf_ray': '0123456789abcdef-HNL',
+        }}]}}
+    ]}]}}}
+    timeline = request_timeline(data)
+    assert len(timeline) == 1 and timeline[0]['scope'] == 'summary_last_attempt_metadata'
+    assert timeline[0]['started_utc'] == '2026-10-02T13:30:00.123+00:00'
+    assert timeline[0]['http_server_date_unix_ms'] is None
     print('world boss timing analysis: ok')
 
 
@@ -140,9 +194,15 @@ if __name__ == '__main__':
         if not args.evidence or not args.out_dir:
             parser.error('evidence and --out-dir are required')
         raw = args.evidence.read_bytes()
-        summaries, rows = analyze(json.loads(raw))
+        data = json.loads(raw)
+        summaries, rows = analyze(data)
+        requests = request_timeline(data)
         args.out_dir.mkdir(parents=True, exist_ok=True)
-        (args.out_dir/'summary.json').write_text(json.dumps({'evidence_sha256':hashlib.sha256(raw).hexdigest(),'battles':summaries},ensure_ascii=False,indent=2),encoding='utf-8')
+        (args.out_dir/'summary.json').write_text(json.dumps({'evidence_sha256':hashlib.sha256(raw).hexdigest(),'battles':summaries,
+            'request_observations': {'count': len(requests), 'with_utc_anchor': sum(r['started_utc'] is not None for r in requests)}},ensure_ascii=False,indent=2),encoding='utf-8')
         with (args.out_dir/'hits.csv').open('w',encoding='utf-8',newline='') as file:
             writer=csv.DictWriter(file,fieldnames=list(rows[0]));writer.writeheader();writer.writerows(rows)
+        if requests:
+            with (args.out_dir/'requests.csv').open('w',encoding='utf-8',newline='') as file:
+                writer=csv.DictWriter(file,fieldnames=list(requests[0]));writer.writeheader();writer.writerows(requests)
         print(json.dumps({'battles':len(summaries),'hits':len(rows),'output':str(args.out_dir)},ensure_ascii=False))

@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app/src"))
+from tg_game.features.beast_merge import biz_beast_merge_miniapp as beast_api
 from tg_game.features.estate import biz_estate_miniapp as estate
 from tg_game.features.luoyun_spirit_tree import biz_luoyun_spirit_tree_miniapp as tree
 from tg_game.features.pagoda import biz_pagoda_state as pagoda
@@ -60,6 +61,31 @@ class RecoveryTests(unittest.TestCase):
             with patch.object(estate, "execute_estate_external_app_lookup", return_value=lookup):
                 tree.run_luoyun_spirit_tree_flow(estate_token="dwelling_offline123", init_data="local", transport=transport)
             self.assertEqual(calls, ["start"])
+
+    def test_tree_quota_without_limit_field_uses_three_per_day(self):
+        # 页面把每日 3 次写死、从不读 limit：回包只有 used 时不能卡在「次数未返回」
+        for used, expected in ((3, ["start"]), (0, ["start", "run_start"])):
+            calls = []
+            def transport(request):
+                calls.append(request["safe_summary"]["endpoint"])
+                daily = {mode: {"used": used, "best": 0} for mode in ("fly", "jump")}
+                return 200, {"ok": True, "data": {"account": {"accountId": "1"}, "seasonState": {"daily": daily}}}
+            lookup = {"result": {"ok": True}, "launch": {"token": "tree_offline123"}}
+            with patch.object(estate, "execute_estate_external_app_lookup", return_value=lookup):
+                result = tree.run_luoyun_spirit_tree_flow(estate_token="dwelling_offline123", init_data="local", transport=transport)
+            self.assertEqual(calls, expected)
+            self.assertNotEqual(result.get("failure_kind"), "daily_state_missing")
+
+    def test_beast_move_retries_one_network_failure_but_settlement_does_not(self):
+        for retry_network, expected_calls, expected_ok in ((True, 2, True), (False, 1, False)):
+            calls = []
+            def transport(request):
+                calls.append(request)
+                if len(calls) == 1:
+                    raise OSError("connection reset")
+                return 200, {"ok": True, "state": {"seq": 1}}
+            result = beast_api._execute_with_retry({}, transport, lambda _: None, retry_network=retry_network)
+            self.assertEqual((len(calls), result["ok"]), (expected_calls, expected_ok))
 
     def test_hunt_uses_details_and_full_quota_is_not_a_failed_round(self):
         for dwelling, expected in (({}, "failed"), ({"hunt": {"used": 3, "limit": 3, "remaining": 0}}, "limit_reached")):

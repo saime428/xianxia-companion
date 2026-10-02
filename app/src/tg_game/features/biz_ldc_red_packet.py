@@ -144,7 +144,7 @@ def read_switch(storage, profile_id) -> dict:
 
 
 def _knobs(switch: dict):
-    """开关里的 min_total、delay 是手写 JSON，写坏了就用默认值。"""
+    """兼容未配置或格式异常的旧设置。"""
     try:
         min_total = float(switch.get("min_total", MIN_TOTAL))
     except (TypeError, ValueError):
@@ -192,7 +192,7 @@ def track_ldc_red_packet(context, storage, *, now=None):
         _brake(storage, profile.id, "天道封禁点了这个号")
         _spawn(_notify(context.client, f"⚠️ 天道封禁点了这个号，已自动关掉抢红包开关\n原文：{text[:300]}"))
         return "brake"
-    if drain_requested(storage):
+    if drain_requested(storage, fresh=True):  # 只有红包 bot 的消息走到这，实时读不贵
         return "draining"
     now = time.time() if now is None else now
     live = _live.setdefault(int(profile.id), {})
@@ -290,10 +290,9 @@ async def _grab(client, storage, profile_id, packet_id, delay):
 
 
 def _brake(storage, profile_id, reason):
-    switch = read_switch(storage, profile_id)
-    storage.set_runtime_state(
+    storage.update_runtime_state_fields(
         SWITCH_KEY.format(profile_id),
-        json.dumps({**switch, "enabled": False, "braked": reason, "braked_at": int(time.time())}, ensure_ascii=False),
+        {"enabled": False, "braked": reason, "braked_at": time.time()},
     )
     logger.warning("%s 自动关开关 profile=%s：%s", GRAB_TAG, profile_id, reason)
 

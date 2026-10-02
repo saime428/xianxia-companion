@@ -14,6 +14,35 @@
     data-active-kind="{{ admin_execution.active_kind }}"
     data-loading-message="{{ admin_execution.loading_message }}"
 >
+    <article class="detail-card admin-execution-card" id="daily-task-report">
+        <div class="section-header compact admin-execution-header">
+            <div><p>每日通知</p><h2>任务结果日报</h2></div>
+            <span class="admin-execution-status {{ 'is-completed' if daily_report.enabled else '' }}">{{ '已开启' if daily_report.enabled else '已关闭' }}</span>
+        </div>
+        <p class="muted">汇总全部元神最近 24 小时的任务结果与异常，发送到所选账号的 Telegram 收藏夹。</p>
+        {% if report_saved %}<p role="status">日报设置已保存。</p>{% endif %}
+        {% if report_error %}<p role="alert">{{ report_error }}</p>{% endif %}
+        <form class="form-grid" method="post" action="/admin/daily-task-report">
+            <label class="admin-execution-schedule-toggle">
+                <input type="checkbox" name="enabled" value="1" role="switch" {% if daily_report.enabled %}checked{% endif %}>
+                <span>每日发送日报</span>
+            </label>
+            <label><span>发送时间（北京时间）</span><input type="time" name="run_time" value="{{ daily_report.time }}" required></label>
+            <label><span>接收账号的收藏夹</span>
+                <select name="sender_profile_id">
+                    {% if daily_report.sender_missing %}<option value="{{ daily_report.sender_profile_id }}" selected>原账号不可用，请选择已登录账号</option>{% endif %}
+                    {% for profile in daily_report.profiles %}<option value="{{ profile.id }}" {% if profile.id == daily_report.sender_profile_id %}selected{% endif %}>{{ profile.name }}</option>{% endfor %}
+                </select>
+            </label>
+            <button type="submit" class="inline-button">保存日报设置</button>
+        </form>
+        <div class="admin-execution-schedule-meta">
+            <div><span>下次发送（北京时间）</span><strong>{{ daily_report.next_run }}</strong></div>
+            <div><span>最近正式日报</span><strong>{{ daily_report.last_delivery }}</strong></div>
+        </div>
+        {% if daily_report.test_delivery %}<p class="muted">测试通知已于北京时间 {{ daily_report.test_delivery }} 送达。</p>{% endif %}
+        <p class="muted">保存后约 1 分钟内生效。关闭后停止后续通知，正在发送的消息可能完成；已发送的当日日报不会重复发送。</p>
+    </article>
     {% for card in admin_execution.cards %}
     <article class="detail-card admin-execution-card" data-admin-execution-card="{{ card.kind }}">
         <div class="section-header compact admin-execution-header">

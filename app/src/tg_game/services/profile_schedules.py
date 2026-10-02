@@ -233,7 +233,7 @@ def stop_current_profile_schedules(storage: Storage, profile_id: int) -> dict:
         except json.JSONDecodeError:
             continue
         if isinstance(switch, dict) and switch.get("enabled"):
-            storage.set_runtime_state(key, json.dumps({**switch, "enabled": False}, ensure_ascii=False))
+            storage.update_runtime_state_fields(key, {"enabled": False})
     _update_existing_table(
         storage, "app_runtime_state", {"value": "cancelled", "updated_at": time.time()},
         "WHERE key=? AND TRIM(value)='queued'",

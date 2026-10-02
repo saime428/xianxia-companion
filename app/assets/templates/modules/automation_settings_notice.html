@@ -1,0 +1,2 @@
+{% if request.query_params.get('settings_saved') %}<p role="status">自动功能设置已保存，仅对当前账号生效。</p>{% endif %}
+{% if request.query_params.get('settings_error') %}<p role="alert">{{ request.query_params.get('settings_error') }}</p>{% endif %}

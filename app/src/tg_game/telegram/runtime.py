@@ -663,6 +663,14 @@ async def _register_handlers(
     client._tg_game_outgoing_task = asyncio.create_task(
         _dispatch_outgoing_commands(client, storage, int(profile_id))
     )
+    from tg_game.services.daily_task_report import run_daily_report_scheduler
+    report_task = asyncio.create_task(run_daily_report_scheduler(client, storage, int(profile_id)))
+    background_tasks = getattr(client, "_tg_game_background_tasks", None)
+    if background_tasks is None:
+        background_tasks = set()
+        client._tg_game_background_tasks = background_tasks
+    background_tasks.add(report_task)
+    report_task.add_done_callback(background_tasks.discard)
 
 
 async def _cancel_client_background_tasks(client: TelegramClient) -> None:

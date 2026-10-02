@@ -112,7 +112,7 @@ class Server:
 def monitor_for(root, clock, server=None):
     enabled = {"value": True}
     actor = SimpleNamespace(
-        client=SimpleNamespace(), config={"world_boss": {"enabled": True}},
+        client=SimpleNamespace(), config={"world_boss": {"enabled": True, "timing_jitter": False}},
         state={}, state_file=str(root / "state.json"), save_state=lambda: None,
         is_world_boss_enabled=lambda: enabled["value"], target_chats=[-1001],
     )
@@ -191,7 +191,7 @@ async def main():
         assert server.proof["playerHp"] == 100 and server.proof["dead"] is False
         assert server.proof["clientStats"]["hits"] == 3
         assert server.proof["clientStats"]["bestCombo"] == 3
-        assert result["diagnostics"]["version"] == 4
+        assert result["diagnostics"]["version"] == 5
         assert result["diagnostics"]["guard_checks"]["count"] > 0
         for reveal in result["diagnostics"]["window_reveal"]["log"]:
             trace = reveal["request"]

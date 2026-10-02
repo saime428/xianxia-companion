@@ -195,7 +195,7 @@ from tg_game.storage import (
 )
 from tg_game.telegram.network_guard import is_network_paused
 from tg_game.services.automation_switch import is_automation_paused
-from tg_game.services.runtime_drain import begin_flow, drain_requested, end_flow, tracked_flow
+from tg_game.services.runtime_drain import drain_requested, polling_flow, tracked_flow
 from tg_game.game_clock import game_day
 from tg_game.features.estate import biz_estate_resources as estate_resources
 from tg_game.telegram.send_utils import send_message_with_thread_fallback
@@ -970,7 +970,7 @@ async def _run_pending_fate_cards(
     """天机命脉每天一次。runtime_state fate_cards:<pid> 里 enabled 才跑，choice/question 可改。
     命择奖励写在 start 回包里：逆势改命 4 残痕 > 顺势承命 2 > 藏锋避劫 1（启牌另 +1）。逆势改命要选完再打
     一局噬金虫，做不成时退回藏锋避劫；状态、上次结果、历次奖励都写回同一个键。
-    ponytail: 开关先放在 runtime_state，没做网页按钮；要在网页上开关再照噬金虫加四处注册。
+    网页「三界游历」可配置开关与命择，结果写回不覆盖运行中修改的设置。
     """
     _ = payload
     key = f"fate_cards:{int(profile_id)}"
@@ -1006,6 +1006,11 @@ async def _run_pending_fate_cards(
         choice = "hide"
     try:
         launch = await fate_cards_miniapp.resolve_fate_cards_launch(client, storage)
+        latest = json.loads(storage.get_runtime_state(key) or "{}")
+        if not latest.get("enabled"):
+            return False
+        if latest.get("choice", "hide") != state.get("choice", "hide") or latest.get("question", "cultivation") != state.get("question", "cultivation"):
+            return False  # 下一轮使用刚保存的命择/主题，避免按旧设置启牌
         if launch.get("ok"):
             result = await asyncio.to_thread(
                 fate_cards_miniapp.run_fate_cards_flow,
@@ -1036,15 +1041,15 @@ async def _run_pending_fate_cards(
             "cards": result.get("cards"),
             "reward": result.get("reward"),
         }])[-FATE_CARDS_HISTORY_LIMIT:]
-    storage.set_runtime_state(key, json.dumps({
-        **state,
+    storage.update_runtime_state_fields(key, {
+        "date": today,
         "status": status,
         "failures": failures,
         "next_at": now + float(result.get("next_check_seconds") or FATE_CARDS_RETRY_SECONDS),
         "updated_at": now,
         "last": result,
         "history": history,
-    }, ensure_ascii=False))
+    })
     logger.info(
         "Fate cards profile=%s status=%s reward=%s error=%s",
         profile_id,
@@ -1089,13 +1094,15 @@ async def _run_wild_experience_report(
         tianji_checked_at=float(tianxing.get("last_panel_checked_at") or 0),
         now=now,
     )
+    if not json.loads(storage.get_runtime_state(key) or "{}").get("enabled"):
+        return False
     try:
         await client.send_message("me", text)
     except Exception as exc:
         logger.warning("Wild experience report send failed for profile=%s: %s", profile_id, exc)
-        storage.set_runtime_state(key, json.dumps({**state, "failed_at": now}, ensure_ascii=False))
+        storage.update_runtime_state_fields(key, {"failed_at": now})
         return False
-    storage.set_runtime_state(key, json.dumps({**state, "sent": today, "failed_at": 0}, ensure_ascii=False))
+    storage.update_runtime_state_fields(key, {"sent": today, "failed_at": 0})
     logger.info("Wild experience report sent for profile=%s", profile_id)
     return False  # 只读 payload，不用让调度器重读
 
@@ -1781,7 +1788,7 @@ def _trusted_estate_parent(context: EventContext, storage: Storage) -> Optional[
     return parent
 
 
-@tracked_flow
+@tracked_flow(ready=lambda context, storage: bool(_trusted_estate_parent(context, storage)))
 async def _maybe_handle_estate_miniapp_snapshot(
     context: EventContext,
     storage: Storage,
@@ -2038,7 +2045,17 @@ def _build_xinggong_starboard_missing_entry_run() -> dict:
     }
 
 
-@tracked_flow
+def _xinggong_starboard_entry_ready(context: EventContext, storage: Storage) -> bool:
+    _account, payload = _load_xinggong_starboard_payload(context, storage)
+    return bool(
+        _trusted_xinggong_starboard_parent(context, storage)
+        or _trusted_xinggong_starboard_pending_thread_entry(
+            context, storage, xinggong_miniapp.get_pending_xinggong_starboard_request(payload)
+        )
+    )
+
+
+@tracked_flow(ready=_xinggong_starboard_entry_ready)
 async def _maybe_handle_xinggong_starboard_miniapp_entry(
     context: EventContext,
     storage: Storage,
@@ -2253,7 +2270,17 @@ def _load_tianji_trial_payload(context: EventContext, storage: Storage) -> tuple
     return external_account, payload
 
 
-@tracked_flow
+def _tianji_trial_entry_ready(context: EventContext, storage: Storage) -> bool:
+    _account, payload = _load_tianji_trial_payload(context, storage)
+    return bool(
+        _trusted_tianji_trial_parent(context, storage)
+        or _trusted_tianji_trial_pending_thread_entry(
+            context, storage, tianji_trial_miniapp.get_pending_tianji_trial_request(payload)
+        )
+    )
+
+
+@tracked_flow(ready=_tianji_trial_entry_ready)
 async def _maybe_handle_tianji_trial_miniapp_entry(
     context: EventContext,
     storage: Storage,
@@ -4587,7 +4614,7 @@ async def _run_companion_heart_tribulation_scheduler(
                     )
                     continue
 
-                if drain_requested(storage):
+                if drain_requested(storage, fresh=True):
                     continue
                 run_id = secrets.token_hex(8)
                 updated_task = storage.update_companion_heart_tribulation_task(
@@ -6003,6 +6030,7 @@ def _disable_other_sect_auto_tasks(storage: Storage, profile_id: int) -> list[st
     return disabled
 
 
+@polling_flow("companion_schedule_pass")
 async def _run_companion_auto_scheduler(
     client: object,
     storage: Storage,
@@ -6010,6 +6038,7 @@ async def _run_companion_auto_scheduler(
     run_once: bool = False,
     task_ids: Optional[set[int]] = None,
     include_tianxing: bool = True,
+    loop_flow=None,
 ) -> None:
     profile_id = getattr(client, "_tg_game_profile_id", None)
     if not profile_id:
@@ -6017,16 +6046,12 @@ async def _run_companion_auto_scheduler(
     resume_last_task_at = 0.0
 
     while True:
-        flow_key = ""
         try:
             current_task_id = 0
-            if drain_requested(storage):
+            if not loop_flow.enter():
                 if run_once:
                     return
                 await asyncio.sleep(COMPANION_AUTO_POLL_SECONDS)
-                continue
-            flow_key = begin_flow(storage, "companion_schedule_pass")
-            if not flow_key:
                 continue
             _disable_legacy_wild_experience(storage, int(profile_id))
             tasks = storage.list_active_companion_auto_tasks(int(profile_id))
@@ -8498,10 +8523,6 @@ async def _run_companion_auto_scheduler(
             await asyncio.sleep(10)
 
 
-        finally:
-            end_flow(storage, flow_key)
-
-
 async def _run_miniapp_pending_scheduler(client: object, storage: Storage) -> None:
     """独立执行小程序 pending 流程，与指令调度循环解耦（后者不再被分钟级慢活阻塞）。"""
     profile_id = getattr(client, "_tg_game_profile_id", None)
@@ -8584,23 +8605,20 @@ async def _run_admin_battle_scheduler(
             await asyncio.sleep(10)
 
 
+@polling_flow("divination_schedule_pass")
 async def _run_divination_batch_scheduler(
-    client: object, storage: Storage, *, run_once: bool = False
+    client: object, storage: Storage, *, run_once: bool = False, loop_flow=None
 ) -> None:
     profile_id = getattr(client, "_tg_game_profile_id", None)
     if not profile_id:
         return
 
     while True:
-        flow_key = ""
         try:
-            if drain_requested(storage):
+            if not loop_flow.enter():
                 if run_once:
                     return
                 await asyncio.sleep(DIVINATION_BATCH_POLL_SECONDS)
-                continue
-            flow_key = begin_flow(storage, "divination_schedule_pass")
-            if not flow_key:
                 continue
             if profile_rebirth.is_profile_rebirth_locked(
                 storage, int(profile_id)
@@ -8785,10 +8803,6 @@ async def _run_divination_batch_scheduler(
             if run_once:
                 raise
             await asyncio.sleep(10)
-
-
-        finally:
-            end_flow(storage, flow_key)
 
 
 def _build_fishing_session_updates_from_reply(
@@ -9230,7 +9244,7 @@ def _build_fishing_miniapp_result_updates(session: dict, result: dict, *, now: f
     return updates
 
 
-@tracked_flow
+@tracked_flow(ready=lambda context, storage: bool(_trusted_fishing_parent(context, storage)))
 async def _maybe_handle_fishing_miniapp_entry(context: EventContext, storage: Storage) -> bool:
     parent = _trusted_fishing_parent(context, storage)
     if not parent:
@@ -9335,20 +9349,27 @@ async def _maybe_handle_fishing_miniapp_entry(context: EventContext, storage: St
     return True
 
 
+@polling_flow("fishing_schedule_pass")
 async def _run_fishing_auto_scheduler(
     client: object,
     storage: Storage,
     *,
     run_once: bool = False,
     session_ids: Optional[set[int]] = None,
+    loop_flow=None,
 ) -> None:
     profile_id = getattr(client, "_tg_game_profile_id", None)
     if not profile_id:
         return
 
     while True:
-        flow_key = ""
         try:
+            # 先看排空再看暂停：登记是整个循环共用的，暂停期间也得能看到排空请求并撤掉登记
+            if not loop_flow.enter():
+                if run_once:
+                    return
+                await asyncio.sleep(FISHING_AUTO_POLL_SECONDS)
+                continue
             if profile_rebirth.is_profile_rebirth_locked(
                 storage, int(profile_id)
             ) or is_automation_paused(storage):
@@ -9357,14 +9378,6 @@ async def _run_fishing_auto_scheduler(
                 await asyncio.sleep(FISHING_AUTO_POLL_SECONDS)
                 continue
             sessions = storage.list_active_fishing_sessions(int(profile_id))
-            if drain_requested(storage):
-                if run_once:
-                    return
-                await asyncio.sleep(FISHING_AUTO_POLL_SECONDS)
-                continue
-            flow_key = begin_flow(storage, "fishing_schedule_pass")
-            if not flow_key:
-                continue
             if session_ids is not None:
                 sessions = [
                     session
@@ -9561,10 +9574,6 @@ async def _run_fishing_auto_scheduler(
             if run_once:
                 raise
             await asyncio.sleep(FISHING_AUTO_POLL_SECONDS)
-
-
-        finally:
-            end_flow(storage, flow_key)
 
 
 async def run_queue_backed_schedules_once(

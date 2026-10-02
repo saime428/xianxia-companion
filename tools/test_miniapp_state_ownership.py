@@ -100,6 +100,50 @@ class StateOwnershipTests(unittest.TestCase):
             count = conn.execute("SELECT count(*) FROM app_runtime_state WHERE key LIKE 'runtime_inflight:%'").fetchone()[0]
         self.assertEqual(count, 0)
 
+    def test_polling_loop_keeps_one_registration_and_parks_on_drain(self):
+        from tg_game.services import runtime_drain as drain
+        def rows():
+            with self.storage.connect() as conn:
+                return conn.execute("SELECT count(*) FROM app_runtime_state WHERE key LIKE 'runtime_inflight:%'").fetchone()[0]
+        passes = []
+
+        @drain.polling_flow("test_pass")
+        async def loop(client, storage, *, loop_flow=None):
+            with patch.object(storage, "set_runtime_state", wraps=storage.set_runtime_state) as writes:
+                for _ in range(5):
+                    self.assertTrue(loop_flow.enter())
+                    self.assertEqual(rows(), 1)
+                self.assertEqual(writes.call_count, 1, "idle passes must not rewrite the registration")
+            passes.append(rows())
+            # 排空标记有 1 秒缓存：循环自己看到排空之前，登记必须一直在，部署工具才会等它
+            storage.set_runtime_state(drain.DRAIN_KEY, "1")
+            self.assertTrue(loop_flow.enter())
+            self.assertEqual(rows(), 1)
+            drain._drain_cache.clear()
+            self.assertFalse(loop_flow.enter())
+            self.assertEqual(rows(), 0)
+            self.assertFalse(loop_flow.enter(), "stays parked while draining")
+            storage.set_runtime_state(drain.DRAIN_KEY, "0")
+            drain._drain_cache.clear()
+            self.assertTrue(loop_flow.enter())
+            self.assertEqual(rows(), 1)
+
+        asyncio.run(loop(None, self.storage))
+        self.assertEqual((passes, rows()), ([1], 0), "registration ends with the coroutine")
+
+    def test_stale_drain_cache_never_admits_a_flow(self):
+        from tg_game.services import runtime_drain as drain
+        self.assertFalse(drain.drain_requested(self.storage))
+        self.storage.set_runtime_state(drain.DRAIN_KEY, "1")
+        self.assertFalse(drain.drain_requested(self.storage), "cached for up to a second")
+        self.assertTrue(drain.drain_requested(self.storage, fresh=True))
+        self.storage.set_runtime_state(drain.DRAIN_KEY, "0")
+        self.assertFalse(drain.drain_requested(self.storage, fresh=True))
+        self.storage.set_runtime_state(drain.DRAIN_KEY, "1")
+        self.assertEqual(drain.begin_flow(self.storage, "test"), "", "admission re-reads after writing its row")
+        with self.storage.connect() as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM app_runtime_state WHERE key LIKE 'runtime_inflight:%'").fetchone()[0], 0)
+
     def test_tree_refusal_categories_preserve_only_recoverable_material(self):
         cases = [
             (429, "run_rate_limited", "retry_pending", "rate_limited", True),
