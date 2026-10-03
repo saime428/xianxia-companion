@@ -239,6 +239,16 @@ def run_flow(
         transport,
     )
     if not journey.get("ok"):
+        # The server also reports exhaustion as an error, without daily counters.
+        # It is terminal for today, not a transient failure or a new settlement.
+        if journey.get("error") == "wild_experience_daily_limit":
+            return _result(
+                ok=True,
+                status="skipped",
+                strategy=normalized_strategy,
+                snapshot={**snapshot, "daily_count": DAILY_LIMIT,
+                          "daily_limit": DAILY_LIMIT, "daily_remaining": 0},
+            )
         return _result(
             ok=False,
             status="retry_pending",

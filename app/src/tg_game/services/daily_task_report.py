@@ -41,6 +41,29 @@ def _stamp(value):
         return 0
 
 
+def _reward_detail(label, run):
+    """Only recorded gains, never balances or advertised quest rewards."""
+    parts = []
+    if label == "试炼" and "reward_trace" in run:
+        parts.append(f"天机残痕 +{run['reward_trace']}（最近批次）")
+    if label == "虫群" and "total_trace" in run:
+        parts.append(f"天机残痕 +{run['total_trace']}（最近批次）")
+    if label == "命运卡":
+        reward = (run.get("last") or {}).get("reward") or {}
+        for key, name in (("tianjiTrace", "天机残痕"), ("kunwuPass", "昆吾通行令")):
+            if key in reward:
+                parts.append(f"{name} +{reward[key]}")
+    if label == "问心塔":
+        parts.extend((run.get("replay") or {}).get("rewardLines") or [])
+    if label == "野外":
+        attempts = run.get("attempts") or []
+        if attempts:
+            parts.append(f"修为 {sum(int(a.get('cultivation_delta') or 0) for a in attempts):+d}（最近批次）")
+            for attempt in attempts:
+                parts.extend(f"{item.get('name', '物品')} ×{item.get('quantity', '?')}" for item in attempt.get("loot") or [])
+    return "；奖励：" + (_short("、".join(parts), 350) if parts else "未记录")
+
+
 def due_window(config, now):
     """Catch up after restarts, starting with the day on which this was enabled."""
     if not config.get("enabled"):
@@ -75,7 +98,7 @@ def build_report(storage, start, end):
                     return
                 status = str(run.get("status") or "")
                 if status in {"completed", "settled", "limit_reached"} and run.get("ok") is not False:
-                    results.append(label + detail)
+                    results.append(label + detail + _reward_detail(label, run))
                 elif status in {"failed", "settlement_unknown", "needs_review", "retry_pending", "partial"}:
                     errors.append(label + "：" + _short(run.get("error") or run.get("message") or status))
                 elif status in {"skipped", "cancelled"}:
@@ -121,19 +144,43 @@ def build_report(storage, start, end):
                     results.append("青元子已结算 " + "/".join(f"命中{r.get('hit_count', '?')}、完美{r.get('perfect_count', '?')}" for r in identities))
                 else:
                     errors.append("青元子：" + _short(event.get("error") or event.get("status")))
-            commands = db.execute("SELECT text,status FROM outgoing_commands WHERE profile_id=? AND created_at>=? AND created_at<?", (pid, since, until)).fetchall()
-            confirmed_count = sum(r[1] == "confirmed" for r in commands)
-            pending = [r for r in commands if r[1] in {"failed", "needs_manual_confirm", "pending", "sending", "awaiting_confirm"}]
-            if commands:
-                names = list(dict.fromkeys(_short(r[0].split()[0], 16) for r in commands if r[0].strip()))
-                results.append(f"群指令 {len(commands)}条／已确认{confirmed_count}：" + "、".join(names[:18]) + ("等" if len(names) > 18 else ""))
-            if pending:
-                errors.append("指令待处理：" + "、".join(_short(r[0], 22) + ("失败" if r[1] == "failed" else "未确认") for r in pending[:5]) + (f"等{len(pending)}条" if len(pending) > 5 else ""))
+            # The bot edits its initial acknowledgement into the settlement.
+            # Only replies to this profile's own command (or owned rift log) count.
+            rifts = db.execute("""
+                SELECT child.chat_id,child.message_id,child.text,child.updated_at
+                FROM bound_messages child JOIN bound_messages parent
+                  ON child.profile_id=parent.profile_id AND child.chat_id=parent.chat_id
+                 AND child.reply_to_msg_id=parent.message_id
+                 AND coalesce(child.thread_id,0)=coalesce(parent.thread_id,0)
+                WHERE child.profile_id=? AND child.updated_at>=? AND child.updated_at<?
+                  AND child.direction='incoming' AND child.is_bot=1
+                  AND parent.direction='outgoing' AND trim(parent.text)='.探寻裂缝'
+                UNION
+                SELECT r.chat_id,r.message_id,coalesce(b.text,r.text),coalesce(b.updated_at,r.created_at)
+                FROM rift_execution_logs r LEFT JOIN bound_messages b
+                  ON b.profile_id=r.profile_id AND b.chat_id=r.chat_id AND b.message_id=r.message_id
+                 AND b.direction='incoming' AND b.is_bot=1
+                WHERE r.profile_id=? AND coalesce(b.updated_at,r.created_at)>=?
+                  AND coalesce(b.updated_at,r.created_at)<?
+                  AND r.event_type IN ('bot_reply_received','success')
+                ORDER BY 4
+            """, (pid, since, until, pid, since, until)).fetchall()
+            seen_rifts = set()
+            for chat_id, message_id, raw_text, stamp in rifts:
+                identity = (chat_id, message_id) if message_id else (chat_id, raw_text)
+                if identity in seen_rifts or not raw_text.strip():
+                    continue
+                seen_rifts.add(identity)
+                detail = "已开始，最终结果尚未记录" if "送入其中探寻机缘" in raw_text else _short(raw_text, 700)
+                results.append(f"探缝 {datetime.fromtimestamp(stamp, GAME_TZ):%H:%M}：" + detail)
+            pending = db.execute("SELECT DISTINCT text,status FROM outgoing_commands WHERE profile_id=? AND created_at>=? AND created_at<? AND status IN ('failed','needs_manual_confirm')", (pid, since, until)).fetchall()
+            actions = ["核对 " + _short(r[0], 60) + ("（发送失败）" if r[1] == "failed" else "（结果未确认，先查看游戏回包）") for r in pending]
             lines.append("\n" + _short(payload.get("dao_name") or name, 30))
-            lines.append("；".join(results) if results else "本时段没有已记录的任务结果")
+            lines.append("需要你处理：" + ("；".join(actions) if actions else "暂无明确的手动待办"))
             if errors:
-                lines.append("异常／待核对：" + "；".join(errors))
-    text = "\n".join(lines) + "\n\n仅汇总已有记录；指令已确认不等于游戏奖励成功。"
+                lines.append("需要核对任务结果：" + "；".join(errors))
+            lines.extend(results or ["本时段没有已记录的任务结果"])
+    text = "\n".join(lines)
     # Leave ample room below Telegram's 4096 UTF-16-unit message limit.
     if len(text.encode("utf-16-le")) > 7600:
         text = text.encode("utf-16-le")[:7300].decode("utf-16-le", errors="ignore") + "\n（内容较多，后续条目省略）"

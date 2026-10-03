@@ -50,7 +50,39 @@ class DailyReportTests(unittest.TestCase):
         self.assertIn("垂钓 2竿／钓获2", text)
         self.assertNotIn("试炼 3/3", text)
         self.assertIn("灵树：response timeout", text)
-        self.assertIn(".查询未确认", text)
+        self.assertIn("核对 .查询（结果未确认", text)
+
+    def test_actionable_digest_rewards_and_rift_results(self):
+        stamp = self.end.timestamp()-1
+        payload = {"tianji_trial": {"miniapp_run": {"status": "settled", "updated_at": stamp, "reward_trace": 4}},
+                   "beast_merge": {"run": {"status": "completed", "updated_at": stamp,
+                   "total_trace": 6, "trace_balance": 999}},
+                   "pagoda_miniapp": {"run": {"status": "settled", "updated_at": stamp,
+                   "replay": {"rewardLines": ["修为 +100"]}}}}
+        self.storage.update_external_account_payload(self.pid, ASC_EXTERNAL_PROVIDER, lambda _: payload)
+        self.storage.set_runtime_state(f'fate_cards:{self.pid}', json.dumps({
+            'status': 'settled', 'updated_at': stamp,
+            'last': {'reward': {'tianjiTrace': 2, 'kunwuPass': 1, 'balance': 999}}}))
+        with self.storage.connect() as db:
+            for command, status in ((".查询", "confirmed"), (".自动重试", "pending"), (".签到", "failed")):
+                db.execute("INSERT INTO outgoing_commands(profile_id,chat_id,text,status,created_at,updated_at) VALUES(?,1,?,?,?,?)", (self.pid,command,status,stamp,stamp))
+            for event, when, message, value in (
+                ('bot_reply_received', stamp, 1, '探寻裂缝失败，损失修为 50'),
+                ('success', stamp, 1, '探寻裂缝失败，损失修为 50'),
+                ('success', self.start.timestamp(), 2, '探寻裂缝获得修为 +200'),
+                ('success', self.start.timestamp()-1, 3, '旧探缝结果'),
+                ('success', self.end.timestamp(), 4, '下一时段探缝结果')):
+                db.execute("INSERT INTO rift_execution_logs(profile_id,chat_id,event_type,message_id,text,created_at) VALUES(?,1,?,?,?,?)", (self.pid,event,message,value,when))
+        text = report.build_report(self.storage, self.start, self.end)
+        self.assertIn('核对 .签到（发送失败）', text)
+        self.assertIn('天机残痕 +6（最近批次）', text)
+        self.assertIn('天机残痕 +4（最近批次）', text)
+        self.assertIn('修为 +100', text)
+        self.assertIn('天机残痕 +2、昆吾通行令 +1', text)
+        self.assertEqual(text.count('损失修为 50'), 1)
+        self.assertIn('探寻裂缝获得修为 +200', text)
+        for absent in ('群指令', '已确认', '.自动重试', '.查询', '999', '旧探缝结果', '下一时段探缝结果'):
+            self.assertNotIn(absent, text)
 
     def test_delivery_retry_reuses_message_and_random_id_then_stops(self):
         requests = []
@@ -67,6 +99,24 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual(requests[0].random_id,requests[1].random_id)
         self.assertEqual(requests[0].message,requests[1].message)
         self.assertEqual(type(requests[0].peer).__name__,"InputPeerSelf")
+
+    def test_rift_uses_edited_settlement_and_excludes_other_players(self):
+        stamp = self.end.timestamp()-1
+        with self.storage.connect() as db:
+            db.execute("INSERT INTO rift_execution_logs(profile_id,chat_id,event_type,message_id,text,created_at) VALUES(?,1,'success',11,?,?)", (self.pid,'将元婴送入其中探寻机缘...',stamp-10))
+            for message, reply, direction, bot, value in (
+                (10, None, 'outgoing', 0, '.探寻裂缝'),
+                (11, 10, 'incoming', 1, '【探寻成功】获得了：【测试碎片】！'),
+                (20, None, 'incoming', 0, '.探寻裂缝'),
+                (21, 20, 'incoming', 1, '【探寻成功】别人的奖励'),
+                (30, None, 'outgoing', 0, '.探寻裂缝'),
+                (31, 30, 'incoming', 1, '【遭遇风暴】修为倒退了 50 点！')):
+                db.execute("INSERT INTO bound_messages(profile_id,chat_id,message_id,reply_to_msg_id,direction,is_bot,text,created_at,updated_at) VALUES(?,1,?,?,?,?,?,?,?)", (self.pid,message,reply,direction,bot,value,stamp-10,stamp))
+        text = report.build_report(self.storage,self.start,self.end)
+        self.assertEqual(text.count('测试碎片'),1)
+        self.assertIn('修为倒退了 50 点',text)
+        self.assertNotIn('别人的奖励',text)
+        self.assertNotIn('送入其中',text)
 
     def test_concurrent_delivery_claims_once(self):
         requests = []

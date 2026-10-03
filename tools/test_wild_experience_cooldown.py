@@ -185,6 +185,27 @@ def test_used_up_is_skipped_not_retried():
     assert wild.is_completed_today({wild.STATE_KEY: {"run": result}}), result
 
 
+def test_daily_limit_error_stops_existing_retry_without_fake_settlement():
+    for status_code, error, terminal in ((400, "wild_experience_daily_limit", True),
+                                         (200, "wild_experience_daily_limit", True),
+                                         (503, "temporarily_unavailable", False)):
+        seen = []
+        def transport(request):
+            endpoint = request["safe_summary"]["endpoint"]
+            seen.append(endpoint)
+            if endpoint == "start":
+                return 200, json.dumps({"ok": True, "data": _payload()})
+            return status_code, json.dumps({"ok": False, "error": error})
+        payload = wild.claim_request(wild.queue_request({}, strategy="均衡", chat_id=CHAT), "me")
+        result = wild.run_flow(token="df_selfcheck_token", init_data="init", strategy="均衡", transport=transport)
+        assert seen == ["start", "journey"]
+        assert result["attempts"] == [], result
+        assert result["status"] == ("skipped" if terminal else "retry_pending"), result
+        finished = wild.finish_request(payload, result, "me")
+        assert bool(wild.get_active_request(finished)) is not terminal, finished
+        assert wild.is_completed_today(finished) is terminal, finished
+
+
 def test_tianjige_counter_marks_day_done():
     today = wild._day_key()
     assert wild.is_completed_today(
