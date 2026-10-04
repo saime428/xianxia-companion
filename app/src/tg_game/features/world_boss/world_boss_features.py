@@ -57,9 +57,10 @@ WORLD_BOSS_IDENTITY = "主魂"
 # -714ms to +493ms across 57 strikes. 2026-09-03: lowering to 750ms caused massive
 # failure with boss_event_closed errors and perfect rate collapse (62.5%/37.5% vs
 # prior 87.5%/62.5%). Rolling back to 1000ms.
-# The page's chargeBonus is min(1.35, hold / 900). The server measures
-# hold independently, so the target must leave room for asymmetric
-# request latency and stay within the server's hold limits.
+# 2026-10-01: damage scales with that server hold as min(1.35, hold / 900), the
+# page's chargeBonus (559 real strikes: exponent ~0.96 on perfect hits), so 1000ms
+# left up to 18% per strike unused. Replaying 36 battles with their real jitter,
+# 1180ms gains ~11% while ~0.4 strikes per battle overshoot the 1250ms limit.
 WORLD_BOSS_HOLD_MS = 1180
 WORLD_BOSS_STANCE = "强攻"
 WORLD_BOSS_ENTRY_WAIT_SECONDS = 110

@@ -84,6 +84,30 @@ class DailyReportTests(unittest.TestCase):
         for absent in ('群指令', '已确认', '.自动重试', '.查询', '999', '旧探缝结果', '下一时段探缝结果'):
             self.assertNotIn(absent, text)
 
+    def test_world_boss_reward_comes_from_result_notice(self):
+        start = self.end.timestamp() - 3600
+        self.storage.upsert_external_account(self.pid, ASC_EXTERNAL_PROVIDER, "", "me", "connected", "", {}, "")
+        identity = {"settlement_confirmed": True, "hit_count": 16, "perfect_count": 12}
+        event = {"status": "completed", "started_at": start, "completed_at": start + 160, "updated_at": start + 160,
+                 "identity_results": [identity]}
+        self.storage.set_runtime_state(f"world_boss_state:{self.pid}", json.dumps({"world_boss_events": [event]}))
+        notice = "\n".join(["【世界通告｜真仙试锋功成】", "战果", "- 结果：伐仙功成", "贡献榜", "1. @me - 3760 分",
+                            "称号授予", "- @me 获得称号徽章 【斩青元者】", "奖励结算",
+                            "- @me：伐仙功 +19，修为 +12520，新称号 【斩青元者】", "- @me2：修为 +1",
+                            "珍稀掉落", "- @me 获得 【衍神玉简】x1"])
+        with self.storage.connect() as db:
+            for profile in (self.pid, self.pid + 1):  # each profile keeps its own copy of the notice
+                db.execute("INSERT INTO bound_messages(profile_id,chat_id,message_id,direction,is_bot,text,created_at,updated_at) VALUES(?,1,9,'incoming',1,?,?,?)", (profile, notice, start + 240, start + 240))
+        text = report.build_report(self.storage, self.start, self.end)
+        self.assertIn("命中16、完美12（伐仙功成）；奖励：伐仙功 +19，修为 +12520，新称号 【斩青元者】；获得 【衍神玉简】x1", text)
+        self.assertNotIn("称号徽章", text)
+        self.assertNotIn("修为 +1\n", text + "\n")
+        self.storage.upsert_external_account(self.pid, ASC_EXTERNAL_PROVIDER, "", "other", "connected", "", {}, "")
+        self.assertIn("本号未列出", report.build_report(self.storage, self.start, self.end))
+        with self.storage.connect() as db:
+            db.execute("DELETE FROM bound_messages")
+        self.assertIn("奖励：未见结果公告", report.build_report(self.storage, self.start, self.end))
+
     def test_delivery_retry_reuses_message_and_random_id_then_stops(self):
         requests = []
         async def client(request):

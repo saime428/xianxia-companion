@@ -64,6 +64,24 @@ def _reward_detail(label, run):
     return "；奖励：" + (_short("、".join(parts), 350) if parts else "未记录")
 
 
+def _boss_reward(notices, username, event):
+    """The only reward record is the group's result notice: top 10 settlements plus rare drops."""
+    started = _stamp(event.get("started_at"))
+    completed = _stamp(event.get("completed_at") or event.get("updated_at"))
+    for at, text in notices:
+        if not started <= at <= completed + 600:
+            continue
+        result = re.search(r"结果：(\S+)", text)
+        prefix = f"- @{username}"
+        mine = [line[len(prefix):].lstrip("：").strip() for line in text.splitlines()
+                if username and (line.startswith(prefix + "：") or line.startswith(prefix + " "))]
+        if any("伐仙功" in item for item in mine):
+            mine = [item for item in mine if "称号徽章" not in item]  # settlement line already names new titles
+        return (f"（{result[1] if result else '结果未知'}）；奖励："
+                + (_short("；".join(mine), 350) if mine else "公告只列贡献前10与珍稀掉落，本号未列出"))
+    return "；奖励：未见结果公告"
+
+
 def due_window(config, now):
     """Catch up after restarts, starting with the day on which this was enabled."""
     if not config.get("enabled"):
@@ -86,9 +104,11 @@ def build_report(storage, start, end):
     lines = [f"每日修仙简报 · {end:%Y-%m-%d}", f"北京时间 {start:%m-%d %H:%M}—{end:%m-%d %H:%M}"]
     with storage.connect() as db:
         db.execute("BEGIN")
-        accounts = db.execute("SELECT p.id,p.name,e.me_json FROM profiles p JOIN external_accounts e ON e.profile_id=p.id WHERE p.telegram_verified_at>0 AND e.provider='asc_aiopenai' ORDER BY p.id").fetchall()
+        accounts = db.execute("SELECT p.id,p.name,e.me_json,e.telegram_username FROM profiles p JOIN external_accounts e ON e.profile_id=p.id WHERE p.telegram_verified_at>0 AND e.provider='asc_aiopenai' ORDER BY p.id").fetchall()
+        # Every profile stores its own copy of the group notice; one per message is enough.
+        boss_notices = db.execute("SELECT min(created_at),max(text) FROM bound_messages WHERE is_bot=1 AND text LIKE '%世界通告｜真仙试锋%' AND text LIKE '%战果%' AND created_at>=? AND created_at<? GROUP BY chat_id,message_id ORDER BY 1", (since, until + 600)).fetchall()
         for account in accounts:
-            pid, name, raw = account
+            pid, name, raw, username = account
             payload = _json(raw)
             results, errors = [], []
             def fresh(value):
@@ -141,7 +161,8 @@ def build_report(storage, start, end):
                 identities = event.get("identity_results") or []
                 confirmed = identities and all(r.get("settlement_confirmed") for r in identities)
                 if event.get("status") == "completed" and confirmed:
-                    results.append("青元子已结算 " + "/".join(f"命中{r.get('hit_count', '?')}、完美{r.get('perfect_count', '?')}" for r in identities))
+                    results.append("青元子已结算 " + "/".join(f"命中{r.get('hit_count', '?')}、完美{r.get('perfect_count', '?')}" for r in identities)
+                                   + _boss_reward(boss_notices, username, event))
                 else:
                     errors.append("青元子：" + _short(event.get("error") or event.get("status")))
             # The bot edits its initial acknowledgement into the settlement.
