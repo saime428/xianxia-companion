@@ -17,6 +17,8 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 from tg_game.features.estate import biz_estate_miniapp as estate_miniapp
+from tg_game.features.stock import biz_stock_advice
+from tg_game.features.stock import biz_stock_forecast
 from tg_game.features.estate.biz_estate_constants import (
     ESTATE_MINIAPP_ALLOWED_API_HOSTS,
     ESTATE_MINIAPP_DEFAULT_API_BASE_URL,
@@ -392,13 +394,45 @@ def _runtime_dict(storage: object, key: str) -> dict:
         return {}
 
 
+def _forecast_unavailable(now):
+    return {"as_of": now, "lines": ["实验模型观察暂不可用，本轮没有生成可用的新预测。"],
+            "recent": [], "forecast_count": None, "evaluated_count": None, "missing_count": None}
+
+
+def _forecast_due_symbols(storage, profile_id, now):
+    try:
+        return biz_stock_forecast.pending_symbols(storage, int(profile_id), now)
+    except Exception as exc:
+        logger.warning("Stock forecast lookup unavailable for profile=%s: %s", profile_id, type(exc).__name__)
+        return None  # 不能把读失败当作没有待核验标的，再误记缺价。
+
+
+def _observe_forecast(storage, profile_id, summary, points, now, *, available=True):
+    if not available:
+        return _forecast_unavailable(now)
+    try:
+        return biz_stock_forecast.observe(storage, int(profile_id), summary, points, now=now)
+    except Exception as exc:
+        # 实验观察不能阻断原有快照保存、风险提醒和建议留档。
+        logger.warning("Stock forecast observation unavailable for profile=%s: %s", profile_id, type(exc).__name__)
+        return _forecast_unavailable(now)
+
+
 def store_market_snapshot(storage: object, profile_id: int, result: dict, *, now: float = None) -> dict:
     now = time.time() if now is None else now
     result_key = RESULT_STATE_KEY.format(profile_id=int(profile_id))
     previous = _runtime_dict(storage, result_key)
+    forecast_codes = _forecast_due_symbols(storage, profile_id, now)
     if not result.get("ok"):
         # 拉取失败保留上次持仓轨迹；不能把失败快照当作已清空持仓。
         summary = {**previous, "ok": False, "error": str(result.get("error") or "行情读取失败"), "attempted_at": now}
+        due_codes = (biz_stock_advice.due_symbols(storage, int(profile_id), now=now)
+                     | (forecast_codes or set()))
+        points = {code: _history_points_from_storage(storage, code, now) for code in due_codes}
+        summary["advice_review"] = biz_stock_advice.record_and_review(
+            storage, int(profile_id), summary, [], points, now=now, rules={},
+        )
+        summary["forecast_review"] = _observe_forecast(storage, profile_id, summary, points, now, available=forecast_codes is not None)
         storage.set_runtime_state(result_key, json.dumps(summary, ensure_ascii=False, default=str))
         return summary
     fetched_at = _number(result.get("fetched_at"), now)
@@ -457,6 +491,22 @@ def store_market_snapshot(storage: object, profile_id: int, result: dict, *, now
         "indices": [{**{k: v for k, v in i.items() if k != "history"}, "profile": profiles[str(i["symbol"])]} for i in indices],
         "portfolio": portfolio, "portfolio_ok": portfolio_ok, "market_ok": bool(indices), "ipo": result.get("ipo") or {},
     }
+    due_codes = (biz_stock_advice.due_symbols(storage, int(profile_id), now=now)
+                 | (forecast_codes or set()))
+    for code in due_codes - points_by_symbol.keys():
+        points_by_symbol[code] = _history_points_from_storage(storage, code, fetched_at)
+    advice_lines, advice_signature = build_alert_lines(summary, now=now, include_idle=True)
+    summary["advice_review"] = biz_stock_advice.record_and_review(
+        storage, int(profile_id), summary,
+        [(key, action, line) for (key, action), line in zip(json.loads(advice_signature), advice_lines)],
+        points_by_symbol, now=now, rules={
+            "buy_below": BUY_BELOW, "buy_release": BUY_RELEASE, "take_profit_pct": TAKE_PROFIT_PCT,
+            "take_profit_full_pct": TAKE_PROFIT_FULL_PCT, "protect_pct": PROTECT_PCT,
+            "stop_loss_pct": STOP_LOSS_PCT, "finance_warn_buffer": FINANCE_WARN_BUFFER,
+            "finance_urgent_buffer": FINANCE_URGENT_BUFFER,
+        },
+    )
+    summary["forecast_review"] = _observe_forecast(storage, profile_id, summary, points_by_symbol, now, available=forecast_codes is not None)
     storage.set_runtime_state(result_key, json.dumps(summary, ensure_ascii=False, default=str, allow_nan=False))
     return summary
 
@@ -512,15 +562,17 @@ def build_alert_lines(summary: dict, *, now: float = None, include_idle: bool = 
                     if level:
                         sell_level = max(sell_level, level)
                         reasons.append(f"融资风险：强平价 {liquidation:.2f}，现价高于强平价 {buffer:+.1%}")
+            profit, quantity = _number(pos.get("profitPct"), None), _number(pos.get("quantity"))
+            if profit is None:
+                events.append((f"{code}:profit_data", "missing", f"⚠️ {name} 持仓盈亏数据缺失，暂停止盈止损判断"))
             for key, reason in (
                 ("take_profit_full", f"止盈：浮盈已到第二段 +{TAKE_PROFIT_FULL_PCT:.0f}%，全部落袋"),
-                ("protect_level", f"保本：到过 +{TAKE_PROFIT_PCT:.0f}% 之后回落到成本，清掉剩余，别让赚过的这笔变亏"),
-                ("stop_level", f"止损：账面亏损已到 -{STOP_LOSS_PCT:.0f}%（低价买点历史上极少亏到这里，到了说明这次不灵）"),
+                ("protect_level", f"保本条件：到过 +{TAKE_PROFIT_PCT:.0f}% 之后回落到成本附近，触发余仓退出条件；税费和成交价仍影响结果"),
+                ("stop_level", f"止损：触发账面亏损 -{STOP_LOSS_PCT:.0f}% 的退出条件"),
             ):
-                if pos.get(key):
+                if profit is not None and pos.get(key):
                     sell_level = 2
                     reasons.append(reason)
-            profit, quantity = _number(pos.get("profitPct"), None), _number(pos.get("quantity"))
             take_profit = bool(pos.get("take_profit_level") and profit is not None and profit >= TAKE_PROFIT_RELEASE_PCT
                                and quantity >= _number(pos.get("take_profit_quantity")))
             if sell_level:
@@ -532,7 +584,7 @@ def build_alert_lines(summary: dict, *, now: float = None, include_idle: bool = 
                 events.append((f"{code}:take_profit", "half",
                     f"🟡 建议止盈减仓一半 {_position_text(pos)}；浮盈已到第一段 +{TAKE_PROFIT_PCT:.0f}%，"
                     f"先卖出约 {int(quantity // 2)} 股落袋；剩下的到 +{TAKE_PROFIT_FULL_PCT:.0f}% 清仓，跌回成本也清"))
-            elif include_idle and not finance_unknown:
+            elif include_idle and not finance_unknown and profit is not None:
                 events.append((f"{code}:idle", "hold", f"💼 继续持有 {_position_text(pos)}；未触发卖出条件，暂不加仓"))
     # 便宜的排前面：日报里最该盯的就是离低价区最近的那只
     for index in sorted(summary.get("indices") or [], key=lambda i: _number(i.get("price")) or math.inf):
@@ -547,9 +599,12 @@ def build_alert_lines(summary: dict, *, now: float = None, include_idle: bool = 
                 f"ℹ️ {index.get('name') or code} 买入条件暂无法确认：{profile.get('quality') or '行情数据不足'}"))
         elif code not in positions and summary.get("portfolio_ok", True):
             if profile.get("observation") == "buy":
+                condition = (f"现价进入低价区（< {BUY_BELOW:g}）" if price < BUY_BELOW
+                             else f"低价条件仍有效（解除线 {BUY_RELEASE:g}）")
                 events.append((f"{code}:trade", "buy", f"🟢 建议买入（小仓建仓）{name_price}；"
-                    f"现价进入低价区（< {BUY_BELOW:g}）——回测里唯一明显有效的买点；"
-                    f"低价不保证不再跌（洞天地产 9 月跌到过 7.86），亏到 -{STOP_LOSS_PCT:.0f}% 会提示止损，单只别压重仓"))
+                    f"{condition}；"
+                    f"这是历史回看保留的规则，未验证未来胜率；低价仍可能继续下跌，"
+                    f"亏到 -{STOP_LOSS_PCT:.0f}% 会提示止损，单只别压重仓"))
             elif include_idle:
                 low, gap = profile.get("recent_min"), 1 - BUY_BELOW / price
                 events.append((f"{code}:idle", "wait", f"· 暂不买入 {name_price}；"
@@ -592,6 +647,10 @@ def build_digest_lines(summary: dict, today: date = None, *, now: float = None) 
     at = _number(summary.get("at"))
     if at > 0:
         lines.append(f"行情采集：{datetime.fromtimestamp(at, BEIJING):%m-%d %H:%M}（北京时间）")
+    review = summary.get("advice_review") or {}
+    if review.get("lines"):
+        lines.extend(["", *review["lines"]])
+        lines.append(f"复核更新：{datetime.fromtimestamp(review['as_of'], BEIJING):%m-%d %H:%M}（北京时间）")
     lines.append("买卖建议由你手动执行；规则来自历史回测，不保证未来收益。")
     return lines
 
@@ -622,9 +681,10 @@ async def maybe_send_alert(client: object, storage: object, profile_id: int, sum
         code, _, kind = key.rpartition(":")
         unavailable = ("snapshot" in current
             or ("market" in current and (kind == "data" or (kind == "trade" and state == "buy")))
-            or ("portfolio" in current and kind in ("trade", "take_profit", "position_data", "finance_data"))
+            or ("portfolio" in current and kind in ("trade", "take_profit", "position_data", "finance_data", "profit_data"))
             or (f"{code}:data" in current and kind == "trade" and state == "buy")
             or (f"{code}:position_data" in current and kind in ("trade", "take_profit"))
+            or (f"{code}:profit_data" in current and kind in ("trade", "take_profit"))
             or (f"{code}:finance_data" in current and kind == "trade" and state in ("reduce", "exit")))
         if unavailable and key not in next_state:
             next_state[key] = state

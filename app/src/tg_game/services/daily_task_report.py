@@ -25,7 +25,7 @@ def _json(value):
 
 
 def _short(value, limit=90):
-    if re.search(r"token|proof|initdata|tgwebappdata|cookie|authorization|session", str(value or ""), re.I):
+    if re.search(r"token|proof|initdata|tgwebappdata|cookie|authorization|session|qyz_", str(value or ""), re.I):
         return "敏感诊断已隐藏"
     text = re.sub(r"https?://\S+", "[链接]", str(value or ""))
     return " ".join(text.split())[:limit]
@@ -105,8 +105,10 @@ def build_report(storage, start, end):
     with storage.connect() as db:
         db.execute("BEGIN")
         accounts = db.execute("SELECT p.id,p.name,e.me_json,e.telegram_username FROM profiles p JOIN external_accounts e ON e.profile_id=p.id WHERE p.telegram_verified_at>0 AND e.provider='asc_aiopenai' ORDER BY p.id").fetchall()
-        # Every profile stores its own copy of the group notice; one per message is enough.
-        boss_notices = db.execute("SELECT min(created_at),max(text) FROM bound_messages WHERE is_bot=1 AND text LIKE '%世界通告｜真仙试锋%' AND text LIKE '%战果%' AND created_at>=? AND created_at<? GROUP BY chat_id,message_id ORDER BY 1", (since, until + 600)).fetchall()
+        config_row = db.execute("SELECT value FROM app_runtime_state WHERE key=?", (CONFIG_KEY,)).fetchone()
+        immediate_boss = _json(config_row[0] if config_row else "").get("world_boss_after_battle")
+        # The separate after-battle report owns these results when enabled.
+        boss_notices = [] if immediate_boss else db.execute("SELECT min(created_at),max(text) FROM bound_messages WHERE is_bot=1 AND text LIKE '%世界通告｜真仙试锋%' AND text LIKE '%战果%' AND created_at>=? AND created_at<? GROUP BY chat_id,message_id ORDER BY 1", (since, until + 600)).fetchall()
         for account in accounts:
             pid, name, raw, username = account
             payload = _json(raw)
@@ -153,7 +155,7 @@ def build_report(storage, start, end):
             for recovery in payload.get("recovery_history") or []:
                 if fresh(recovery):
                     errors.append(_short(recovery.get("summary")))
-            boss_row = db.execute("SELECT value FROM app_runtime_state WHERE key=?", (f"world_boss_state:{pid}",)).fetchone()
+            boss_row = None if immediate_boss else db.execute("SELECT value FROM app_runtime_state WHERE key=?", (f"world_boss_state:{pid}",)).fetchone()
             events = _json(boss_row[0] if boss_row else "").get("world_boss_events") or []
             for event in events:
                 if not fresh(event):
@@ -201,7 +203,10 @@ def build_report(storage, start, end):
             if errors:
                 lines.append("需要核对任务结果：" + "；".join(errors))
             lines.extend(results or ["本时段没有已记录的任务结果"])
-    text = "\n".join(lines)
+    return _limit_text("\n".join(lines))
+
+
+def _limit_text(text):
     # Leave ample room below Telegram's 4096 UTF-16-unit message limit.
     if len(text.encode("utf-16-le")) > 7600:
         text = text.encode("utf-16-le")[:7300].decode("utf-16-le", errors="ignore") + "\n（内容较多，后续条目省略）"
@@ -242,6 +247,11 @@ async def send_due_report(client, storage, profile_id, *, now=None):
                   "profile_id": profile_id, "attempts": 0, "period_end": end.timestamp()}
     if int(record.get("profile_id") or 0) != int(profile_id):
         return False
+    return await deliver_report(client, storage, profile_id, config, key, record, now)
+
+
+async def deliver_report(client, storage, profile_id, config, key, record, now):
+    """Claim and deliver a frozen private report; callers register a tracked flow."""
     # Recheck and claim in one transaction: two workers may both have built a
     # report while the database work was running in the thread pool.
     with storage.connect() as db:
@@ -270,16 +280,24 @@ async def send_due_report(client, storage, profile_id, *, now=None):
         if type(exc).__name__ != "RandomIdDuplicateError":
             record.update(status="retry_pending", error=type(exc).__name__)
             storage.set_runtime_state(key, json.dumps(record, ensure_ascii=False))
-            logger.warning("Daily task report delivery pending profile=%s error=%s", profile_id, type(exc).__name__)
+            logger.warning("Task report delivery pending profile=%s key=%s error=%s", profile_id, key, type(exc).__name__)
             return False
     record.update(status="sent", sent_at=now, next_at=0, error="")
     storage.set_runtime_state(key, json.dumps(record, ensure_ascii=False))
-    logger.info("Daily task report sent profile=%s day=%s", profile_id, key[len(STATE_PREFIX):])
+    logger.info("Task report sent profile=%s key=%s", profile_id, key)
     return True
 
 
 async def run_daily_report_scheduler(client, storage, profile_id):
+    from tg_game.services import world_boss_report
     while True:
+        try:
+            now = time.time()
+            candidate = await asyncio.to_thread(world_boss_report.next_report, storage, profile_id, now)
+            if candidate:
+                await world_boss_report.send_report(client, storage, profile_id, candidate, now=now)
+        except Exception:
+            logger.exception("World boss report scheduler failed profile=%s", profile_id)
         try:
             config = _json(storage.get_runtime_state(CONFIG_KEY))
             if config.get("enabled") and int(config.get("sender_profile_id") or 0) == int(profile_id):

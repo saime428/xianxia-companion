@@ -829,6 +829,83 @@ class Storage:
                     UNIQUE(chat_id, message_id, stock_code)
                 );
 
+                CREATE TABLE IF NOT EXISTS stock_advice_decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    symbol TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    policy_version TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    state_key TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    quote_price REAL NOT NULL CHECK (quote_price > 0),
+                    quote_at REAL NOT NULL,
+                    recorded_at REAL NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    UNIQUE(profile_id, symbol, policy_version, quote_at)
+                );
+                CREATE INDEX IF NOT EXISTS idx_stock_advice_profile_time
+                    ON stock_advice_decisions(profile_id, recorded_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_stock_advice_symbol_time
+                    ON stock_advice_decisions(profile_id, symbol, policy_version, recorded_at DESC, id DESC);
+                CREATE TABLE IF NOT EXISTS stock_advice_outcomes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    decision_id INTEGER NOT NULL REFERENCES stock_advice_decisions(id) ON DELETE CASCADE,
+                    horizon_hours INTEGER NOT NULL,
+                    due_at REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'evaluated', 'missing')),
+                    evaluated_at REAL,
+                    evaluated_price_at REAL,
+                    evaluated_price REAL,
+                    return_pct REAL,
+                    max_drawdown_pct REAL,
+                    sample_count INTEGER,
+                    max_gap_seconds REAL,
+                    UNIQUE(decision_id, horizon_hours)
+                );
+                CREATE INDEX IF NOT EXISTS idx_stock_advice_outcomes_due
+                    ON stock_advice_outcomes(status, due_at);
+
+                CREATE TABLE IF NOT EXISTS stock_prediction_models (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    version TEXT NOT NULL,
+                    cutoff REAL NOT NULL,
+                    model_json TEXT NOT NULL,
+                    UNIQUE(profile_id,version,cutoff)
+                );
+                CREATE TABLE IF NOT EXISTS stock_price_forecasts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    model_id INTEGER NOT NULL REFERENCES stock_prediction_models(id),
+                    symbol TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    forecast_at REAL NOT NULL,
+                    quote_at REAL NOT NULL,
+                    quote_price REAL NOT NULL,
+                    bucket INTEGER NOT NULL,
+                    cost_basis REAL,
+                    action TEXT NOT NULL,
+                    expected_buy_return REAL NOT NULL,
+                    buy_support REAL NOT NULL,
+                    expected_hold_return REAL,
+                    fall_support REAL,
+                    features_json TEXT NOT NULL,
+                    due_at REAL NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('pending_entry','pending_exit','evaluated','missing')),
+                    entry_at REAL,
+                    entry_price REAL,
+                    exit_at REAL,
+                    exit_price REAL,
+                    actual_buy_return REAL,
+                    actual_hold_return REAL,
+                    evaluated_at REAL,
+                    UNIQUE(profile_id,symbol,model_id,bucket),
+                    UNIQUE(profile_id,symbol,model_id,quote_at)
+                );
+                CREATE INDEX IF NOT EXISTS idx_stock_forecast_due ON stock_price_forecasts(profile_id,status,due_at);
+                CREATE INDEX IF NOT EXISTS idx_stock_forecast_recent ON stock_price_forecasts(profile_id,forecast_at DESC,id DESC);
+
                 CREATE TABLE IF NOT EXISTS stock_player_replies (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     profile_id INTEGER NOT NULL,

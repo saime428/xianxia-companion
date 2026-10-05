@@ -10,6 +10,52 @@
     <p class="muted top-gap">关闭后停止后续定时分析，已开始的分析会完成；「立刻分析并发我」可单独使用。</p>
 </section>
 
+<section class="detail-card">
+    <div class="section-header compact"><p>建议之后发生了什么</p><h2>建议复核</h2></div>
+    {% set review = stock_state.advice_review or {} %}
+    {% if review.lines %}
+    {% for line in review.lines %}<p class="muted">{{ line }}</p>{% endfor %}
+    <p class="muted">更新：{{ stock_state.advice_review_time_display }}。到期后1小时内取首个报价；等待24小时仍缺失则记缺价。回撤仅根据采样价格计算。</p>
+    {% if review.recent %}
+    <div style="overflow-x: auto;">
+        <table>
+            <thead><tr><th>建议时间（北京）</th><th>股票 / 建议</th><th>核对周期</th><th>后续涨跌</th><th>采样最大回撤</th></tr></thead>
+            <tbody>
+            {% for row in review.recent %}
+            <tr>
+                <td>{{ row.time_display }}</td>
+                <td><details><summary>{{ row.name }} / {{ row.action_label }}</summary>{{ row.reason }}</details></td>
+                <td>{{ row.horizon_hours }}小时</td>
+                <td>{{ '%+.1f%%'|format(row.return_pct) if row.status == 'evaluated' else '缺价' }}</td>
+                <td>{% if row.status == 'evaluated' %}{{ '%.1f%%'|format(row.max_drawdown_pct) }}<br><small class="muted">采样最大间隔 {{ '%.1f'|format(row.max_gap_seconds / 3600) }}小时</small>{% else %}—{% endif %}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+    {% else %}<p class="muted">等待下一轮有效行情生成建议记录；24小时后开始核对。买卖由你手动执行。</p>{% endif %}
+</section>
+
+<section class="detail-card">
+    <div class="section-header compact"><p>候选策略验证</p><h2>未来三天收益观察</h2></div>
+    {% set forecast = stock_state.forecast_review or {} %}
+    {% if forecast.lines %}
+    {% for line in forecast.lines %}<p class="muted">{{ line }}</p>{% endfor %}
+    <p class="muted">更新：{{ stock_state.forecast_review_time_display }}。{% if forecast.forecast_count is not none %}近30天 {{ forecast.forecast_count }} 条观察，已核对 {{ forecast.evaluated_count }}，缺价 {{ forecast.missing_count }}。原始记录全部保留。{% endif %}</p>
+    {% for group_title, group_rows in [('最近观察', forecast.recent), ('最近核验', forecast.completed or [])] %}
+    {% if group_rows %}<p>{{ group_title }}</p><div style="overflow-x: auto;"><table>
+        <thead><tr><th>股票 / 观察倾向</th><th>预估税后变化</th><th>之后的模拟结果</th></tr></thead>
+        <tbody>{% for row in group_rows %}
+        {% set held = row.expected_hold_return is not none %}
+        <tr><td>{{ row.name }} / {{ row.action_label }}<br><small class="muted">{{ row.time_display }}（北京） · {{ '继续持有相对延迟执行时卖出' if held else '新买入后持有三天' }}</small><br><small class="muted">参考价 {{ '%.2f'|format(row.quote_price) }} / 核验执行价 {{ '%.2f'|format(row.entry_price) if row.entry_price is not none else '待取得' }}</small></td>
+            <td>{{ '%+.1f%%'|format((row.expected_hold_return if held else row.expected_buy_return)*100) }}</td>
+            <td>{% if row.status == 'evaluated' %}{{ '%+.1f%%'|format((row.actual_hold_return if held else row.actual_buy_return)*100) }}{% elif row.status == 'missing' %}缺少目标附近报价{% else %}等待报价核对{% endif %}</td></tr>
+        {% endfor %}</tbody>
+    </table></div>{% endif %}{% endfor %}
+    {% else %}<p class="muted">等待下一轮定时行情建立观察。尚无已验证的新买卖模型。</p>{% endif %}
+</section>
+
 <section class="detail-grid three-column-grid">
     <div class="detail-card other-overview-card">
         <p>追踪股票</p>

@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app/src'))
 from tg_game.config import get_settings
 from tg_game.game_clock import GAME_TZ
 from tg_game.services import daily_task_report as report
+from tg_game.services import world_boss_report as boss_report
 from tg_game.storage import Storage
 from tg_game.web import daily_report_settings as settings_ui
 
@@ -91,6 +92,30 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(asyncio.run(report.send_due_report(client,self.storage,self.admin.id,now=now)))
         with self.storage.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM app_runtime_state WHERE key GLOB 'daily_task_report:*'").fetchone()[0],0)
+
+    def test_pending_battle_report_blocks_account_change_until_sent(self):
+        self.save()
+        key = boss_report.STATE_PREFIX + '10:100'
+        for status in ('prepared', 'sending', 'retry_pending'):
+            with self.subTest(status=status):
+                record = {
+                    'status': status, 'profile_id': self.admin.id,
+                    'text': 'frozen battle report', 'random_id': 123,
+                }
+                self.storage.set_runtime_state(key, json.dumps(record))
+                before = self.storage.get_runtime_state(report.CONFIG_KEY)
+                with self.assertRaisesRegex(ValueError, '待确认'):
+                    self.save(sender_profile_id=self.other.id)
+                self.assertEqual(self.storage.get_runtime_state(report.CONFIG_KEY), before)
+                self.save(enabled=False)
+                self.assertFalse(json.loads(self.storage.get_runtime_state(report.CONFIG_KEY))['enabled'])
+                self.assertEqual(json.loads(self.storage.get_runtime_state(key)), record)
+                self.save()
+        record['status'] = 'sent'
+        self.storage.set_runtime_state(key, json.dumps(record))
+        self.save(sender_profile_id=self.other.id)
+        self.assertEqual(json.loads(self.storage.get_runtime_state(report.CONFIG_KEY))['sender_profile_id'], self.other.id)
+        self.assertEqual(json.loads(self.storage.get_runtime_state(key)), record)
 
 
 if __name__=='__main__':unittest.main()

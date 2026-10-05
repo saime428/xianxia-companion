@@ -24,7 +24,8 @@ def portfolio_card_from_snapshot(raw: object, *, format_timestamp) -> dict:
         (
             f"{pos.get('name') or pos.get('symbol')} {float(pos.get('currentPrice') or 0):.2f} "
             f"{int(pos.get('quantity') or 0)}股 成本{float(pos.get('avgCost') or 0):.2f} "
-            f"{float(pos.get('profitPct') or 0):+.1f}% 第{int(pos.get('held_days') or 0)}天"
+            + (f"{float(pos['profitPct']):+.1f}%" if pos.get('profitPct') is not None else "盈亏未提供")
+            + f" 第{int(pos.get('held_days') or 0)}天"
         )
         for pos in positions
     ] or ["当前无持仓"]
@@ -85,13 +86,13 @@ def build_stock_view(
                 observed_at = float(msg.get("created_at") or 0)
                 msg_id = int(msg.get("message_id") or 0)
                 chat_id = int(msg.get("chat_id") or 0)
-                profile_id = int(msg.get("profile_id") or 0)
+                message_profile_id = int(msg.get("profile_id") or 0)
                 batch_stocks = parse_stock_market_batch(raw_text, observed_at)
                 if batch_stocks:
                     for stock in batch_stocks:
                         try:
                             storage.upsert_stock_market_history(
-                                profile_id or None,
+                                message_profile_id or None,
                                 chat_id,
                                 msg_id,
                                 stock["stock_code"],
@@ -159,6 +160,17 @@ def build_stock_view(
     getter = getattr(storage, "get_runtime_state", None)
     if callable(getter):
         raw_snapshot = getter(_SNAPSHOT_RESULT_KEY.format(profile_id=int(profile_id))) or ""
+    try:
+        snapshot = json.loads(raw_snapshot) if raw_snapshot else {}
+        advice_review = snapshot.get("advice_review", {}) if isinstance(snapshot, dict) else {}
+        forecast_review = snapshot.get("forecast_review", {}) if isinstance(snapshot, dict) else {}
+    except (TypeError, ValueError):
+        advice_review = {}
+        forecast_review = {}
+    if not isinstance(advice_review, dict):
+        advice_review = {}
+    if not isinstance(forecast_review, dict):
+        forecast_review = {}
     latest_account = portfolio_card_from_snapshot(
         raw_snapshot, format_timestamp=formatter
     )
@@ -186,6 +198,10 @@ def build_stock_view(
         "latest_account_time_display": latest_account["created_at_display"],
         "latest_task_text": latest_task["text"],
         "latest_task_time_display": latest_task["created_at_display"],
+        "advice_review": advice_review,
+        "advice_review_time_display": formatter(advice_review.get("as_of", 0)),
+        "forecast_review": forecast_review,
+        "forecast_review_time_display": formatter(forecast_review.get("as_of", 0)),
         "tracked_stocks": [
             {
                 "stock_code": str(row.get("stock_code") or ""),

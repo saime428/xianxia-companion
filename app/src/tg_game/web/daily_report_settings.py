@@ -6,6 +6,7 @@ import time
 
 from tg_game.game_clock import GAME_TZ
 from tg_game.services.daily_task_report import CONFIG_KEY, STATE_PREFIX
+from tg_game.services.world_boss_report import STATE_PREFIX as WORLD_BOSS_STATE_PREFIX
 
 
 def _read(raw):
@@ -25,9 +26,12 @@ def save_settings(storage, *, enabled, run_time, sender_profile_id):
         if enabled and not profile:
             raise ValueError("请选择已登录 Telegram 的接收账号。")
         if int(old.get("sender_profile_id") or 0) != sender_profile_id:
-            pending = db.execute("SELECT value FROM app_runtime_state WHERE key GLOB ?", (STATE_PREFIX + "*",)).fetchall()
+            pending = db.execute(
+                "SELECT value FROM app_runtime_state WHERE key GLOB ? OR key GLOB ?",
+                (STATE_PREFIX + "*", WORLD_BOSS_STATE_PREFIX + "*"),
+            ).fetchall()
             if any(_read(row[0]).get("status") != "sent" for row in pending):
-                raise ValueError("尚有日报待确认，暂不能更换接收账号；可先关闭通知。")
+                raise ValueError("尚有日报或战后通知待确认，暂不能更换接收账号；可先关闭通知。")
         config = {**old, "enabled": bool(enabled), "time": run_time, "sender_profile_id": sender_profile_id}
         if enabled and not old.get("enabled"):
             config["start_day"] = datetime.fromtimestamp(now, GAME_TZ).date().isoformat()

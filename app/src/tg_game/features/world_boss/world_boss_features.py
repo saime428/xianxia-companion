@@ -518,6 +518,8 @@ class WorldBossMonitor:
         self._drift_samples = 0
         self._drift_history: list[float] = []
         self._drift_weight_history: list[tuple[float, float]] = []
+        self._drift_consistent_samples: list[float] = []
+        self._drift_last_window_index = 0
         self._drift_direction_counts: dict[str, int] = {
             "early": 0,
             "late": 0,
@@ -866,7 +868,7 @@ class WorldBossMonitor:
                 "fingerprint": entry.fingerprint,
             }
             history.append(record)
-        record.update({"status": status, "updated_at": _now_text(), **updates})
+        record.update({"chat_id": entry.chat_id, "status": status, "updated_at": _now_text(), **updates})
         del history[:-WORLD_BOSS_HISTORY_LIMIT]
         state = getattr(self.actor, "state", None)
         if isinstance(state, dict):
@@ -1857,6 +1859,8 @@ class WorldBossMonitor:
         self._drift_samples = 0
         self._drift_history = []
         self._drift_weight_history = []
+        self._drift_consistent_samples = []
+        self._drift_last_window_index = 0
         self._drift_direction_counts = {
             "early": 0,
             "late": 0,
@@ -2249,6 +2253,7 @@ class WorldBossMonitor:
         account_offset_ms: Any = 0,
         request_interval_ms: Any = None,
         tolerance_ms: Any = None,
+        window_index: int = 0,
     ) -> dict[str, Any] | None:
         """Record a contextual signed drift sample and return its diagnostics.
 
@@ -2280,7 +2285,17 @@ class WorldBossMonitor:
             request_interval_ms=request_interval_ms,
             tolerance_ms=tolerance_ms,
         )
+        if window_index > 0:
+            if window_index <= self._drift_last_window_index:
+                # A later window has already supplied fresher route evidence.
+                if inference is not None:
+                    inference.update(update_applied=False, update_mode="out_of_order")
+                return inference
+            if window_index != self._drift_last_window_index + 1:
+                self._drift_consistent_samples.clear()
+            self._drift_last_window_index = window_index
         if inference is None:
+            self._drift_consistent_samples.clear()
             return None
 
         direction = str(inference.get("direction") or "none")
@@ -2301,6 +2316,7 @@ class WorldBossMonitor:
         # case; production HTTP requests never complete at the send instant.
         request_rtt = self._finite_ms(inference.get("request_rtt_ms"))
         if request_rtt is not None and request_rtt <= 0:
+            self._drift_consistent_samples.clear()
             self._record_drift_legacy(server_delta_ms)
             inference["drift_after_ms"] = self._rounded_ms(self._drift_ms)
             inference["update_applied"] = self._drift_samples > 0
@@ -2318,6 +2334,7 @@ class WorldBossMonitor:
             or sample_weight is None
             or sample_weight <= 0.05
         ):
+            self._drift_consistent_samples.clear()
             return inference
 
         history = getattr(self, "_drift_history", None)
@@ -2338,6 +2355,28 @@ class WorldBossMonitor:
         robust = float(robust_value)
         base_weight = max(0.05, min(0.6, float(WORLD_BOSS_DRIFT_WEIGHT)))
         gain = max(0.05, min(0.5, base_weight * sample_weight))
+        # Three consistent, unambiguous arrivals can identify a sustained
+        # change even when long response RTTs give each sample little weight.
+        # A single spike still follows the original robust, slow estimator.
+        recent = self._drift_consistent_samples
+        raw_sample = self._finite_ms(inference.get("sample_drift_ms"))
+        if raw_sample is not None and inference.get("reason") in {
+            "only_early_candidate_in_interval",
+            "only_late_candidate_in_interval",
+        }:
+            recent.append(raw_sample)
+            del recent[:-3]
+        else:
+            recent.clear()
+        update_mode = "median_ewma"
+        if len(recent) == 3 and max(recent) - min(recent) <= 80:
+            sustained = max(
+                float(WORLD_BOSS_DRIFT_MIN_MS),
+                min(float(WORLD_BOSS_DRIFT_MAX_MS), float(statistics.median(recent))),
+            )
+            if abs(sustained - before) >= 80:
+                robust, gain = sustained, 0.6
+                update_mode = "sustained_latency"
         # Smooth the absolute network residual; ambiguous arrivals add no sample.
         self._drift_ms = before + gain * (robust - before)
         self._drift_ms = max(
@@ -2348,7 +2387,7 @@ class WorldBossMonitor:
         inference.update(
             {
                 "update_applied": True,
-                "update_mode": "median_ewma",
+                "update_mode": update_mode,
                 "gain": round(float(gain), 3),
                 "robust_sample_ms": self._rounded_ms(robust),
                 "history_size": len(history),
@@ -2765,6 +2804,7 @@ class WorldBossMonitor:
                 request_completed_elapsed_ms=request_completed_elapsed_ms,
                 request_lead_ms=request_lead_ms,
                 account_offset_ms=offset_ms + plan.offset_ms,
+                window_index=window_index,
             )
             server_delta_ms = self._finite_ms(hit.get("deltaMs"))
             late_delta_ms = (
