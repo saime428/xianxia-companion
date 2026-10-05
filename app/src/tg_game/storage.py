@@ -9,6 +9,7 @@ from typing import Callable, Iterable, Optional
 from tg_game.config import ALLOWED_GAME_BOT_IDS
 from tg_game.models import ChatBinding, FeatureModule, ModuleSetting, PlayerProfile
 from tg_game.sect_command_guard import validate_sect_command_scope
+from tg_game.features.companion.biz_companion_roster import list_companions
 
 
 BOUND_MESSAGE_RETENTION_SECONDS = 48 * 3600
@@ -3002,15 +3003,7 @@ class Storage:
             payload = {}
         if not isinstance(payload, dict):
             return False
-        companion = payload.get("companion")
-        if isinstance(companion, dict) and companion:
-            return True
-        dongfu = payload.get("dongfu")
-        if isinstance(dongfu, dict):
-            residence = dongfu.get("companion_residence")
-            if isinstance(residence, dict) and residence:
-                return True
-        return False
+        return bool(list_companions(payload))
 
     def mark_external_account_error(
         self, profile_id: int, provider: str, error: str, *, status: str = "error"

@@ -65,6 +65,7 @@ from tg_game.features.companion.biz_companion_roster import (
     plan_companion_rotation,
     voyage_end_ts,
 )
+from tg_game.features.companion import biz_companion_replenish as companion_replenish
 from tg_game.features.companion.biz_companion_voyage import (
     COMPANION_VOYAGE_MIN_AFFECTION,
     COMPANION_VOYAGE_STRATEGY_OPTIONS,
@@ -299,6 +300,7 @@ COMPANION_PANEL_COOLDOWN_LABELS = {
     "heart_tribulation": "共历心劫",
 }
 COMPANION_AUTO_RESUME_HIGH_RISK_FEATURES = {
+    companion_replenish.FEATURE_KEY,
     ARTIFACT_TOUCH_FEATURE_KEY,
     ARTIFACT_TRIAL_FEATURE_KEY,
     ARTIFACT_NURTURE_FEATURE_KEY,
@@ -411,6 +413,7 @@ COMPANION_AUTO_FEATURES = {
     COMPANION_VOYAGE_FEATURE_KEY: {
         "command": ".侍妾远航",
     },
+    companion_replenish.FEATURE_KEY: {"command": companion_replenish.SEARCH},
     biz_small_world_game.SMALL_WORLD_AUTO_FEATURE_KEY: {
         "command": biz_small_world_game.SMALL_WORLD_PANEL_COMMAND,
     },
@@ -430,6 +433,8 @@ def get_companion_auto_task_command_prefixes(task: dict) -> tuple[str, ...]:
     base_command = str(feature.get("command") or "").strip()
     if base_command:
         commands.append(base_command)
+    if feature_key == companion_replenish.FEATURE_KEY:
+        commands.extend([companion_replenish.PLACE, COMPANION_PANEL_COMMAND])
 
     if feature_key == biz_tianji_trial_daily_auto.FEATURE_KEY:
         commands.extend(
@@ -3954,6 +3959,8 @@ def _defer_companion_heart_tribulation_if_voyaging(
     )
     voyage_status = str(state.get("status") or "")
     voyage_target = float(state.get("target_ts") or 0)
+    if voyage_status == "returned_waiting":
+        voyage_target = now + COMPANION_VOYAGE_RECHECK_SECONDS
     if voyage_target <= now and voyage_status == "voyaging":
         voyage_target = _resolve_active_companion_voyage_target(
             storage,
@@ -4545,6 +4552,9 @@ async def _run_companion_heart_tribulation_scheduler(
                 if drain_requested(storage):
                     continue
 
+                if companion_replenish.is_changing_roster(storage, int(profile_id)):
+                    continue
+
                 if next_run_at > now:
                     if earliest_idle_next_run_at is None or next_run_at < earliest_idle_next_run_at:
                         earliest_idle_next_run_at = next_run_at
@@ -4614,7 +4624,7 @@ async def _run_companion_heart_tribulation_scheduler(
                     )
                     continue
 
-                if drain_requested(storage, fresh=True):
+                if drain_requested(storage, fresh=True) or companion_replenish.is_changing_roster(storage, int(profile_id)):
                     continue
                 run_id = secrets.token_hex(8)
                 updated_task = storage.update_companion_heart_tribulation_task(
@@ -6099,6 +6109,8 @@ async def _run_companion_auto_scheduler(
                 feature = COMPANION_AUTO_FEATURES.get(feature_key)
                 if not feature or not task_id:
                     continue
+                if feature_key in {COMPANION_VOYAGE_FEATURE_KEY, *COMPANION_VOYAGE_PREFLIGHT_SIMPLE_FEATURES} and companion_replenish.is_changing_roster(storage, int(profile_id)):
+                    continue
                 task_next_run_at = float(task.get("next_run_at") or 0)
                 if resume_active and task_next_run_at <= now:
                     if (
@@ -6125,6 +6137,13 @@ async def _run_companion_auto_scheduler(
                         )
                         continue
                     resume_last_task_at = now
+
+                if feature_key == companion_replenish.FEATURE_KEY:
+                    await companion_replenish.tick(storage, task,
+                        refresh_payload=_refresh_companion_payload,
+                        get_panel=_get_latest_companion_panel_message)
+                    payload = read_cached_external_payload(storage, int(profile_id))
+                    continue
 
                 if feature_key == pagoda_auto.FEATURE_KEY:
                     chat_id = int(task.get("chat_id") or 0)
@@ -11154,6 +11173,19 @@ class GeneralGameExecutor(BaseExecutor):
                 now=time.time(),
                 step=workflow_state,
             ):
+                return True
+            # 正确回复命令也可能是拒绝；只有第一轮开局面板才能发送策略。
+            if not current_text.strip().startswith(("【坠魔心劫·第一轮】", "【坠魔心劫·第1轮】")):
+                _abort_companion_heart_tribulation_run(
+                    storage,
+                    task,
+                    last_error=(
+                        "心劫开局未确认，本轮跳过，稍后重新获取面板重试。"
+                        f"回包：{current_text[:200] or '（空回复）'}"
+                    ),
+                    step=workflow_state,
+                    detail={"reply_text": current_text, "message_id": current_message_id},
+                )
                 return True
             if not _claim_companion_heart_tribulation_round(storage, task, 1):
                 return True

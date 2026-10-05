@@ -60,6 +60,96 @@ class RealtimeServer:
 
 
 class ReliabilityChecks(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_hit_followed_by_slow_charge_keeps_recovery_margin(self):
+        # The first late hit must not cut the next hold to ~730 ms. A slow
+        # charge then leaves too little ticket age, even when its hit is on time.
+        for seed in range(20):
+            clock = Clock()
+            server = replay.TimedServer(clock)
+            server.starts_at = 0
+            server.windows = [dict(w, perfectMs=210) for w in server.windows]
+
+            async def post(origin, path, payload, timeout):
+                if path.endswith('/hit') and payload['windowId'] == 'w0':
+                    await clock.sleep(.45)
+                if path.endswith('/charge-start') and payload['windowId'] != 'w0':
+                    await clock.sleep(.60)
+                return await server.post(origin, path, payload, timeout)
+
+            with tempfile.TemporaryDirectory() as directory:
+                monitor, _ = monitor_for(Path(directory), clock)
+                monitor.post_json = post
+                monitor._timing = CombatTiming(rng=random.Random(seed))
+                monitor._start_combat(server.challenge, {'maxHp': 100}, 0, server.windows)
+                try:
+                    for index, target in enumerate(server.windows):
+                        result = await clock.run(monitor._hit_window(
+                            ENTRY, 'offline', 'offline', 'offline', 0, target, index))
+                        if index:
+                            self.assertTrue(result['accepted_perfect'], (seed, index, result['diagnostic']))
+                        self.assertEqual(result['action']['holdMs'],
+                                         result['diagnostic']['sent_elapsed_ms']
+                                         - result['diagnostic']['charge']['requested_elapsed_ms'])
+                finally:
+                    await monitor.stop()
+
+    async def test_repeated_hold_skew_still_reduces_overcharging(self):
+        for seed in range(10):
+            clock = Clock()
+            server = replay.TimedServer(clock)
+            server.starts_at = 0
+            server.windows = [dict(window(i, 2000 + 3500 * i), perfectMs=210) for i in range(8)]
+
+            async def post(origin, path, payload, timeout):
+                if path.endswith('/hit'):
+                    await clock.sleep(.18)
+                return await server.post(origin, path, payload, timeout)
+
+            with tempfile.TemporaryDirectory() as directory:
+                monitor, _ = monitor_for(Path(directory), clock)
+                monitor.post_json = post
+                monitor._timing = CombatTiming(rng=random.Random(seed))
+                monitor._start_combat(server.challenge, {'maxHp': 100}, 0, server.windows)
+                try:
+                    for index, target in enumerate(server.windows):
+                        result = await clock.run(monitor._hit_window(
+                            ENTRY, 'offline', 'offline', 'offline', 0, target, index))
+                        if index >= 1:
+                            self.assertGreaterEqual(result['diagnostic']['server_hold_ms'], 520)
+                            self.assertLessEqual(result['diagnostic']['server_hold_ms'], 1250)
+                finally:
+                    await monitor.stop()
+
+    async def test_repeated_extreme_skew_is_confirmed_and_learned(self):
+        clock = Clock()
+        server = replay.TimedServer(clock)
+        server.starts_at = 0
+        server.windows = [dict(window(i, 2000 + 3500 * i), perfectMs=210) for i in range(8)]
+
+        async def post(origin, path, payload, timeout):
+            if path.endswith('/hit'):
+                await clock.sleep(.40)
+            return await server.post(origin, path, payload, timeout)
+
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, _ = monitor_for(Path(directory), clock)
+            monitor.post_json = post
+            monitor._timing = CombatTiming(rng=random.Random(0))
+            monitor._start_combat(server.challenge, {'maxHp': 100}, 0, server.windows)
+            hits = []
+            try:
+                for index, target in enumerate(server.windows):
+                    result = await clock.run(monitor._hit_window(
+                        ENTRY, 'offline', 'offline', 'offline', 0, target, index))
+                    hits.append(result['diagnostic'])
+                self.assertEqual(hits[0]['hold_feedback'], 'late_hit_spike_pending')
+                self.assertEqual(hits[1]['hold_feedback'], 'repeated_late_hit_skew')
+                self.assertTrue(all(520 <= h['server_hold_ms'] <= 1250 for h in hits[2:]), hits)
+                monitor._reset_hold_skew()
+                self.assertFalse(monitor._pending_hold_spike)
+            finally:
+                await monitor.stop()
+
     async def test_token_replacement_does_not_bypass_retry_after(self):
         clock, calls = Clock(), []
         delay = 3
@@ -322,6 +412,22 @@ class ReliabilityChecks(unittest.IsolatedAsyncioTestCase):
 
 
 class DistributionChecks(unittest.TestCase):
+    def test_variable_extreme_skew_does_not_remain_pending_forever(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, _ = monitor_for(Path(directory), Clock())
+            feedback = []
+            for error in (400, 550) * 5:
+                _, state = monitor._observe_hold_feedback(
+                    1000 + error, 1000, late_delta_ms=400, perfect_ms=210)
+                feedback.append(state)
+            self.assertEqual(feedback[0], 'late_hit_spike_pending')
+            self.assertTrue(all(state == 'repeated_late_hit_skew' for state in feedback[1:]))
+            self.assertGreater(monitor._hold_skew_ms, 300)
+            monitor._observe_hold_feedback(1000, 1000, late_delta_ms=None, perfect_ms=210)
+            self.assertFalse(monitor._pending_hold_spike)
+            _, state = monitor._observe_hold_feedback(1500, 1000, late_delta_ms=400, perfect_ms=210)
+            self.assertEqual(state, 'late_hit_spike_pending')
+
     def test_reentering_same_battle_does_not_clear_concurrent_death(self):
         with tempfile.TemporaryDirectory() as directory:
             monitor, _ = monitor_for(Path(directory), Clock())
@@ -356,7 +462,7 @@ class DistributionChecks(unittest.TestCase):
         self.assertEqual(plans, [second.plan(210, 1180) for _ in range(1000)])
         self.assertTrue(all(abs(p.offset_ms) <= 116 and 560 <= p.hold_ms <= 1150 for p in plans))
         self.assertLess(sum(abs(p.offset_ms) <= 40 for p in plans) / len(plans), .75)
-        self.assertGreater(max(p.hold_ms for p in plans) - min(p.hold_ms for p in plans), 100)
+        self.assertGreater(max(p.hold_ms for p in plans) - min(p.hold_ms for p in plans), 80)
         self.assertTrue(all(.36 <= first.poll_delay() <= .45 for _ in range(100)))
 
     def test_observed_hold_variability_reduces_upper_target(self):

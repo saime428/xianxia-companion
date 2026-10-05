@@ -604,6 +604,7 @@ def build_module_detail_default_state(
             "others": [],
         },
         "companion_auto_state": {
+            "companion_replenish": build_companion_auto_view(None, "companion_replenish"),
             "dream_seek": build_companion_auto_view(None, "dream_seek"),
             "divination_chain": build_companion_auto_view(
                 None, "divination_chain"

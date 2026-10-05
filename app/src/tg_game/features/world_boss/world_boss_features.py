@@ -57,10 +57,9 @@ WORLD_BOSS_IDENTITY = "主魂"
 # -714ms to +493ms across 57 strikes. 2026-09-03: lowering to 750ms caused massive
 # failure with boss_event_closed errors and perfect rate collapse (62.5%/37.5% vs
 # prior 87.5%/62.5%). Rolling back to 1000ms.
-# 2026-10-01: damage scales with that server hold as min(1.35, hold / 900), the
-# page's chargeBonus (559 real strikes: exponent ~0.96 on perfect hits), so 1000ms
-# left up to 18% per strike unused. Replaying 36 battles with their real jitter,
-# 1180ms gains ~11% while ~0.4 strikes per battle overshoot the 1250ms limit.
+# The page's chargeBonus is min(1.35, hold / 900). The server measures
+# hold independently, so the target must leave room for asymmetric
+# request latency and stay within the server's hold limits.
 WORLD_BOSS_HOLD_MS = 1180
 WORLD_BOSS_STANCE = "强攻"
 WORLD_BOSS_ENTRY_WAIT_SECONDS = 110
@@ -529,6 +528,7 @@ class WorldBossMonitor:
         # the charge itself so the server's ticket age remains creditable.
         self._hold_skew_ms = 0.0
         self._hold_skew_samples: list[float] = []
+        self._pending_hold_spike = False
         self._new_handler: Any = None
         self._edit_handler: Any = None
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -1868,6 +1868,7 @@ class WorldBossMonitor:
         """Forget the previous battle's charge/hit latency skew."""
         self._hold_skew_ms = 0.0
         self._hold_skew_samples = []
+        self._pending_hold_spike = False
 
     @staticmethod
     def _numeric_hold(value: Any) -> float | None:
@@ -1928,6 +1929,31 @@ class WorldBossMonitor:
             min(float(WORLD_BOSS_HOLD_SKEW_SAMPLE_MAX_MS), self._hold_skew_ms),
         )
         return sample
+
+    def _observe_hold_feedback(self, server_hold_ms, local_hold_ms, *, late_delta_ms, perfect_ms):
+        """Defer an extreme late-hit error until the next sample corroborates it.
+
+        Moderate errors retain the original immediate adaptation. A repeated
+        large error is learned normally, so a persistently slow route cannot be
+        ignored forever. Raw server hold and local action times stay untouched.
+        """
+        feedback = "observed"
+        if server_hold_ms is not None:
+            error = server_hold_ms - local_hold_ms
+            if late_delta_ms is not None and late_delta_ms > perfect_ms and error > max(300, perfect_ms * 1.5):
+                previous = self._pending_hold_spike
+                self._pending_hold_spike = True
+                if not previous:
+                    # Keep the established estimate while the new extreme error
+                    # is unconfirmed. Do not store it in the 12-hit tail history.
+                    return None, "late_hit_spike_pending"
+                feedback = "repeated_late_hit_skew"
+            else:
+                self._pending_hold_spike = False
+        else:
+            self._pending_hold_spike = False
+        self._timing.observe_hold(server_hold_ms, local_hold_ms)
+        return self._record_hold_skew(server_hold_ms, local_hold_ms), feedback
 
     def _planned_hold_ms(self) -> int:
         """Choose the next local hold while retaining legal server headroom."""
@@ -2725,8 +2751,6 @@ class WorldBossMonitor:
                 self._mark_boss_defeated("boss_defeated", boss_hp)
             accepted_perfect = hit.get("perfect") is True
             server_hold_ms = self._server_hold_ms(hit)
-            self._timing.observe_hold(server_hold_ms, hold_ms)
-            hold_skew_sample_ms = self._record_hold_skew(server_hold_ms, hold_ms)
             request_completed_elapsed_ms = max(
                 0,
                 int((self.monotonic() - battle_start) * 1000),
@@ -2742,6 +2766,14 @@ class WorldBossMonitor:
                 request_lead_ms=request_lead_ms,
                 account_offset_ms=offset_ms + plan.offset_ms,
             )
+            server_delta_ms = self._finite_ms(hit.get("deltaMs"))
+            late_delta_ms = (
+                server_delta_ms if arrival_inference is not None
+                and arrival_inference.get("direction") == "late" else None
+            )
+            hold_skew_sample_ms, hold_feedback = self._observe_hold_feedback(
+                server_hold_ms, hold_ms, late_delta_ms=late_delta_ms, perfect_ms=window["perfectMs"],
+            )
             diagnostic.update(
                 {
                     "request_completed_elapsed_ms": request_completed_elapsed_ms,
@@ -2750,6 +2782,7 @@ class WorldBossMonitor:
                     "http_status": 200,
                     "accepted_perfect": accepted_perfect,
                     "server_hit": _diagnostic_value(hit),
+                    "hold_feedback": hold_feedback,
                 }
             )
             if server_hold_ms is not None:

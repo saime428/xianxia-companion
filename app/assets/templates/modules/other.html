@@ -674,6 +674,9 @@
 
         <section class="companion-daily-section companion-daily-actions">
         <form class="top-gap" method="post" action="/runtime/commands/send-raw" id="companion-command-form">
+            {% if companion_auto_state.companion_replenish.active %}
+            <p class="muted">缺员自动寻缘 · {{ companion_auto_state.companion_replenish.last_error or '每 5 分钟检查，不足两位时逐位补寻。' }}</p>
+            {% endif %}
             <input type="hidden" name="chat_id" value="{{ bound_chat_id or '' }}">
             <input type="hidden" name="thread_id" value="{{ bound_thread_id or '' }}">
             <input type="hidden" name="chat_type" value="{{ bound_chat_type or 'group' }}">
@@ -688,6 +691,7 @@
                 <button type="button" class="inline-button" onclick="submitCompanionCommand('.召回侍妾')" {% if not command_chat_ready %}disabled{% endif %}>召回侍妾</button>
             </div>
             <div class="action-row top-gap companion-command-row">
+                <button type="button" class="inline-button auto-toggle-button{% if companion_auto_state.companion_replenish.active %} active{% endif %}" onclick="document.getElementById('companion-auto-feature').value='companion_replenish'; document.getElementById('companion-auto-form').submit();" {% if not command_chat_ready %}disabled{% endif %}>{{ '自动中·缺员寻缘' if companion_auto_state.companion_replenish.active else '缺员自动寻缘' }}</button>
                 <button type="button" class="inline-button auto-toggle-button{% if companion_auto_state.dream_seek.active %} active{% endif %}" onclick="document.getElementById('companion-auto-feature').value='dream_seek'; document.getElementById('companion-auto-form').submit();" {% if not command_chat_ready %}disabled{% endif %}>{{ '自动中·入梦' if companion_auto_state.dream_seek.active else '自动入梦' }}</button>
                 <button type="button" class="inline-button auto-toggle-button{% if companion_auto_state.divination_chain.active %} active{% endif %}" onclick="document.getElementById('companion-auto-feature').value='divination_chain'; document.getElementById('companion-auto-form').submit();" {% if not command_chat_ready %}disabled{% endif %}>{{ '自动中·代卜' if companion_auto_state.divination_chain.active else '自动代卜' }}</button>
                 <label class="companion-vow-picker">

@@ -159,6 +159,10 @@ async def main():
                             task["id"], last_action_round_sent=0,
                             workflow_state=ex.COMPANION_HEART_TRIBULATION_AWAIT_TRIBULATION_STATE,
                         )
+                        context.text = (
+                            "【坠魔心劫·第一轮】\n你与侍妾【莎儿】步入幻境，前方魔念化形拦路。\n"
+                            "请回复本消息 .稳 / .狠 / .骗 进行抉择（共3轮）。"
+                        )
                         with patch.object(ex.asyncio, "sleep", noop), patch.object(
                             send_utils, "_throttle_outgoing_send", noop
                         ):
@@ -166,6 +170,7 @@ async def main():
                         assert fresh(storage, task)["last_action_round_sent"] == 1
                         assert len(sent) == 1
                         sent.clear()
+                        context.text = text
                     advancing = asyncio.create_task(
                         ex.GeneralGameExecutor._maybe_advance_companion_heart_tribulation(None, context, storage)
                         if source == "event" else ex._poll_companion_heart_tribulation_message(client, storage, task)

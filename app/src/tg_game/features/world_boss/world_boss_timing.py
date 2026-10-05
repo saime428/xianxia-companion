@@ -47,7 +47,9 @@ class CombatTiming:
         reserve = min(400, max(100, math.ceil(tail + 25)))
         upper = max(620, min(1210, math.floor(1250 - reserve - hold_skew_ms)))
         mean = max(580, min(float(base_hold_ms), upper - 25))
-        low = max(560, mean - 140)
+        # Keep ticket-age margin for a slow charge while the observed upper
+        # bound permits it. Sustained positive skew can still lower both bounds.
+        low = max(560, mean - 140, min(1050, upper - 100, mean))
         hold = truncated_gauss(self.rng, mean, 35, low, upper)
         return WindowPlan(round(offset), round(hold), reserve)
 

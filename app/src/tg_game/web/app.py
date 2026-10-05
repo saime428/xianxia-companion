@@ -5279,6 +5279,10 @@ def create_app() -> FastAPI:
             storage.disable_companion_auto_task(
                 profile.id, resolved_chat_id, normalized_feature_key
             )
+            if normalized_feature_key == "companion_replenish":
+                from tg_game.features.companion.biz_companion_replenish import cancel_queued_change
+                cancel_queued_change(storage, existing_task)
+                return RedirectResponse(url=redirect_to, status_code=303)
             if normalized_feature_key == "companion_voyage":
                 existing_strategy = _normalize_companion_voyage_strategy(
                     existing_task.get("strategy")
@@ -5305,6 +5309,13 @@ def create_app() -> FastAPI:
                     resolved_chat_id,
                     text=str(feature.get("command") or ""),
                 )
+            return RedirectResponse(url=redirect_to, status_code=303)
+
+        if normalized_feature_key == "companion_replenish":
+            task = storage.upsert_companion_auto_task(profile_id=profile.id, chat_id=resolved_chat_id,
+                feature_key=normalized_feature_key, enabled=True, thread_id=resolved_thread_id,
+                chat_type=chat_type, bot_username=bot_username, next_run_at=0, last_error="")
+            storage.update_companion_auto_task(task["id"], workflow_state="", last_progress_fingerprint="")
             return RedirectResponse(url=redirect_to, status_code=303)
 
         if normalized_feature_key == "companion_voyage":

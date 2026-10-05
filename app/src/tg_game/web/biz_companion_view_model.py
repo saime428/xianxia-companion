@@ -39,6 +39,7 @@ from tg_game.web.biz_web_display_formatting import (
 
 
 COMPANION_AUTO_FEATURES = {
+    "companion_replenish": {"label": "缺员自动寻缘", "command": ".红尘寻缘"},
     pagoda_auto.FEATURE_KEY: {
         "label": "自动闯塔",
         "command": pagoda_auto.COMMAND,
