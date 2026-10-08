@@ -87,11 +87,12 @@ def _boss_reward(notices, username, event):
 # without it; the three boss drops once each, 2/59 hold each. The game's own 至宝/珍稀掉落 labels
 # are not used: 空间之核/九天神雷木/太虚仙露 come from 4-5% of rifts and ~20/59 hold them, and boss
 # 珍稀掉落 lists 四级妖丹. 九转凝魂丹丹方 (~0.9%) left out on request. game_items.rarity is all 0.
-# Re-survey when drops change.
-RARE_ITEMS = ("庚金", "衍神玉简", "大衍诀残篇·衍神", "大衍灵傀图谱")
+# Re-survey when drops change. 昆吾通行令 added on request (命运卡 gives it, usually +0).
+RARE_ITEMS = ("庚金", "衍神玉简", "大衍诀残篇·衍神", "大衍灵傀图谱", "昆吾通行令")
 _NAMES = "|".join(map(re.escape, RARE_ITEMS))
-# 【X】 in rift/问心塔/青元子 text, or "X ×n" in 野外 loot; not 庚金砂 or 青竹蜂云剑（…庚金相）.
-_RARE = re.compile(f"【({_NAMES})】|(?<![\\w·（])({_NAMES})(?= ×)")
+# 【X】 in rift/问心塔/青元子 text, "X ×n" in 野外 loot, "X +n" (n>0) in 命运卡;
+# not 庚金砂, 青竹蜂云剑（…庚金相） or the daily "昆吾通行令 +0".
+_RARE = re.compile(f"【({_NAMES})】|(?<![\\w·（])({_NAMES})(?= ×| \\+[1-9])")
 
 
 def _rare_items(line):

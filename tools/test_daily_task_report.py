@@ -91,15 +91,18 @@ class DailyReportTests(unittest.TestCase):
                    "wild_experience_miniapp": {"run": {"status": "completed", "updated_at": stamp,
                    "attempts": [{"cultivation_delta": 1, "loot": [{"name": "庚金", "quantity": 1}]}]}}}
         self.storage.update_external_account_payload(self.pid, ASC_EXTERNAL_PROVIDER, lambda _: payload)
+        self.storage.set_runtime_state(f"fate_cards:{self.pid}", json.dumps(
+            {"status": "settled", "updated_at": stamp, "last": {"reward": {"tianjiTrace": 4, "kunwuPass": 1}}}))
         with self.storage.connect() as db:
             for message, value in ((1, "【激战得胜】你从其残骸中，获得了【四级妖丹】x5，以及一件至宝：【庚金】！"),
                                    (2, "【探寻成功】你的元婴满载而归，为你带来了：【法则碎片·土】, 一份意外之喜 【九天神雷木】！")):
                 db.execute("INSERT INTO rift_execution_logs(profile_id,chat_id,event_type,message_id,text,created_at) VALUES(?,1,'success',?,?,?)", (self.pid, message, value, stamp))
         lines = report.build_report(self.storage, self.start, self.end).splitlines()
-        self.assertEqual(lines[2], "🎁 稀有掉落：测试号 【大衍灵傀图谱】、【庚金】")
-        for start in ("问心塔", "野外", "探缝 "):
+        self.assertEqual(lines[2], "🎁 稀有掉落：测试号 【大衍灵傀图谱】、【庚金】、【昆吾通行令】")
+        for start in ("问心塔", "野外", "命运卡", "探缝 "):
             self.assertTrue(any(l.startswith("🎁 " + start) for l in lines), start)
         self.assertTrue(next(l for l in lines if "九天神雷木" in l).startswith("探缝"))  # game says 意外之喜, data says common
+        self.assertEqual(report._rare_items("命运卡已结算；奖励：天机残痕 +4、昆吾通行令 +0"), [])  # the usual daily line
 
     def test_world_boss_reward_comes_from_result_notice(self):
         start = self.end.timestamp() - 3600
