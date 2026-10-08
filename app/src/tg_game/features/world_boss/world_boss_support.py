@@ -8,6 +8,8 @@ import logging
 import math
 import re
 import socket
+import struct
+import sys
 import threading
 import time
 import urllib.error
@@ -124,7 +126,45 @@ WORLD_BOSS_HTTP_OBSERVATION_KEYS = frozenset({
     "request_resumed_monotonic_ms", "request_clock_step_ms",
     "http_response_headers_monotonic_ms", "http_server_date_unix_ms",
     "http_cf_ray", "http_server_timing_cf_edge_ms", "http_server_timing_cf_origin_ms",
+    "http_tcp_sample_monotonic_ms", "http_tcp_rtt_ms", "http_tcp_rttvar_ms",
+    "http_tcp_last_data_recv_age_ms",
+    "http_tcp_total_retrans",
 })
+
+
+def _response_tcp_observations(response, timing):
+    """Sample Linux TCP_INFO while this response still owns its connection.
+
+    RTT is the kernel's smoothed connection estimate, not HTTP latency.
+    Retransmissions are cumulative since connection creation, not per request;
+    zero excludes observed outbound retransmissions, not lost inbound traffic.
+    """
+    if timing is None or sys.platform != "linux" or not hasattr(socket, "TCP_INFO"):
+        return
+    try:
+        stream = response.extensions.get("network_stream")
+        sock = stream.get_extra_info("socket")
+        raw = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, 104)
+        if len(raw) < 104:
+            return
+        # Stable Linux struct tcp_info prefix: native-endian u32 at byte
+        # offsets 68 (rtt), 72 (rttvar), 100 (total_retrans). RTT units are us.
+        rtt, variance = struct.unpack_from("=II", raw, 68)
+        retrans = struct.unpack_from("=I", raw, 100)[0]
+        # Linux tcpi_last_data_recv (offset 52) is milliseconds since the
+        # connection last received data, not this HTTP response's arrival time.
+        # Later packets can reset it, so a small value cannot exclude a pause.
+        recv_age = struct.unpack_from("=I", raw, 52)[0]
+        timing.update({
+            "http_tcp_sample_monotonic_ms": round(time.monotonic() * 1000, 3),
+            "http_tcp_rtt_ms": rtt / 1000,
+            "http_tcp_rttvar_ms": variance / 1000,
+            "http_tcp_total_retrans": retrans,
+            "http_tcp_last_data_recv_age_ms": recv_age,
+        })
+    except Exception:
+        # Missing/closed sockets or unsupported transports must not affect combat.
+        return
 
 
 def _response_observations(headers, timing):
@@ -169,18 +209,16 @@ def _world_boss_http_client():
     with _HTTP_CLIENT_LOCK:
         client = _HTTP_CLIENT
         if client is None or client.is_closed:
+            from .world_boss_dns import boss_http_transport
+            limits = httpx.Limits(
+                max_keepalive_connections=12, max_connections=24,
+                keepalive_expiry=300.0,
+            )
             client = httpx.Client(
                 headers=_HTTP_HEADERS,
                 follow_redirects=False,
                 trust_env=False,
-                limits=httpx.Limits(
-                    max_keepalive_connections=12,
-                    max_connections=24,
-                    # The pool always reuses its oldest idle connection, so the
-                    # warmed spares sit idle between request peaks; keep them
-                    # for the whole battle (Cloudflare holds idle ones longer).
-                    keepalive_expiry=300.0,
-                ),
+                transport=boss_http_transport(limits),
             )
             _HTTP_CLIENT = client
         return client
@@ -313,18 +351,21 @@ def _json_post_with_client(client, origin, path, payload, timeout, *, timing=Non
                 timing["http_response_headers_monotonic_ms"] = round(now * 1000, 3)
     request_timeout = max(0.2, min(60.0, float(timeout)))
     try:
-        response = client.post(
+        with client.stream(
+            "POST",
             origin + path,
             content=body,
             headers=_HTTP_HEADERS,
             timeout=httpx.Timeout(request_timeout, connect=min(request_timeout, 3.0)),
             extensions={"trace": record_phase} if timing is not None else {},
-        )
+        ) as response:
+            _response_tcp_observations(response, timing)
+            _response_observations(response.headers, timing)
+            response.read()
     except httpx.TimeoutException as exc:
         raise MiniAppBeastError("api_timeout") from exc
     except httpx.HTTPError as exc:
         raise MiniAppBeastError("api_unreachable") from exc
-    _response_observations(response.headers, timing)
     if 300 <= int(response.status_code) < 400:
         raise MiniAppBeastError("api_redirect_rejected", status=response.status_code)
     raw = response.content[:2_000_001]

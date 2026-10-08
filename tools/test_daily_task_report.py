@@ -84,6 +84,23 @@ class DailyReportTests(unittest.TestCase):
         for absent in ('群指令', '已确认', '.自动重试', '.查询', '999', '旧探缝结果', '下一时段探缝结果'):
             self.assertNotIn(absent, text)
 
+    def test_rare_drops_are_flagged_at_top_and_inline(self):
+        stamp = self.end.timestamp() - 1
+        payload = {"pagoda_miniapp": {"run": {"status": "settled", "updated_at": stamp, "state": {"todayHighest": 9},
+                   "replay": {"rewardLines": ["获得了【大衍灵傀图谱】x1", "获得了【庚金砂】x2"]}}},
+                   "wild_experience_miniapp": {"run": {"status": "completed", "updated_at": stamp,
+                   "attempts": [{"cultivation_delta": 1, "loot": [{"name": "庚金", "quantity": 1}]}]}}}
+        self.storage.update_external_account_payload(self.pid, ASC_EXTERNAL_PROVIDER, lambda _: payload)
+        with self.storage.connect() as db:
+            for message, value in ((1, "【激战得胜】你从其残骸中，获得了【四级妖丹】x5，以及一件至宝：【庚金】！"),
+                                   (2, "【探寻成功】你的元婴满载而归，为你带来了：【法则碎片·土】, 一份意外之喜 【九天神雷木】！")):
+                db.execute("INSERT INTO rift_execution_logs(profile_id,chat_id,event_type,message_id,text,created_at) VALUES(?,1,'success',?,?,?)", (self.pid, message, value, stamp))
+        lines = report.build_report(self.storage, self.start, self.end).splitlines()
+        self.assertEqual(lines[2], "🎁 稀有掉落：测试号 【大衍灵傀图谱】、【庚金】")
+        for start in ("问心塔", "野外", "探缝 "):
+            self.assertTrue(any(l.startswith("🎁 " + start) for l in lines), start)
+        self.assertTrue(next(l for l in lines if "九天神雷木" in l).startswith("探缝"))  # game says 意外之喜, data says common
+
     def test_world_boss_reward_comes_from_result_notice(self):
         start = self.end.timestamp() - 3600
         self.storage.upsert_external_account(self.pid, ASC_EXTERNAL_PROVIDER, "", "me", "connected", "", {}, "")
@@ -94,12 +111,13 @@ class DailyReportTests(unittest.TestCase):
         notice = "\n".join(["【世界通告｜真仙试锋功成】", "战果", "- 结果：伐仙功成", "贡献榜", "1. @me - 3760 分",
                             "称号授予", "- @me 获得称号徽章 【斩青元者】", "奖励结算",
                             "- @me：伐仙功 +19，修为 +12520，新称号 【斩青元者】", "- @me2：修为 +1",
-                            "珍稀掉落", "- @me 获得 【衍神玉简】x1"])
+                            "珍稀掉落", "- @me 获得 【衍神玉简】x1", "- @me 获得 【四级妖丹】x3"])
         with self.storage.connect() as db:
             for profile in (self.pid, self.pid + 1):  # each profile keeps its own copy of the notice
                 db.execute("INSERT INTO bound_messages(profile_id,chat_id,message_id,direction,is_bot,text,created_at,updated_at) VALUES(?,1,9,'incoming',1,?,?,?)", (profile, notice, start + 240, start + 240))
         text = report.build_report(self.storage, self.start, self.end)
         self.assertIn("命中16、完美12（伐仙功成）；奖励：伐仙功 +19，修为 +12520，新称号 【斩青元者】；获得 【衍神玉简】x1", text)
+        self.assertIn("🎁 稀有掉落：测试号 【衍神玉简】\n", text)
         self.assertNotIn("称号徽章", text)
         self.assertNotIn("修为 +1\n", text + "\n")
         self.storage.upsert_external_account(self.pid, ASC_EXTERNAL_PROVIDER, "", "other", "connected", "", {}, "")

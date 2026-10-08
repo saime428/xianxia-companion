@@ -45,6 +45,8 @@ def request_timeline(data):
                                 'request_resumed_monotonic_ms', 'request_clock_step_ms',
                                 'http_response_headers_monotonic_ms', 'http_server_date_unix_ms',
                                 'http_cf_ray', 'http_server_timing_cf_edge_ms', 'http_server_timing_cf_origin_ms',
+                                'http_tcp_sample_monotonic_ms', 'http_tcp_rtt_ms', 'http_tcp_rttvar_ms', 'http_tcp_total_retrans',
+                                'http_tcp_last_data_recv_age_ms',
                                 'executor_queue_ms', 'transport_ms', 'loop_resume_ms',
                                 'http_pool_dispatch_ms', 'http_connect_ms', 'http_tls_ms', 'http_headers_wait_ms')
                         row.update({key: attempt.get(key) for key in keys})
@@ -173,12 +175,14 @@ def self_check():
         'server_result': {'event_id': 143}, 'diagnostics': {'hits': [{'sequence': 1, 'request': {
             'attempts': ['<truncated>'], 'attempt_count': 2, 'transport_ms': 500,
             'request_started_unix_ms': 1790947800123, 'http_cf_ray': '0123456789abcdef-HNL',
+            'http_tcp_rtt_ms': 12.5, 'http_tcp_total_retrans': 0,
         }}]}}
     ]}]}}}
     timeline = request_timeline(data)
     assert len(timeline) == 1 and timeline[0]['scope'] == 'summary_last_attempt_metadata'
     assert timeline[0]['started_utc'] == '2026-10-02T13:30:00.123+00:00'
     assert timeline[0]['http_server_date_unix_ms'] is None
+    assert timeline[0]['http_tcp_rtt_ms'] == 12.5 and timeline[0]['http_tcp_total_retrans'] == 0
     print('world boss timing analysis: ok')
 
 

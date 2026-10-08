@@ -149,6 +149,38 @@ def select_event(state, event_at):
     return (min(candidates, key=lambda row: row[:2])[2] if candidates else None), len(candidates)
 
 
+def automation_evidence(diagnostics, result):
+    """Keep per-hit penalties separate from the risk snapshot at settlement."""
+    raw_hits = diagnostics.get("hits")
+    hits = [h for h in raw_hits if isinstance(h, dict)] if isinstance(raw_hits, list) else []
+    multipliers, scores, reviews, penalized = [], [], [], []
+    for hit in hits:
+        server = _dict(hit.get("server_hit"))
+        multiplier = _number(server.get("automationDamageMultiplier"), 10)
+        score = _number(server.get("automationRiskScore"))
+        if multiplier is not None:
+            multipliers.append(multiplier)
+            if multiplier < 1:
+                penalized.append(_count(hit.get("sequence")))
+        if score is not None:
+            scores.append(score)
+        if isinstance(server.get("automationReview"), bool):
+            reviews.append(server["automationReview"])
+    finish = _dict(result.get("automation_risk"))
+    review = finish.get("review", result.get("automation_review"))
+    return {
+        "hit_record_count": len(hits), "multiplier_sample_count": len(multipliers),
+        "penalized_hit_count": len(penalized),
+        "penalized_sequences": [sequence for sequence in penalized if sequence],
+        "min_hit_damage_multiplier": min(multipliers, default=None),
+        "max_hit_risk_score": max(scores, default=None),
+        "hit_review_observed": any(reviews) if reviews else None,
+        "finish_damage_multiplier": _number(finish.get("damageMultiplier"), 10),
+        "finish_risk_score": _number(finish.get("score")),
+        "finish_review": review if isinstance(review, bool) else None,
+    }
+
+
 def identity_evidence(item, index):
     item = _dict(item)
     status = item.get("status") if item.get("status") in STATUS_LABELS else "unknown"
@@ -176,6 +208,7 @@ def identity_evidence(item, index):
         "grade": grade if settled else None, "score": score if settled else None,
         "reward_status": "server_reported" if settled and item.get("reward_status") == "server_reported" and result.get("rewards") else "not_reported",
         "reward_arrival_status": "unverified",
+        "automation": automation_evidence(diagnostics, result),
         "errors": _safe_errors(item.get("error"), "settlement_unconfirmed" if status == "completed" and not settled else ""),
     }
 
@@ -248,12 +281,22 @@ def markdown(report):
     for result in report["results"]:
         if result["settlement_confirmed"]:
             lines.append(f"- 身份 {result['identity_index']}：{result['grade']}，{result['score']:g} 分。")
+        risk = result["automation"]
+        if risk["multiplier_sample_count"]:
+            detail = (f"逐击倍率可见 {risk['multiplier_sample_count']}/{risk['hit_record_count']} 条记录；"
+                      f"其中减伤 {risk['penalized_hit_count']} 击，最低倍率 {risk['min_hit_damage_multiplier']:g}")
+        else:
+            detail = "逐击倍率未记录，不能判断有无逐击减伤"
+        finish = risk["finish_damage_multiplier"]
+        lines.append(f"- 身份 {result['identity_index']} 风险证据：{detail}；结算倍率 "
+                     + (f"{finish:g}" if finish is not None else "未记录") + "。")
     if report.get("errors"):
         lines.append("- 安全错误码：" + "、".join(report["errors"]) + "。")
     for name, status in report.get("services", {}).items():
         lines.append(f"- {name}：{status}。")
     lines.extend(["", "仅选取活动前 5 分钟至后 20 分钟内的记录；优先使用 started_at，缺失时使用 updated_at，取离开场时刻最近的一场。新记录写入带时区的 UTC 时间；本 VPS 旧无时区事件时间按北京时间解释。",
-                  "通告记录、验证接受、有效命中、结算确认分别报告；server_reported 仅表示返回奖励字段，不等同于已到账。", ""])
+                  "通告记录、验证接受、有效命中、结算确认分别报告；server_reported 仅表示返回奖励字段，不等同于已到账。",
+                  "结算回包中的倍率不能排除此前逐击减伤；上述统计仅覆盖已记录字段，不能排除未披露的处理。", ""])
     return "\n".join(lines)
 
 
@@ -295,6 +338,42 @@ def self_check():
     assert report["matched_event_count"] == 1 and report["event"]["message_id"] == 123
     assert report["status"] == "settled" and report["evidence"]["begin_accepted"]
     assert report["evidence"]["reward_status"] == "not_reported" and report["evidence"]["reward_arrival_status"] == "unverified"
+    # A clean finish must not hide a penalty on an earlier accepted hit.
+    penalized = deepcopy(event)
+    subject = penalized["identity_results"][0]
+    subject["server_result"]["automation_risk"] = {"damageMultiplier": 1.0, "score": 26, "review": False}
+    subject["diagnostics"]["hits"] = [
+        {"sequence": 7, "server_hit": {"automationDamageMultiplier": 1.0, "automationRiskScore": 0}},
+        {"sequence": 8, "server_hit": {"automationDamageMultiplier": .55, "automationRiskScore": 52, "automationReview": False}},
+        {"sequence": 9, "server_hit": {"automationDamageMultiplier": 1.0, "automationRiskScore": 38}},
+        {"sequence": 10, "error": "boss_hit_unconfirmed"},
+    ]
+    penalty_report = summarize({"world_boss_events": [penalized]}, {}, 2, event_at)
+    risk = penalty_report["results"][0]["automation"]
+    assert risk["hit_record_count"] == 4 and risk["multiplier_sample_count"] == 3
+    assert risk["penalized_hit_count"] == 1 and risk["penalized_sequences"] == [8]
+    assert risk["min_hit_damage_multiplier"] == .55 and risk["max_hit_risk_score"] == 52
+    assert risk["finish_damage_multiplier"] == 1.0 and risk["finish_risk_score"] == 26
+    assert risk["hit_review_observed"] is False and risk["finish_review"] is False
+    assert "减伤 1 击" in markdown(penalty_report) and "0.55" in markdown(penalty_report)
+    missing = report["results"][0]["automation"]
+    assert missing["multiplier_sample_count"] == 0 and missing["min_hit_damage_multiplier"] is None
+    assert missing["finish_damage_multiplier"] is None and missing["hit_review_observed"] is None
+    assert "逐击倍率未记录" in markdown(report)
+    subject["diagnostics"]["hits"] = [
+        None, "DO_NOT_EXPOSE", {"server_hit": "DO_NOT_EXPOSE"},
+        {"server_hit": {"automationDamageMultiplier": True, "automationRiskScore": float("nan")}},
+        {"server_hit": {"automationDamageMultiplier": -1, "automationReview": "false"}},
+        {"sequence": "DO_NOT_EXPOSE", "server_hit": {"automationDamageMultiplier": .8, "automationReview": True}},
+    ]
+    subject["server_result"]["automation_risk"] = {"damageMultiplier": float("inf"), "score": -1, "review": "true", "token": "DO_NOT_EXPOSE"}
+    malformed = summarize({"world_boss_events": [penalized]}, {}, 2, event_at)
+    risk = malformed["results"][0]["automation"]
+    assert risk["multiplier_sample_count"] == 1 and risk["penalized_sequences"] == []
+    assert risk["penalized_hit_count"] == 1 and risk["hit_review_observed"] is True
+    assert risk["finish_damage_multiplier"] is None and risk["finish_review"] is None
+    assert "DO_NOT_EXPOSE" not in json.dumps(malformed, allow_nan=False)
+    assert "DO_NOT_EXPOSE" not in markdown(malformed)
     for started_at in ("2026-09-15 13:40:01", "2026-09-15T13:40:01+08:00", event_at.timestamp() + 1):
         legacy = {**event, "started_at": started_at, "updated_at": "2026-09-15 13:41:30"}
         legacy_report = summarize({"world_boss_events": [previous, legacy, future]},

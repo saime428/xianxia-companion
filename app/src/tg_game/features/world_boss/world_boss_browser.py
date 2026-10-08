@@ -1,4 +1,4 @@
-"""Serial, unattended Turnstile verification through a dedicated native browser.
+"""Bounded, unattended Turnstile verification through isolated native browsers.
 
 The browser loads the real Mini App and uses its current Turnstile configuration.
 Only Cloudflare's callback can produce a token. Managed widgets that become
@@ -9,6 +9,7 @@ appear in diagnostics. The game worker remains the only process that sends /begi
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import json
 import logging
@@ -20,6 +21,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.request
 import uuid
@@ -334,8 +336,9 @@ class NativeTurnstileBrowser:
 
 
 class AutomaticTurnstileWorker:
-    def __init__(self, broker, browser, *, clock=time.monotonic, max_attempts=2):
+    def __init__(self, broker, browser, *, clock=time.monotonic, max_attempts=2, stopping=None):
         self.broker, self.browser, self.clock = broker, browser, clock
+        self.stopping = stopping
         self.max_attempts = max(1, min(3, int(max_attempts)))
         self.last_attempt = {}
         self.last_work = clock()
@@ -351,9 +354,17 @@ class AutomaticTurnstileWorker:
                 self.browser.close()
             return False
         row = rows[0]
+        try:
+            return self.process(row)
+        finally:
+            self.last_attempt[row["request_id"]] = self.last_work
+
+    def process(self, row):
         request_id = row["request_id"]
 
         def pending():
+            if self.stopping is not None and self.stopping.is_set():
+                return False
             return (self.broker.get_request(request_id) or {}).get("status") == "pending"
 
         def event(stage, code=""):
@@ -397,13 +408,64 @@ class AutomaticTurnstileWorker:
             self.browser.close()
         finally:
             self.last_work = self.clock()
-            self.last_attempt[request_id] = self.last_work
         return True
+
+
+class ConcurrentTurnstileWorker:
+    """One coordinator owns claims; each slot owns its browser until completion."""
+    def __init__(self, broker, browsers, *, clock=time.monotonic):
+        if not 1 <= len(browsers) <= 3:
+            raise ValueError('Expected one to three browser slots')
+        self.broker, self.clock = broker, clock
+        self.stopping = threading.Event()
+        self.workers = [AutomaticTurnstileWorker(broker, item, clock=clock, stopping=self.stopping) for item in browsers]
+        self.executor = ThreadPoolExecutor(max_workers=len(browsers), thread_name_prefix='boss-verification')
+        self.jobs, self.last_attempt = {}, {}
+
+    def run_once(self):
+        if self.stopping.is_set():
+            return False
+        for slot, (rid, account, future) in list(self.jobs.items()):
+            if future.done():
+                future.result()
+                self.last_attempt[rid] = self.clock()
+                del self.jobs[slot]
+        rows = [row for row in self.broker.list_requests() if row.get('status') == 'pending']
+        live = {row['request_id'] for row in rows}
+        self.last_attempt = {rid: at for rid, at in self.last_attempt.items() if rid in live}
+        claimed = {rid for rid, _, _ in self.jobs.values()}
+        accounts = {account for _, account, _ in self.jobs.values()}
+        rows.sort(key=lambda row: (int(row.get('browser_attempts') or 0), str(row.get('created_at', ''))))
+        dispatched = False
+        for slot, worker in enumerate(self.workers):
+            if slot in self.jobs:
+                continue
+            row = next((row for row in rows if row['request_id'] not in claimed
+                        and row.get('account') not in accounts
+                        and self.clock() - self.last_attempt.get(row['request_id'], -1000) >= 5), None)
+            if row is None:
+                if self.clock() - worker.last_work >= 20:
+                    worker.browser.close()
+                continue
+            rid, account = row['request_id'], row.get('account')
+            claimed.add(rid)
+            accounts.add(account)
+            self.jobs[slot] = (rid, account, self.executor.submit(worker.process, row))
+            dispatched = True
+        return dispatched or bool(self.jobs)
+
+    def close(self):
+        self.stopping.set()
+        # Native verification checks still_pending while waiting for callbacks.
+        # Join before closing browsers so CDP connections are never shared.
+        self.executor.shutdown(wait=True)
+        for worker in self.workers:
+            worker.browser.close()
 
 
 @contextmanager
 def worker_lease(queue_dir, *, cleanup=None):
-    """Keep one browser per queue across all accounts."""
+    """Keep one coordinating worker per queue across all accounts."""
     path = Path(queue_dir) / ".browser-worker.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as handle:
@@ -443,6 +505,7 @@ def main():
     parser.add_argument("--chrome")
     parser.add_argument("--queue-dir")
     parser.add_argument("--no-sandbox", action="store_true")
+    parser.add_argument("--concurrency", type=int, default=3, choices=range(1, 4))
     args = parser.parse_args()
     broker = WorldBossTurnstileBroker(args.queue_dir)
     broker.queue_dir.mkdir(parents=True, exist_ok=True)
@@ -455,6 +518,18 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", handlers=handlers)
     profile = broker.queue_dir / "browser_profile"
     browser = NativeTurnstileBrowser(profile, chrome=args.chrome, no_sandbox=args.no_sandbox)
+    browsers = [browser]
+    if not args.probe:
+        browsers.extend(NativeTurnstileBrowser(broker.queue_dir / f'browser_profile_{i+1}',
+                        chrome=args.chrome, no_sandbox=args.no_sandbox) for i in range(1, args.concurrency))
+    worker = None
+
+    def cleanup():
+        if worker is not None:
+            worker.close()
+        else:
+            for item in browsers:
+                item.close()
 
     def stopped(signum, frame):
         raise KeyboardInterrupt
@@ -463,7 +538,7 @@ def main():
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), stopped)
     try:
-        with worker_lease(broker.queue_dir, cleanup=browser.close):
+        with worker_lease(broker.queue_dir, cleanup=cleanup):
             if args.probe:
                 for index in range(args.count):
                     started = time.monotonic()
@@ -473,8 +548,8 @@ def main():
                                       "duration_seconds": round(time.monotonic() - started, 2)}), flush=True)
                     token = ""
             else:
-                worker = AutomaticTurnstileWorker(broker, browser)
-                LOG.info("Automatic Qing Yuanzi browser verification is ready")
+                worker = ConcurrentTurnstileWorker(broker, browsers)
+                LOG.info("Automatic Qing Yuanzi browser verification is ready (%s slots)", len(browsers))
                 while True:
                     try:
                         worker.run_once()
@@ -488,7 +563,7 @@ def main():
         print(json.dumps({"event": "verification_failed", "error": exc.code, "cf_code": exc.cf_code}), flush=True)
         return 1
     finally:
-        browser.close()
+        cleanup()
     return 0
 
 

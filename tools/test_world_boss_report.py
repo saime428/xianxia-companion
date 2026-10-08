@@ -136,6 +136,14 @@ class WorldBossReportTests(unittest.TestCase):
         self.assertIn("未记录本号参战结果", text)
         self.assertNotIn("private_value", text)
 
+    def test_rare_drop_is_flagged_under_the_header(self):
+        self.notice += "\n珍稀掉落\n- @one 获得 【衍神玉简】x1\n- @two 获得 【四级妖丹】x3"
+        self.notice_at()
+        lines = report.next_report(self.storage, self.pids[0], self.start+421)[2]["text"].splitlines()
+        self.assertEqual(lines[3], "🎁 稀有掉落：@one 【衍神玉简】")
+        self.assertTrue(next(l for l in lines if "衍神玉简" in l and "奖励：" in l).startswith("🎁 （天道败退）；奖励："))
+        self.assertTrue(next(l for l in lines if "四级妖丹" in l).startswith("（天道败退）；奖励："))
+
     def test_late_world_announcement_still_includes_rewards(self):
         self.notice_at(stamp=self.start+1000)
         text = report.next_report(self.storage,self.pids[0],self.start+1001)[2]["text"]

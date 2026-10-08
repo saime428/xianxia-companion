@@ -82,6 +82,22 @@ def _boss_reward(notices, username, event):
     return "；奖励：未见结果公告"
 
 
+# ponytail: hand-kept list from ~10 days of whole-group chat (5 windows 09-06..10-08: ~940 rifts,
+# 5 boss notices, crafting shortages, 59 inventories). 庚金 ~0.4% of rifts, 3/59 hold it, 7 crafts stuck
+# without it; the three boss drops once each, 2/59 hold each. The game's own 至宝/珍稀掉落 labels
+# are not used: 空间之核/九天神雷木/太虚仙露 come from 4-5% of rifts and ~20/59 hold them, and boss
+# 珍稀掉落 lists 四级妖丹. 九转凝魂丹丹方 (~0.9%) left out on request. game_items.rarity is all 0.
+# Re-survey when drops change.
+RARE_ITEMS = ("庚金", "衍神玉简", "大衍诀残篇·衍神", "大衍灵傀图谱")
+_NAMES = "|".join(map(re.escape, RARE_ITEMS))
+# 【X】 in rift/问心塔/青元子 text, or "X ×n" in 野外 loot; not 庚金砂 or 青竹蜂云剑（…庚金相）.
+_RARE = re.compile(f"【({_NAMES})】|(?<![\\w·（])({_NAMES})(?= ×)")
+
+
+def _rare_items(line):
+    return list(dict.fromkeys(a or b for a, b in _RARE.findall(line)))
+
+
 def due_window(config, now):
     """Catch up after restarts, starting with the day on which this was enabled."""
     if not config.get("enabled"):
@@ -102,6 +118,7 @@ def build_report(storage, start, end):
     """Read one consistent snapshot; stale payloads never become today's successes."""
     since, until = start.timestamp(), end.timestamp()
     lines = [f"每日修仙简报 · {end:%Y-%m-%d}", f"北京时间 {start:%m-%d %H:%M}—{end:%m-%d %H:%M}"]
+    highlights = []
     with storage.connect() as db:
         db.execute("BEGIN")
         accounts = db.execute("SELECT p.id,p.name,e.me_json,e.telegram_username FROM profiles p JOIN external_accounts e ON e.profile_id=p.id WHERE p.telegram_verified_at>0 AND e.provider='asc_aiopenai' ORDER BY p.id").fetchall()
@@ -198,11 +215,19 @@ def build_report(storage, start, end):
                 results.append(f"探缝 {datetime.fromtimestamp(stamp, GAME_TZ):%H:%M}：" + detail)
             pending = db.execute("SELECT DISTINCT text,status FROM outgoing_commands WHERE profile_id=? AND created_at>=? AND created_at<? AND status IN ('failed','needs_manual_confirm')", (pid, since, until)).fetchall()
             actions = ["核对 " + _short(r[0], 60) + ("（发送失败）" if r[1] == "failed" else "（结果未确认，先查看游戏回包）") for r in pending]
-            lines.append("\n" + _short(payload.get("dao_name") or name, 30))
+            display = _short(payload.get("dao_name") or name, 30)
+            rare = list(dict.fromkeys(item for line in results for item in _rare_items(line)))
+            if rare:
+                highlights.append(display + " " + "、".join(f"【{item}】" for item in rare))
+            lines.append("\n" + display)
             lines.append("需要你处理：" + ("；".join(actions) if actions else "暂无明确的手动待办"))
             if errors:
                 lines.append("需要核对任务结果：" + "；".join(errors))
-            lines.extend(results or ["本时段没有已记录的任务结果"])
+            lines.extend(["🎁 " + line if _rare_items(line) else line for line in results]
+                         or ["本时段没有已记录的任务结果"])
+    if highlights:
+        # Right under the title, so it shows in the notification preview and survives _limit_text.
+        lines.insert(2, "🎁 稀有掉落：" + "；".join(highlights))
     return _limit_text("\n".join(lines))
 
 

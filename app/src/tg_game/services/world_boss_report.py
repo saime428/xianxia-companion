@@ -7,7 +7,7 @@ import time
 
 from tg_game.game_clock import GAME_TZ
 from tg_game.services.daily_task_report import (
-    CONFIG_KEY, _boss_reward, _json, _limit_text, _short, _stamp, deliver_report,
+    CONFIG_KEY, _boss_reward, _json, _limit_text, _rare_items, _short, _stamp, deliver_report,
 )
 from tg_game.services.runtime_drain import tracked_flow
 
@@ -38,6 +38,7 @@ def _text(accounts, events, started, notice):
              "全场：" + (_short(result[1]) if result else "未见战果公告，胜负和排名暂未确认")]
     if participants:
         lines.append("参战：" + _short(participants[1]))
+    header, highlights = len(lines), []
     for pid, name, username in accounts:
         event = events.get(pid) or {}
         identities = event.get("identity_results") or []
@@ -58,7 +59,13 @@ def _text(accounts, events, started, notice):
         # The notice was already matched by room and event start. A late world
         # result remains valid even when personal combat finished much earlier.
         reward_event = {"started_at": started, "updated_at": at or started+NOTICE_WAIT_SECONDS}
-        lines.append(_boss_reward([(at, announcement)] if notice else [], username, reward_event).lstrip("；"))
+        reward = _boss_reward([(at, announcement)] if notice else [], username, reward_event).lstrip("；")
+        rare = _rare_items(reward)
+        if rare:
+            highlights.append(_short("@" + username if username else name, 60) + " " + "、".join(f"【{item}】" for item in rare))
+        lines.append(("🎁 " if rare else "") + reward)
+    if highlights:
+        lines.insert(header, "🎁 稀有掉落：" + "；".join(highlights))
     lines.append("\n奖励按战果公告记录；公告未列出不代表没有奖励，未单独核验余额到账。")
     return _limit_text("\n".join(lines))
 
