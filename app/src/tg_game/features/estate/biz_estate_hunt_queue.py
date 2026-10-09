@@ -232,11 +232,7 @@ def _remember_hunt_hints(run: dict, hints: dict, revealed_index: int) -> dict:
 
 
 def _choose_hunt_reveal_index(run: dict, tried: list[int]) -> Optional[int]:
-    """累计线索，低神识时提前结算。预览的额外损耗不是服务端上限保证。
-
-    已知安全格预留1点；未知格按预览的3点总消耗再预留1点。
-    不以推测主宝匣唯一位置为由，在低神识时赌未知格。
-    """
+    """循线索优先取主宝与奖励，找到主宝后继续，直到神识用完。"""
     size = _int_or_zero(run.get("size")) or 5
     ap = _int_or_zero(run.get("ap"))
     kinds, candidates = _hunt_knowledge(run, size)
@@ -249,37 +245,28 @@ def _choose_hunt_reveal_index(run: dict, tried: list[int]) -> Optional[int]:
     def pick(want) -> Optional[int]:
         return next((index for index in order if want(index)), None)
 
-    if run.get("foundMain"):
-        for kind in ("treasure", "resource"):
-            index = pick(lambda item, kind=kind: kinds.get(item) == kind)
-            if index is not None and ap >= 2:
-                return index
-        return None
-
     live = candidates - blocked
-    if ap < 2:
-        return None
-    if len(live) == 1:
-        candidate = next(iter(live))
-        if kinds.get(candidate) == "treasure" or ap >= 4:
-            return candidate
-    index = pick(lambda item: item in live and kinds.get(item) == "treasure")
-    if index is not None:
-        return index
-    if len(live) > 4:
-        # 范围还大：先翻确定是线索或空室的格子（必定只耗 1 点），翻出线索能把范围砍到一个象限
-        index = pick(lambda item: kinds.get(item) == "plain")
-        if index is not None:
-            return index
-    if ap >= 4:
-        index = pick(lambda item: item in live and item not in kinds)
-        if index is not None:
-            return index
-    for kind in ("resource", "treasure", "plain"):
+    if not run.get("foundMain") and len(live) == 1:
+        return next(iter(live))
+    for kind in ("treasure", "resource"):
         index = pick(lambda item, kind=kind: kinds.get(item) == kind)
         if index is not None:
             return index
-    return None
+    if not run.get("foundMain"):
+        if len(live) > 4 and ap > 1:
+            # 范围还大时先找线索；最后一点优先用于可能有奖励的格子。
+            index = pick(lambda item: kinds.get(item) == "plain")
+            if index is not None:
+                return index
+        index = pick(lambda item: item in live and item not in kinds)
+        if index is not None:
+            return index
+    # ponytail: 未知格沿用既有顺序；更精细的收益排序需先积累实际掉落分布。
+    for want in (lambda item: item not in kinds, lambda item: kinds.get(item) == "plain"):
+        index = pick(want)
+        if index is not None:
+            return index
+    return order[0]
 
 
 def _build_hunt_state(
@@ -290,7 +277,7 @@ def _build_hunt_state(
     dwelling: object = None,
     error: object = "",
     events: Optional[list] = None,
-    strategy: str = "follow_clues",
+    strategy: str = "exhaust_ap",
     revealed_indices: Optional[list[int]] = None,
 ) -> dict:
     from .biz_estate_miniapp import sanitize_estate_miniapp_secret_text
@@ -430,7 +417,7 @@ def queue_estate_miniapp_hunt_request(
     dongfu["miniapp_hunt"] = {
         "status": "queued",
         "updated_at": request["requested_at"],
-        "strategy": "follow_clues",
+        "strategy": "exhaust_ap",
         "automation_mode": "auto_daily",
         "automation_runs": 0,
         "automation_total_loot": [],

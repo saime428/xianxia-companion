@@ -363,6 +363,7 @@ function mountPartialCardRefresh(card) {
         event.preventDefault();
         if (loading) return;
 
+        const formData = new FormData(form, event.submitter);
         loading = true;
         card.setAttribute('aria-busy', 'true');
         const overlay = document.getElementById('global-loading-overlay');
@@ -373,14 +374,15 @@ function mountPartialCardRefresh(card) {
 
         try {
             const previousTop = card.getBoundingClientRect().top;
-            const response = await fetch(form.action, {
-                method: (form.method || 'post').toUpperCase(),
-                body: new FormData(form),
+            const response = await fetch(form.getAttribute('action') || window.location.href, {
+                method: (form.getAttribute('method') || 'post').toUpperCase(),
+                body: formData,
                 credentials: 'same-origin',
                 headers: { 'X-Requested-With': 'XMLHttpRequest' },
             });
             if (!response.ok) {
-                throw new Error(`Card refresh failed: ${response.status}`);
+                const error = await response.json().catch(() => ({}));
+                throw new Error(typeof error.detail === 'string' ? error.detail : '操作失败，请稍后重试。');
             }
 
             const html = await response.text();
@@ -390,6 +392,16 @@ function mountPartialCardRefresh(card) {
                 throw new Error('Refresh card missing from response');
             }
 
+            const currentStatus = card.querySelector('[data-estate-resource-status]');
+            const nextStatus = nextCard.querySelector('[data-estate-resource-status]');
+            if (currentStatus && nextStatus) {
+                currentStatus.replaceWith(nextStatus);
+                if (form.getAttribute('action') === '/runtime/estate/resources/policy') {
+                    nextStatus.querySelector('[data-estate-status-message]').textContent = '资源策略已保存';
+                }
+                mountEstateResourceStatus(card);
+                return;
+            }
             card.replaceWith(nextCard);
             if (typeof mountOtherCommandBuilders === 'function') {
                 mountOtherCommandBuilders(nextCard);
@@ -401,8 +413,13 @@ function mountPartialCardRefresh(card) {
             mountPartialCardRefresh(nextCard);
             const nextTop = nextCard.getBoundingClientRect().top;
             window.scrollBy(0, nextTop - previousTop);
-        } catch (_error) {
-            window.alert('操作失败，当前卡片未刷新，请稍后重试。');
+        } catch (error) {
+            const feedback = card.querySelector('[data-estate-status-message]');
+            if (feedback) {
+                feedback.textContent = error.message || '操作失败，请稍后重试。';
+            } else {
+                window.alert(error.message || '操作失败，当前卡片未刷新，请稍后重试。');
+            }
         } finally {
             hideGlobalLoading(overlay);
             if (card.isConnected) {
@@ -411,6 +428,36 @@ function mountPartialCardRefresh(card) {
             }
         }
     });
+}
+
+function mountEstateResourceStatus(root = document) {
+    const panel = root.querySelector('[data-estate-resource-status]');
+    if (!panel || panel.dataset.pending !== '1' || panel.dataset.polling === '1') return;
+    panel.dataset.polling = '1';
+    const card = panel.closest('[data-partial-refresh-card]');
+    // ponytail: Poll only this cached panel while a request is pending; no game refresh or full-page reload.
+    const poll = async () => {
+        if (!panel.isConnected) return;
+        if (document.hidden || card?.getAttribute('aria-busy') === 'true') {
+            window.setTimeout(poll, 2000);
+            return;
+        }
+        try {
+            const response = await fetch('/runtime/estate/resources/status', { cache: 'no-store', credentials: 'same-origin' });
+            if (!response.ok) throw new Error('状态更新失败，请刷新页面重试。');
+            const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+            const next = doc.querySelector('[data-estate-resource-status]');
+            if (!next) throw new Error('登录可能已过期，请刷新页面重新登录。');
+            if (next.dataset.profileId !== panel.dataset.profileId) throw new Error('当前元神已切换，请刷新页面。');
+            if (!panel.isConnected) return;
+            panel.replaceWith(next);
+            mountEstateResourceStatus(card);
+        } catch (error) {
+            const feedback = panel.querySelector('[data-estate-status-message]');
+            if (feedback) feedback.textContent = error.message;
+        }
+    };
+    window.setTimeout(poll, 2000);
 }
 
 function mountPartialCardRefreshes(root = document) {
@@ -1484,6 +1531,7 @@ warmJadeLoadingAssets();
 mountCountdowns();
 mountGlobalLoadingForms();
 mountPartialCardRefreshes();
+mountEstateResourceStatus();
 mountNavigationTransitions();
 mountTianxingRewardDateLookup();
 mountGlobalConfirmDialogForms();

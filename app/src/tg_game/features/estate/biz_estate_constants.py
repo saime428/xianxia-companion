@@ -4,7 +4,8 @@ MINIAPP_SAFETY_BOUNDARY = (
 )
 MINIAPP_HUNT_SAFETY_BOUNDARY = (
     "自动寻宝会临时请求一次 Telegram WebView，并在同一洞府 MiniApp 会话内连续寻宝；"
-    "每轮循线索找主宝匣，没找到就留一点神识结算，达到今日次数上限后停止；"
+    "每轮循线索优先取主宝和已知奖励，找到主宝后继续探索，用完可用神识后结算；"
+    "服务端结束本轮或无格可翻时也会结算，达到今日次数上限后停止；"
     "不保存 initData/tgWebAppData/hash/user/raw URL/sessionId。"
 )
 ESTATE_MINIAPP_DEFAULT_BOT_USERNAME = "fanrenxiuxian_bot"

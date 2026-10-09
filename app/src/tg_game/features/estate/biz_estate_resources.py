@@ -12,6 +12,7 @@ from tg_game.services.runtime_drain import tracked_flow
 from . import biz_estate_miniapp as api
 
 DEFAULT_POLICY = {
+    "auto_chest": False,
     "observe_enabled": False, "durability_threshold": 30,
     "auto_repair": False, "repair_target": "all", "stone_budget": 0, "cultivation_budget": 0,
     "meditation_enabled": False, "meditation_verified": False, "lingqi_reserve": 0,
@@ -24,7 +25,7 @@ def number(value):
     try:
         result = float(value)
         return result if math.isfinite(result) else None
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -57,7 +58,9 @@ def queue(payload, action, *, owner_id="", interaction=None, source="manual"):
         raise ValueError("仅宝箱支持访客角色")
     if owner_id and (not str(owner_id).isdigit() or len(str(owner_id)) > 20):
         raise ValueError("拜访角色ID格式无效")
-    safe_interaction = normalize_interaction(interaction) if action == "chest_open" else {}
+    safe_interaction = normalize_interaction(interaction) if action == "chest_open" and interaction else {}
+    if action == "chest_open" and owner_id and not safe_interaction:
+        raise ValueError("访客开箱仍需洞府小程序的交互位置")
     updated = deepcopy(payload)
     root = updated.setdefault("dongfu_resources", {})
     if (root.get("request") or {}).get("status") in {"queued", "running"}:
@@ -77,6 +80,10 @@ def check_request_policy(request, settings):
     if request.get("source") != "automatic":
         return
     action = request.get("action")
+    if action == "chest_open":
+        if not settings["auto_chest"] or request.get("owner_id"):
+            raise ValueError("本人每日自动开箱已关闭，或请求并非本人宝箱")
+        return
     if not settings["observe_enabled"]:
         raise ValueError("定时观测已关闭，已停止自动资源动作")
     if action == "repair" and not settings["auto_repair"]:
@@ -143,10 +150,24 @@ def normalize_interaction(interaction):
     return {"date": date, "slot": slot, "position": [float(v) for v in position], "controlMode": "companion"}
 
 
-def chest_payload(info, interaction):
-    """Accept a current client interaction, never invent reachability from the seed."""
+def chest_payload(info, interaction=None):
+    """Build one current-day claim; the service validates the selected spot."""
     if not info.get("enabled") or info.get("opened"):
         raise ValueError("宝箱未启用或今日已开")
+    if not interaction:
+        seed, spots = info.get("locationSeed"), info.get("spots")
+        if info.get("visiting") or type(info.get("tier")) is not int or info["tier"] not in {1, 2, 3}:
+            raise ValueError("该洞府尚未验证自动开箱，请在洞府小程序内领取")
+        if type(seed) is not int or seed < 0 or not isinstance(spots, list) or not spots:
+            raise ValueError("服务端未返回有效的每日宝箱藏点")
+        slot = seed % len(spots)
+        point = spots[slot]
+        if not isinstance(point, list) or len(point) != 2 or any(isinstance(v, bool) or number(v) is None for v in point):
+            raise ValueError("服务端宝箱坐标无效")
+        # ponytail: live-verified for tiers 1–3 on 2026-10-09. If this protocol changes,
+        # stop and update this rule; do not probe other slots or emulate the 3D scene.
+        interaction = {"date": info.get("date"), "slot": slot,
+                       "position": [float(point[0]), 0, float(point[1]) + 1.1], "controlMode": "companion"}
     interaction = normalize_interaction(interaction)
     if info.get("date") != game_day() or interaction.get("date") != info.get("date"):
         raise ValueError("宝箱日期已变化，请重新靠近")
@@ -210,11 +231,14 @@ def run_flow(*, token, init_data, transport, request, settings, previous=None, c
         if action.startswith("chest_"):
             status = call("daily_chest", {"action": "status", **host})
             info = (status.get("data") or {}).get("dailyChest") or {}
-            if not status.get("ok") or bool(info.get("visiting")) != bool(owner):
+            if not status.get("ok") or info.get("date") != game_day() or bool(info.get("visiting")) != bool(owner):
                 raise ValueError("宝箱身份或状态未确认")
             result["chest"] = {"owner_id": owner, **info}
             if action == "chest_status" or info.get("opened"):
                 result.update(ok=True, status="synced" if action == "chest_status" else "already_open")
+                return result
+            if info.get("enabled") is False:
+                result.update(ok=True, status="unavailable")
                 return result
             payload = {"action": "open", **host, **chest_payload(info, request.get("interaction") or {})}
             endpoint = "daily_chest"
@@ -251,11 +275,16 @@ def run_flow(*, token, init_data, transport, request, settings, previous=None, c
         if action == "chest_open":
             verified = call("daily_chest", {"action": "status", **host})
             info = (verified.get("data") or {}).get("dailyChest") or {}
-            result["chest"] = {"owner_id": owner, **info}
-            if verified.get("ok") and bool(info.get("visiting")) == bool(owner) and info.get("opened") and info.get("date") == payload["date"]:
-                result.update(ok=True, status="settled" if mutation.get("ok") else "reconciled")
+            confirmed = verified.get("ok") and bool(info.get("visiting")) == bool(owner) and info.get("date") == payload["date"]
+            if confirmed:
+                result["chest"] = {"owner_id": owner, **info}
+            if confirmed and info.get("opened"):
+                result.update(ok=True, status="settled" if mutation.get("ok") else "reconciled", error="")
+            elif confirmed and info.get("opened") is False and not mutation.get("ok") and not uncertain:
+                result.update(ok=False, status="failed")
             else:
-                result.update(ok=False, status="needs_review")
+                result.update(ok=False, status="needs_review", error=result.get("error") or "开箱结果未确认，请查询宝箱并核对奖励")
+            return result
         result["snapshot"] = observations(read(), before)
         if action == "repair" and result["status"] == "needs_review":
             targets = [item.get("itemId") for item in before["repair"].get("items") or []
@@ -283,18 +312,49 @@ async def run_public(client, storage, *, request, settings, previous=None, check
         return await asyncio.to_thread(run_flow, token=launch.get("token"), init_data=init_data, transport=api._urllib_transport,
             request=request, settings=settings, previous=previous, checkpoint=checkpoint)
     except Exception as exc:
-        return {"ok": False, "status": "failed", "error": api.sanitize_estate_miniapp_secret_text(exc)}
+        return {"ok": False, "status": "failed", "action": request.get("action"), "error": api.sanitize_estate_miniapp_secret_text(exc)}
 
 
 def build_view(payload):
     root = (payload or {}).get("dongfu_resources") or {}
     settings = policy(root.get("policy"))
     snapshot = root.get("snapshot") or {}
+    request = root.get("request") or {}
+    last_result = root.get("last_result") or {}
+    request_status = request.get("status", "idle")
+    active = request_status in {"queued", "running"}
+    current = request if active or request_status == "needs_review" else last_result
+    action_label = {"refresh": "刷新资源", "chest_status": "查询宝箱", "chest_open": "开启宝箱",
+                    "repair": "修理法宝", "meditation": "结算静室", "sermon": "布道"}.get(current.get("action"), "资源状态")
+    status_label = {"queued": "等待执行，完成后自动更新", "running": "正在执行，完成后自动更新",
+                    "synced": "已更新", "settled": "已完成", "reconciled": "已核对完成",
+                    "already_open": "今日已开箱", "skipped_full": "资源已满，已跳过",
+                    "unavailable": "今日宝箱未开放",
+                    "failed": "执行失败", "needs_review": "结果待核对", "reviewed": "已核对",
+                    "idle": "尚未查询"}.get(current.get("status", "idle"), "状态待确认")
     alerts = [item for item in snapshot.get("treasures") or []
               if number(item.get("durability")) is not None and float(item["durability"]) < settings["durability_threshold"]]
     return {"policy": settings, "snapshot": snapshot, "alerts": alerts,
-            "chests": root.get("chests") or {}, "last_result": root.get("last_result") or {},
-            "request_status": (root.get("request") or {}).get("status", "idle")}
+            "chests": root.get("chests") or {}, "last_result": last_result, "game_day": game_day(),
+            "chest_auto": root.get("chest_auto") or {},
+            "request_status": request_status, "request_active": active,
+            "action_label": action_label, "status_label": status_label}
+
+
+def _scheduled_action(root):
+    if root.get("request") or root.get("needs_review") or root.get("checkpoint"):
+        return ""
+    settings, now = policy(root.get("policy")), time.time()
+    today = game_day(now)
+    chest = (root.get("chests") or {}).get("own") or {}
+    attempt = root.get("chest_auto") or {}
+    done = chest.get("date") == today and (chest.get("opened") is True or chest.get("enabled") is False)
+    due = attempt.get("day") != today or (int(attempt.get("count") or 0) < 3 and now - float(attempt.get("at") or 0) >= 900)
+    if settings["auto_chest"] and not done and due:
+        return "chest_open"
+    if settings["observe_enabled"] and now - float((root.get("snapshot") or {}).get("updated_at") or 0) >= 900:
+        return "refresh"
+    return ""
 
 
 def _resources_ready(client, storage, profile_id, payload=None):
@@ -304,8 +364,7 @@ def _resources_ready(client, storage, profile_id, payload=None):
     if request:
         return request.get("status") == "queued" or (
             request.get("status") == "running" and float(request.get("lease_until") or 0) <= time.time())
-    return bool(policy(root.get("policy"))["observe_enabled"] and
-                time.time() - float((root.get("snapshot") or {}).get("updated_at") or 0) >= 900)
+    return bool(_scheduled_action(root))
 
 
 @tracked_flow(ready=_resources_ready)
@@ -316,9 +375,13 @@ async def run_pending(client, storage, profile_id, payload=None):
     request = root.get("request") or {}
     def update(transform):
         return storage.update_external_account_payload(int(profile_id), ASC_PROVIDER, transform)
-    if not request and settings["observe_enabled"] and time.time() - float((root.get("snapshot") or {}).get("updated_at") or 0) >= 900:
-        current = update(lambda latest: queue(latest, "refresh", source="automatic"))
-        root, request = current["dongfu_resources"], current["dongfu_resources"]["request"]
+    if not request and _scheduled_action(root):
+        def schedule(latest):
+            action = _scheduled_action(latest.get("dongfu_resources") or {})
+            return queue(latest, action, source="automatic") if action else latest
+        current = update(schedule)
+        root = current.get("dongfu_resources") or {}
+        settings, request = policy(root.get("policy")), root.get("request") or {}
     if request.get("status") == "running" and float(request.get("lease_until") or 0) <= time.time():
         def interrupt(latest):
             board = latest.get("dongfu_resources") or {}
@@ -334,9 +397,14 @@ async def run_pending(client, storage, profile_id, payload=None):
     claimed = False
     def claim(latest):
         nonlocal claimed
-        actual = (latest.get("dongfu_resources") or {}).get("request") or {}
+        board = latest.get("dongfu_resources") or {}
+        actual = board.get("request") or {}
         if actual.get("id") == request.get("id") and actual.get("status") == "queued":
             actual.update(status="running", lease_until=time.time() + 600)
+            if actual.get("action") == "chest_open" and actual.get("source") == "automatic" and not actual.get("owner_id"):
+                previous = board.get("chest_auto") or {}
+                count = int(previous.get("count") or 0) if previous.get("day") == actual.get("day") else 0
+                board["chest_auto"] = {"day": actual.get("day"), "count": count + 1, "at": time.time()}
             claimed = True
         return latest
     update(claim)

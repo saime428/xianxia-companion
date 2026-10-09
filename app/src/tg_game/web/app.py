@@ -3989,9 +3989,21 @@ def create_app() -> FastAPI:
         )
         return RedirectResponse(url=redirect_to, status_code=303)
 
+    @application.get("/runtime/estate/resources/status", response_class=HTMLResponse)
+    async def runtime_estate_resource_status(request: Request):
+        profile = _get_request_profile(request)
+        if not profile:
+            raise HTTPException(status_code=401, detail="Profile not active")
+        payload = read_cached_external_payload(storage, profile.id, ASC_PROVIDER)
+        return templates.TemplateResponse(
+            request, "modules/estate_resources.html",
+            {"active_profile": profile, "estate_resources": biz_estate_resources.build_view(payload)},
+            headers={"Cache-Control": "no-store"},
+        )
+
     @application.post("/runtime/estate/resources/policy")
     async def runtime_estate_resource_policy(
-        request: Request, observe_enabled: str = Form("0"), durability_threshold: float = Form(30),
+        request: Request, auto_chest: str = Form("0"), observe_enabled: str = Form("0"), durability_threshold: float = Form(30),
         auto_repair: str = Form("0"), repair_target: str = Form("all"), stone_budget: float = Form(0),
         cultivation_budget: float = Form(0), meditation_enabled: str = Form("0"),
         meditation_verified: str = Form("0"), lingqi_reserve: float = Form(0), skip_full_sermon: str = Form("0"),
@@ -4000,7 +4012,7 @@ def create_app() -> FastAPI:
         if not profile:
             raise HTTPException(status_code=401, detail="Profile not active")
         try:
-            settings = biz_estate_resources.policy({"observe_enabled": observe_enabled == "1", "durability_threshold": durability_threshold,
+            settings = biz_estate_resources.policy({"auto_chest": auto_chest == "1", "observe_enabled": observe_enabled == "1", "durability_threshold": durability_threshold,
                 "auto_repair": auto_repair == "1", "repair_target": repair_target, "stone_budget": stone_budget,
                 "cultivation_budget": cultivation_budget, "meditation_enabled": meditation_enabled == "1",
                 "meditation_verified": meditation_verified == "1", "lingqi_reserve": lingqi_reserve, "skip_full_sermon": skip_full_sermon == "1"})
@@ -4010,6 +4022,8 @@ def create_app() -> FastAPI:
             latest.setdefault("dongfu_resources", {})["policy"] = settings
             return latest
         storage.update_external_account_payload(profile.id, ASC_PROVIDER, save)
+        if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+            return await runtime_estate_resource_status(request)
         return RedirectResponse(url="/modules/estate", status_code=303)
 
     @application.post("/runtime/estate/resources/action")
@@ -4038,6 +4052,8 @@ def create_app() -> FastAPI:
             storage.update_external_account_payload(profile.id, ASC_PROVIDER, enqueue)
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+            return await runtime_estate_resource_status(request)
         return RedirectResponse(url="/modules/estate", status_code=303)
 
     @application.post("/runtime/estate/miniapp-hunt-canary")

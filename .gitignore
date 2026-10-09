@@ -45,3 +45,13 @@ telegram_oauth_cookies.txt
 AGENTS.md
 progress.md
 tmp/
+
+# Runtime captures and private deployment records
+/data/*
+!/data/.gitkeep
+/HANDOFF.md
+/AUDIT-*
+/REVIEW-*
+/BOSS-ROLLOUT-VALIDATION.md
+*.har
+*.pcap*

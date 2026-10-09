@@ -1,21 +1,46 @@
 {% set resources = estate_resources %}
 {% set policy = resources.policy %}
-<section class="detail-card">
-  <div class="section-header compact"><h2>洞府资源</h2><p>{{ resources.request_status }} · {{ resources.last_result.get('status', '尚未读取') }}</p></div>
-  {% if resources.last_result.get('error') %}<p>{{ resources.last_result.error }}</p>{% endif %}
+<section class="detail-card" id="estate-resources" data-partial-refresh-card="estate-resources">
+  <div data-estate-resource-status data-pending="{{ '1' if resources.request_active else '0' }}" data-profile-id="{{ active_profile.id }}">
+  <div class="section-header compact"><h2>洞府资源</h2><p role="status" aria-live="polite" data-estate-status-message>{{ resources.action_label }} · {{ resources.status_label }}</p></div>
+  {% if not resources.request_active and resources.last_result.get('error') %}<p role="alert">{{ resources.last_result.error }}</p>{% endif %}
+  {% if not resources.request_active and resources.last_result.get('receipt', {}).get('message') %}<p>{{ resources.last_result.receipt.message }}</p>{% endif %}
   {% for item in resources.alerts %}<p>耐久告警：{{ item.name }} {{ item.durability }}/{{ item.maxDurability }}</p>{% endfor %}
   {% set quote = resources.snapshot.get('repair', {}) %}
   <p>全修报价：{{ quote.get('stoneCost', '未知') }} 灵石 / {{ quote.get('cultivationCost', '未知') }} 修为；涉及 {{ quote.get('items', [])|length }} 件。执行前会重新报价。</p>
   <p>静室观测 {{ resources.snapshot.get('samples', [])|length }} 次；预估修为 {{ resources.snapshot.get('meditation', {}).get('projectedGain', '未知') }}。观测差值不能单独证明静室已入账。</p>
-  {% for identity, chest in resources.chests.items() %}<p>{{ '本人' if identity == 'own' else '访客 ' ~ chest.get('owner_id', '') }}宝箱：{{ chest.get('date', '') }} {{ '已开' if chest.get('opened') else '未开' }}；{{ chest.get('rewards', []) }}</p>{% endfor %}
-  <form method="post" action="/runtime/estate/resources/action" class="estate-action-grid">
-    <button name="action" value="refresh">刷新资源</button><button name="action" value="chest_status">查询本人宝箱</button>
-    <button name="action" value="repair">按预算修理</button><button name="action" value="meditation">按策略结算静室</button>
-    <button name="action" value="sermon">按策略布道</button>
+  {% for identity, chest in resources.chests.items() %}
+  <p>{{ '本人' if identity == 'own' else '访客 ' ~ chest.get('owner_id', '') }}宝箱：
+    {% if chest.get('date') != resources.game_day %}上次查询 {{ chest.get('date', '日期未知') }}，请重新查询今日状态。
+    {% elif not chest.get('enabled') %}今日未开放。
+    {% elif chest.get('opened') %}{{ chest.date }} 已开箱。
+    {% else %}{{ chest.date }} 未开箱，{{ '可立即领取或启用每日自动开箱' if identity == 'own' else '请在洞府小程序内开启' }}。{% endif %}
+  </p>
+  {% if chest.get('rewards') %}<p>奖励：{% for reward in chest.rewards %}{% if reward is mapping %}{{ reward.get('name') or reward.get('itemName') or '奖励' }}{% if reward.get('quantity') or reward.get('count') or reward.get('amount') %} × {{ reward.get('quantity') or reward.get('count') or reward.get('amount') }}{% endif %}{% else %}{{ reward }}{% endif %}{{ '、' if not loop.last else '' }}{% endfor %}</p>{% endif %}
+  {% else %}<p>每日宝箱尚未查询。</p>{% endfor %}
+  <p>本人每日自动开箱：{{ '已开启' if policy.auto_chest else '未开启' }}。{% if policy.auto_chest and resources.chest_auto.get('day') == resources.game_day %}今日已自动尝试 {{ resources.chest_auto.get('count', 0) }}/3 次。{% if resources.chest_auto.get('count', 0) >= 3 %}如仍未领取，可手动重试或等待明日。{% endif %}{% endif %}</p>
+  <form method="post" action="/runtime/estate/resources/action" class="estate-action-grid" data-partial-card-refresh data-loading-message="正在提交洞府操作">
+    <button type="submit" name="action" value="refresh" {% if resources.request_active %}disabled{% endif %}>刷新资源</button><button type="submit" name="action" value="chest_status" {% if resources.request_active %}disabled{% endif %}>查询本人宝箱</button>
+    <button type="submit" name="action" value="chest_open" {% if resources.request_active %}disabled{% endif %}>领取本人宝箱</button>
+    <button type="submit" name="action" value="repair" {% if resources.request_active %}disabled{% endif %}>按预算修理</button><button type="submit" name="action" value="meditation" {% if resources.request_active %}disabled{% endif %}>按策略结算静室</button>
+    <button type="submit" name="action" value="sermon" {% if resources.request_active %}disabled{% endif %}>按策略布道</button>
     {% if resources.request_status == 'needs_review' %}<button name="action" value="acknowledge">我已核对，解除待核对状态</button>{% endif %}
   </form>
+  </div>
+  <h3>每日宝箱 · 自动领取</h3>
+  <p>开启下方“每日自动领取本人宝箱”后，每天自动领取并核对奖励；已领取当天跳过。也可点击“领取本人宝箱”立即领取。</p>
+  <p class="muted">这是每日宝箱，和下方的寻宝小游戏分别结算。访客开箱次数在各个洞府之间共享，与本人宝箱分开计算。</p>
+  <details><summary>查询其他洞府的宝箱</summary>
+    <form method="post" action="/runtime/estate/resources/action" class="stack-list" data-partial-card-refresh data-loading-message="正在查询宝箱">
+      <input type="hidden" name="action" value="chest_status">
+      <label>拜访角色ID（本人留空）<input name="owner_id" inputmode="numeric" pattern="[0-9]{1,20}" maxlength="20"></label>
+      <button type="submit">查询宝箱状态</button>
+    </form>
+  </details>
   <details><summary>资源策略</summary>
-    <form method="post" action="/runtime/estate/resources/policy" class="stack-list">
+    <form method="post" action="/runtime/estate/resources/policy" class="stack-list" data-partial-card-refresh data-loading-message="正在保存资源策略">
+      <label><input type="checkbox" name="auto_chest" value="1" {% if policy.auto_chest %}checked{% endif %}>每日自动领取本人宝箱</label>
+      <p>自动开箱无需开启资源观测。失败后间隔15分钟再试，每天最多自动尝试3次；结果待核对时停止，避免重复提交。</p>
       <label><input type="checkbox" name="observe_enabled" value="1" {% if policy.observe_enabled %}checked{% endif %}>每15分钟观测资源</label>
       <label>耐久低于 <input type="number" name="durability_threshold" min="0" max="100" value="{{ policy.durability_threshold }}"> 时告警</label>
       <label><input type="checkbox" name="auto_repair" value="1" {% if policy.auto_repair %}checked{% endif %}>观测后按预算自动修理</label>
@@ -29,13 +54,6 @@
       <label>保留灵气 <input type="number" name="lingqi_reserve" min="0" value="{{ policy.lingqi_reserve }}"></label>
       <label><input type="checkbox" name="skip_full_sermon" value="1" {% if policy.skip_full_sermon %}checked{% endif %}>信仰、稳定、人口全满时跳过布道</label>
       <button type="submit">保存策略</button>
-    </form>
-  </details>
-  <details><summary>宝箱交互</summary><p>访客额度共享，独立于本人宝箱。开箱使用游戏客户端当前生成的 date、slot、position、controlMode；不根据种子猜坐标。</p>
-    <form method="post" action="/runtime/estate/resources/action" class="stack-list">
-      <label>拜访角色ID（本人留空）<input name="owner_id"></label>
-      <label>当前交互请求（不含登录凭据）<textarea name="interaction">{}</textarea></label>
-      <button name="action" value="chest_status">查询状态</button><button name="action" value="chest_open">核验并开箱</button>
     </form>
   </details>
 </section>

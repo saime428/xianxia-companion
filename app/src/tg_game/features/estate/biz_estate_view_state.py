@@ -424,7 +424,7 @@ def default_estate_miniapp_hunt() -> dict:
         "status": "not_requested",
         "status_label": "未执行",
         "updated_at": "-",
-        "strategy_label": "循线索找主宝匣",
+        "strategy_label": "奖励优先，用完神识",
         "automation_status": "未启动",
         "automation_runs": 0,
         "automation_total_loot": [],

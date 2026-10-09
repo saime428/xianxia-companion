@@ -9,6 +9,7 @@ from tg_game.clients.asc_client import (
     get_cultivator,
 )
 from tg_game.config import get_settings
+from tg_game.features.sword import biz_sword_formation
 from tg_game.services import profile_rebirth
 from tg_game.storage import Storage
 
@@ -247,6 +248,7 @@ def sync_external_account(
     should_rebootstrap_token = bool(cookie_text) and (
         not stored_api_token or normalize_external_cookie(cookie_text) != stored_cookie
     )
+    fetch_started_at = time.time()
     payload, resolved_identifier, refreshed_cookie, refreshed_token = fetch_cultivator_payload(
         normalized_cookie,
         profile,
@@ -268,6 +270,9 @@ def sync_external_account(
         storage.set_external_cookie_override(persisted_cookie)
     _sync_equipped_artifacts(storage, profile_id, payload)
     _start_rebirth_if_escaped_soul(storage, profile_id, payload)
+    biz_sword_formation.sync_auto_tasks_from_payload(
+        storage, profile_id, payload, observed_at=fetch_started_at,
+    )
     return payload if isinstance(payload, dict) else {}
 
 

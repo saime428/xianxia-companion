@@ -126,6 +126,9 @@ WORLD_BOSS_HTTP_OBSERVATION_KEYS = frozenset({
     "request_resumed_monotonic_ms", "request_clock_step_ms",
     "http_response_headers_monotonic_ms", "http_server_date_unix_ms",
     "http_cf_ray", "http_server_timing_cf_edge_ms", "http_server_timing_cf_origin_ms",
+    "http_server_timing_edge_ms", "http_server_timing_origin_ms", "http_server_timing_cf_worker_ms",
+    "http_request_headers_sent_monotonic_ms", "http_request_body_sent_monotonic_ms",
+    "http_local_port", "http_peer_ip", "http_peer_port", "event_loop_lag_max_ms",
     "http_tcp_sample_monotonic_ms", "http_tcp_rtt_ms", "http_tcp_rttvar_ms",
     "http_tcp_last_data_recv_age_ms",
     "http_tcp_total_retrans",
@@ -162,6 +165,8 @@ def _response_tcp_observations(response, timing):
             "http_tcp_total_retrans": retrans,
             "http_tcp_last_data_recv_age_ms": recv_age,
         })
+        local, peer = sock.getsockname(), sock.getpeername()
+        timing.update(http_local_port=int(local[1]), http_peer_ip=str(peer[0]), http_peer_port=int(peer[1]))
     except Exception:
         # Missing/closed sockets or unsupported transports must not affect combat.
         return
@@ -187,11 +192,12 @@ def _response_observations(headers, timing):
     server_timing = headers.get("Server-Timing", "")
     if len(server_timing) <= 2048:
         for item in server_timing.split(",")[:16]:
-            match = re.fullmatch(r"\s*(cfEdge|cfOrigin)\s*;\s*dur=([0-9]+(?:\.[0-9]+)?)\s*", item)
+            match = re.fullmatch(r"\s*(cfEdge|cfOrigin|edge|origin|cfWorker)\s*;\s*dur=([0-9]+(?:\.[0-9]+)?)\s*", item)
             if match:
                 duration = float(match[2])
                 if math.isfinite(duration) and 0 <= duration <= 60000:
-                    key = "cf_edge" if match[1] == "cfEdge" else "cf_origin"
+                    key = {"cfEdge": "cf_edge", "cfOrigin": "cf_origin", "edge": "edge",
+                           "origin": "origin", "cfWorker": "cf_worker"}[match[1]]
                     timing["http_server_timing_" + key + "_ms"] = duration
 
 
@@ -349,6 +355,9 @@ def _json_post_with_client(client, origin, path, payload, timeout, *, timing=Non
             timing[key] = round(timing.get(key, 0) + max(0, now - phase_starts.pop(phase)) * 1000, 3)
             if phase == "receive_response_headers" and status == "complete":
                 timing["http_response_headers_monotonic_ms"] = round(now * 1000, 3)
+            if phase in {"send_request_headers", "send_request_body"} and status == "complete":
+                part = "headers" if phase == "send_request_headers" else "body"
+                timing["http_request_" + part + "_sent_monotonic_ms"] = round(now * 1000, 3)
     request_timeout = max(0.2, min(60.0, float(timeout)))
     try:
         with client.stream(
@@ -451,9 +460,24 @@ async def _post_json(origin, path, payload, timeout, *, post_json=None,
 
         submitted = time.monotonic()
         submitted_unix = time.time()
+        loop = asyncio.get_running_loop()
+        probe_deadline, loop_lag_ms, probe = loop.time() + 0.05, 0.0, None
+
+        def sample_loop():
+            nonlocal probe_deadline, loop_lag_ms, probe
+            now = loop.time()
+            loop_lag_ms = max(loop_lag_ms, (now - probe_deadline) * 1000)
+            probe_deadline = now + 0.05
+            probe = loop.call_at(probe_deadline, sample_loop)
+
+        if timing is not None:
+            probe = loop.call_at(probe_deadline, sample_loop)
         try:
-            result = await asyncio.get_running_loop().run_in_executor(executor, send)
+            result = await loop.run_in_executor(executor, send)
         finally:
+            if probe is not None:
+                probe.cancel()
+                loop_lag_ms = max(loop_lag_ms, (loop.time() - probe_deadline) * 1000)
             recorded = worker_times.copy()
             resumed = time.monotonic()
             # Copy allowlisted observations on the event loop only. A cancelled await
@@ -465,6 +489,7 @@ async def _post_json(origin, path, payload, timeout, *, post_json=None,
                     request_started_monotonic_ms=round(submitted * 1000, 3),
                     request_resumed_monotonic_ms=round(resumed * 1000, 3),
                     request_clock_step_ms=round(((time.time() - submitted_unix) - (resumed - submitted)) * 1000, 3),
+                    event_loop_lag_max_ms=round(loop_lag_ms, 3),
                 )
                 started = recorded.get("started")
                 finished = recorded.get("finished")

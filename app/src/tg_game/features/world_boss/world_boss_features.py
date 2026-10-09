@@ -227,7 +227,9 @@ def _diagnostic_value(value: Any, *, depth: int = 0) -> Any:
         return "<truncated>"
     if isinstance(value, dict):
         result: dict[str, Any] = {}
-        for raw_key, raw_value in list(value.items())[:40]:
+        # Request phase and socket observations must survive bounded persistence.
+        limit = 64 if "request_started_monotonic_ms" in value else 40
+        for raw_key, raw_value in list(value.items())[:limit]:
             key = str(raw_key or "")[:80]
             normalized = re.sub(r"[^a-z0-9]", "", key.lower())
             if any(part in normalized for part in WORLD_BOSS_DIAGNOSTIC_SENSITIVE_PARTS):

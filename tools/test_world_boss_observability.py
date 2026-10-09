@@ -87,6 +87,13 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(timing['http_tcp_total_retrans'], 0)
             self.assertGreaterEqual(timing['http_tcp_rtt_ms'], 0)
             self.assertGreaterEqual(timing['http_tcp_last_data_recv_age_ms'], 0)
+            self.assertEqual(timing['http_peer_ip'], '127.0.0.1')
+            self.assertEqual(timing['http_peer_port'], server.server_port)
+            self.assertGreater(timing['http_local_port'], 0)
+            self.assertLessEqual(timing['http_request_headers_sent_monotonic_ms'],
+                                 timing['http_request_body_sent_monotonic_ms'])
+            self.assertLessEqual(timing['http_request_body_sent_monotonic_ms'],
+                                 timing['http_response_headers_monotonic_ms'])
         finally:
             server.shutdown()
             thread.join(2)
@@ -181,6 +188,43 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('http_server_date_unix_ms', timing)
                 self.assertNotIn('http_server_timing_cf_origin_ms', timing)
                 self.assertNotIn('http_server_timing_cf_edge_ms', timing)
+
+    async def test_modern_server_timing_names_are_separate_and_bounded(self):
+        timing = {}
+        support._response_observations({'Server-Timing':
+            'edge;dur=20, origin;dur=100, cfWorker;dur=7, cfEdge;dur=2, '
+            'secret;desc="do-not-save", origin;dur=999999, cfWorker;dur=NaN'}, timing)
+        self.assertEqual(timing, {'http_server_timing_edge_ms': 20,
+            'http_server_timing_origin_ms': 100, 'http_server_timing_cf_worker_ms': 7,
+            'http_server_timing_cf_edge_ms': 2})
+
+    async def test_expanded_request_metadata_survives_bounded_storage(self):
+        trace = {f'phase_{i}': i for i in range(39)}
+        trace.update(request_started_monotonic_ms=1, http_local_port=12345,
+                     http_peer_ip='192.0.2.1', event_loop_lag_max_ms=80, cookie='do-not-save')
+        saved = boss._diagnostic_value({'request': trace})['request']
+        self.assertEqual(saved['http_local_port'], 12345)
+        self.assertEqual(saved['event_loop_lag_max_ms'], 80)
+        self.assertNotIn('cookie', saved)
+        self.assertLessEqual(len(saved), 64)
+
+    async def test_loop_probe_detects_local_stall_and_does_not_wait_for_network(self):
+        timing = {}
+        def slow_request(*args, **kwargs):
+            time.sleep(.2)
+            return {'ok': True}
+        loop = asyncio.get_running_loop()
+        with patch.object(support, '_json_post_sync', side_effect=slow_request):
+            blocker = loop.call_later(.02, time.sleep, .12)
+            try:
+                result = await support._post_json(support.ORIGIN, support.API_PREFIX+'hit', {}, 1, timing=timing)
+            finally:
+                blocker.cancel()
+        self.assertTrue(result['ok'])
+        self.assertGreater(timing['event_loop_lag_max_ms'], 50)
+        saved = dict(timing)
+        await asyncio.sleep(.06)
+        self.assertEqual(timing, saved)
 
     async def test_wall_clock_step_does_not_change_elapsed_duration(self):
         fake_time = SimpleNamespace(monotonic=time.monotonic, time=iter((1000.0, 999.0)).__next__)
