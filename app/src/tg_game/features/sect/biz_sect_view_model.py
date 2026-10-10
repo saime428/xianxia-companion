@@ -37,7 +37,7 @@ SECT_RELATED_KEYWORDS = {
     "古剑门",
 }
 
-NO_SECT_NAMES = {"散修", "未入宗门", "无宗门", "无", "暂无"}
+NO_SECT_NAMES = biz_sect_game.NO_SECT_NAMES
 
 
 def _now_ts(now_ts: Optional[float] = None) -> float:

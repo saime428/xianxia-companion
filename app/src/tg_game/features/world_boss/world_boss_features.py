@@ -118,6 +118,16 @@ WORLD_BOSS_HOLD_MAX_MS = 1250
 WORLD_BOSS_HOLD_SKEW_SAMPLE_MAX_MS = 700
 WORLD_BOSS_HOLD_SKEW_HISTORY_SIZE = 5
 WORLD_BOSS_HOLD_SKEW_WEIGHT = 0.35
+# 2026-10-10: the game server itself answered 200..850ms late on 24 of 96 charge/hit
+# requests (time in headers wait; RTT 2..9ms, no retransmits, pool warm).  A late /hit
+# lengthens the server hold and a late /charge-start shortens it.  Neither is clock
+# skew, yet the controller learned them and pulled one account's plan from 1166 to
+# ~1000ms.  Skip a sample whose error is covered by how much slower its own requests
+# were than this battle's median so far, at most SKIP_LIMIT times in a row: a route
+# that stays slow is still learned (and its median rises, so the excess vanishes).
+WORLD_BOSS_HOLD_FEEDBACK_SPIKE_MS = 100
+WORLD_BOSS_HOLD_FEEDBACK_SLACK_MS = 30
+WORLD_BOSS_HOLD_FEEDBACK_SKIP_LIMIT = 2
 WORLD_BOSS_HOLD_PLAN_MIN_MS = WORLD_BOSS_HOLD_MIN_MS + 40
 WORLD_BOSS_HOLD_PLAN_MAX_MS = WORLD_BOSS_HOLD_MAX_MS - 40
 # The charge request's latency already counts towards the hold, because the press
@@ -533,6 +543,8 @@ class WorldBossMonitor:
         self._hold_skew_ms = 0.0
         self._hold_skew_samples: list[float] = []
         self._pending_hold_spike = False
+        self._request_spike_skips = 0
+        self._request_duration_samples: list[float] = []
         self._new_handler: Any = None
         self._edit_handler: Any = None
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -1875,6 +1887,8 @@ class WorldBossMonitor:
         self._hold_skew_ms = 0.0
         self._hold_skew_samples = []
         self._pending_hold_spike = False
+        self._request_spike_skips = 0
+        self._request_duration_samples = []
 
     @staticmethod
     def _numeric_hold(value: Any) -> float | None:
@@ -1936,7 +1950,20 @@ class WorldBossMonitor:
         )
         return sample
 
-    def _observe_hold_feedback(self, server_hold_ms, local_hold_ms, *, late_delta_ms, perfect_ms):
+    def _request_excess_ms(self, *traces) -> float | None:
+        """Return how much slower this window's requests ran than the battle's earlier median."""
+        durations = [self._finite_ms((trace or {}).get("total_duration_ms")) for trace in traces]
+        durations = [value for value in durations if value is not None and value >= 0]
+        history = self._request_duration_samples
+        baseline = statistics.median(history) if len(history) >= 2 else None
+        history.extend(durations)
+        if baseline is None or not durations:
+            return None
+        return max(0.0, max(durations) - baseline)
+
+    def _observe_hold_feedback(
+        self, server_hold_ms, local_hold_ms, *, late_delta_ms, perfect_ms, request_excess_ms=None
+    ):
         """Defer an extreme late-hit error until the next sample corroborates it.
 
         Moderate errors retain the original immediate adaptation. A repeated
@@ -1956,8 +1983,18 @@ class WorldBossMonitor:
                 feedback = "repeated_late_hit_skew"
             else:
                 self._pending_hold_spike = False
+                if (
+                    request_excess_ms is not None
+                    and request_excess_ms >= WORLD_BOSS_HOLD_FEEDBACK_SPIKE_MS
+                    and abs(error) <= request_excess_ms + WORLD_BOSS_HOLD_FEEDBACK_SLACK_MS
+                    and self._request_spike_skips < WORLD_BOSS_HOLD_FEEDBACK_SKIP_LIMIT
+                ):
+                    # The error is explained by this window's own slow request(s).
+                    self._request_spike_skips += 1
+                    return None, "request_spike_skipped"
         else:
             self._pending_hold_spike = False
+        self._request_spike_skips = 0
         self._timing.observe_hold(server_hold_ms, local_hold_ms)
         return self._record_hold_skew(server_hold_ms, local_hold_ms), feedback
 
@@ -2813,8 +2850,12 @@ class WorldBossMonitor:
                 server_delta_ms if arrival_inference is not None
                 and arrival_inference.get("direction") == "late" else None
             )
+            request_excess_ms = self._request_excess_ms(
+                request_trace, charge_trace if charge_required else None
+            )
             hold_skew_sample_ms, hold_feedback = self._observe_hold_feedback(
                 server_hold_ms, hold_ms, late_delta_ms=late_delta_ms, perfect_ms=window["perfectMs"],
+                request_excess_ms=request_excess_ms,
             )
             diagnostic.update(
                 {
@@ -2825,6 +2866,7 @@ class WorldBossMonitor:
                     "accepted_perfect": accepted_perfect,
                     "server_hit": _diagnostic_value(hit),
                     "hold_feedback": hold_feedback,
+                    "request_excess_ms": None if request_excess_ms is None else round(request_excess_ms, 1),
                 }
             )
             if server_hold_ms is not None:

@@ -223,6 +223,12 @@ PYTHONPATH=app/src .venv/bin/python -B -m tg_game.features.world_boss.world_boss
   .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('wild_experience_report:<id>','{\"enabled\": true}',time.time()));c.commit()"
   ```
 
+- **某个号不参加野外历练**（诸元神巡令统一托管时跳过这个号，其余号照常）：写 `1` 关闭，删掉这条或写 `0` 恢复。
+
+  ```bash
+  .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('wild_experience_disabled:<id>','1',time.time()));c.commit()"
+  ```
+
 - **自动抢 LDC 红包**（群里有人 `.发红包` 后 bot 发的【LDC 红包】，抢到的 LDC 进这个号绑定的 linux.do 论坛账户，先私聊 bot 发 `.绑定论坛 论坛ID 论坛用户名` 绑好）：只抢总额大于 `min_total`、至少 2 份的包；不抢第一个，看到别人抢到了、还有剩余，才随机等 `delay` 秒点一次；没人抢的包不碰；讨红包的按钮一律不碰。每次点完把 bot 的回复发到这个号的收藏夹。bot 回复里出现「绑定」「天牢」「封禁」，或者天道封禁点了这个号，会自动关掉开关。日志前缀 `LDC抢红包`：
 
   ```bash

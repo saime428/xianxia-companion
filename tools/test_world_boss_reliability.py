@@ -150,6 +150,41 @@ class ReliabilityChecks(unittest.IsolatedAsyncioTestCase):
             finally:
                 await monitor.stop()
 
+    async def test_isolated_request_spikes_do_not_shrink_later_holds(self):
+        # 2026-10-10: the server answered single requests 200..850ms late between
+        # normal ones.  Those windows must not teach the controller a shorter hold.
+        clock = Clock()
+        server = replay.TimedServer(clock)
+        server.starts_at = 0
+        server.windows = [dict(window(i, 2000 + 3500 * i), perfectMs=210) for i in range(8)]
+        spikes = {server.windows[2]['id'], server.windows[5]['id']}
+
+        async def post(origin, path, payload, timeout):
+            if path.endswith('/hit') and payload.get('windowId') in spikes:
+                await clock.sleep(.25)
+            return await server.post(origin, path, payload, timeout)
+
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, _ = monitor_for(Path(directory), clock)
+            monitor.post_json = post
+            monitor._timing = CombatTiming(rng=random.Random(0))
+            monitor._start_combat(server.challenge, {'maxHp': 100}, 0, server.windows)
+            hits = []
+            try:
+                for index, target in enumerate(server.windows):
+                    result = await clock.run(monitor._hit_window(
+                        ENTRY, 'offline', 'offline', 'offline', 0, target, index))
+                    hits.append(result['diagnostic'])
+                self.assertEqual([h['hold_feedback'] for h in hits],
+                                 ['observed'] * 2 + ['request_spike_skipped'] + ['observed'] * 2
+                                 + ['request_spike_skipped'] + ['observed'] * 2, hits)
+                self.assertGreaterEqual(hits[2]['request_excess_ms'], 200)
+                self.assertLess(abs(monitor._hold_skew_ms), 20, hits)
+                for h in hits[3:5] + hits[6:]:
+                    self.assertLess(abs(h['server_hold_ms'] - h['hold_ms']), 40, h)
+            finally:
+                await monitor.stop()
+
     async def test_token_replacement_does_not_bypass_retry_after(self):
         clock, calls = Clock(), []
         delay = 3
@@ -426,6 +461,31 @@ class DistributionChecks(unittest.TestCase):
             monitor._observe_hold_feedback(1000, 1000, late_delta_ms=None, perfect_ms=210)
             self.assertFalse(monitor._pending_hold_spike)
             _, state = monitor._observe_hold_feedback(1500, 1000, late_delta_ms=400, perfect_ms=210)
+            self.assertEqual(state, 'late_hit_spike_pending')
+
+    def test_request_spike_feedback_is_skipped_at_most_twice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, _ = monitor_for(Path(directory), Clock())
+            # 10-10 丙真人第 5/7 击：请求比本场基线慢 273/186 ms，误差 275/166 都在多出的耗时之内。
+            for excess, error in ((273, 275), (186, 166)):
+                _, state = monitor._observe_hold_feedback(
+                    1000 + error, 1000, late_delta_ms=200, perfect_ms=210, request_excess_ms=excess)
+                self.assertEqual(state, 'request_spike_skipped')
+            self.assertEqual(monitor._hold_skew_ms, 0.0)
+            # A third spike in a row is learned: a route that stays slow is real.
+            _, state = monitor._observe_hold_feedback(
+                1200, 1000, late_delta_ms=200, perfect_ms=210, request_excess_ms=250)
+            self.assertEqual(state, 'observed')
+            self.assertGreater(monitor._hold_skew_ms, 0)
+            # A normal sample resets the streak; an error the request cannot explain is learned.
+            monitor._observe_hold_feedback(1000, 1000, late_delta_ms=None, perfect_ms=210)
+            for excess, error in ((50, 150), (None, 150), (200, 400)):
+                _, state = monitor._observe_hold_feedback(
+                    1000 + error, 1000, late_delta_ms=100, perfect_ms=210, request_excess_ms=excess)
+                self.assertEqual(state, 'observed', (excess, error))
+            # The 10-04 extreme rule still wins over the request rule.
+            _, state = monitor._observe_hold_feedback(
+                1500, 1000, late_delta_ms=400, perfect_ms=210, request_excess_ms=600)
             self.assertEqual(state, 'late_hit_spike_pending')
 
     def test_reentering_same_battle_does_not_clear_concurrent_death(self):

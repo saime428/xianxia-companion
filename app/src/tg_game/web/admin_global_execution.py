@@ -454,6 +454,10 @@ def _start_wild_experience_item(
 ) -> None:
     item["scheduled_at"] = time.time()
     item["phase"] = "queued"
+    if storage.get_runtime_state(f"wild_experience_disabled:{int(profile.id)}") == "1":
+        item["status"] = "skipped"
+        item["reward"] = "该角色已关闭野外历练"
+        return
     account, payload = _load_external(storage, profile.id)
     if not _profile_ready(profile, account, item):
         item["status"] = "failed"

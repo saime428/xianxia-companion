@@ -246,8 +246,14 @@ def _normalize_bool(value):
     return 1 if bool(value) else 0
 
 
+# 天机阁给没有宗门的人物返回「散修」，面板也可能写「未入宗门」；对宗门自动任务来说都是没有宗门。
+# 10-10 甲真人退宗后旧代码把「散修」当成一个宗门，自动点卯每 15 分钟重发了一上午。
+NO_SECT_NAMES = {"散修", "未入宗门", "无宗门", "无", "暂无"}
+
+
 def _normalize_sect_name_text(value: str) -> str:
-    return str(value or "").replace("【", "").replace("】", "").strip()
+    text = str(value or "").replace("【", "").replace("】", "").strip()
+    return "" if text in NO_SECT_NAMES else text
 
 
 def _is_same_sect_name(current_name: str, expected_name: str) -> bool:
@@ -3395,6 +3401,13 @@ def parse_message(text):
             "teach_progress": teach_progress,
         }
 
+    if "散修无需" in text:
+        # 「散修无需点卯，速速寻一宗门拜入吧。」退宗后机器人对点卯/传功的回包。
+        return {
+            "event": "sect_no_sect",
+            "summary": "机器人提示人物已无宗门，关闭全部宗门自动任务",
+        }
+
     if "点卯成功" in text or "今日已点卯" in text:
         parts = ["宗门点卯完成"]
         if bonus is not None:
@@ -5684,6 +5697,9 @@ async def handle_bot_message(event, db, client=None, profile_id=None, profile=No
             update_fields["sect_checkin_next_check_source"] = (
                 f"今日已点卯，等待次日 {SECT_AUTO_WINDOW_START_TIME}-{SECT_AUTO_WINDOW_END_TIME} 随机执行"
             )
+    elif parsed["event"] == "sect_no_sect":
+        # 不等天机阁缓存刷新，收到回包就按「无宗门」关掉全部宗门自动任务。
+        update_fields.update(_build_sect_auto_guard_updates(session, "", now))
     elif parsed["event"] == "sect_teach":
         teach_count = int(teach_progress[0]) if teach_progress else 0
         update_fields["last_teach_date"] = current_date_key(now)

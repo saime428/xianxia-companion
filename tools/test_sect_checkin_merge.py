@@ -54,3 +54,12 @@ run_case(None, today, True, today)
 run_case("2000-01-01", "2000-01-02", False, "2000-01-02")
 
 print("ok")
+
+# 无宗门标签必须关闭点卯，正常宗门仍保留开关。
+for sect in ("", "散修", "【散修】", "未入宗门", "无宗门", "无", "暂无"):
+    updates = g._build_sect_auto_guard_updates({"auto_sect_checkin_enabled": 1}, sect, now=12345)
+    assert updates["auto_sect_checkin_enabled"] == 0, (sect, updates)
+for sect in ("合欢宗", "落云宗"):
+    updates = g._build_sect_auto_guard_updates({"auto_sect_checkin_enabled": 1}, sect, now=12345)
+    assert "auto_sect_checkin_enabled" not in updates, (sect, updates)
+print("无宗门点卯保护检查通过")

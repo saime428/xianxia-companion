@@ -393,6 +393,24 @@ def test_protected_tianxing_profile_goes_deep():
         assert age.wild_experience_strategy(storage, plain.id, "谨慎") == "谨慎"
 
 
+def test_global_wild_disable_is_per_profile():
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+
+    storage = Mock()
+    storage.get_runtime_state.side_effect = lambda key: "1" if key == "wild_experience_disabled:2" else ""
+    storage.get_profile.side_effect = lambda profile_id: SimpleNamespace(id=profile_id)
+    items = [{"profile_id": profile_id, "status": "pending"} for profile_id in (2, 3, 4)]
+    with patch.object(age, "_load_external", return_value=(None, {})) as load, patch.object(
+        age, "_profile_ready", return_value=False
+    ):
+        age._dispatch_next_wild_experience_item(storage, items, strategy="谨慎")
+    assert items[0]["status"] == "skipped", items
+    assert items[0]["reward"] == "该角色已关闭野外历练", items
+    assert [call.args[1] for call in load.call_args_list] == [3, 4]
+    storage.update_external_account_payload.assert_not_called()
+
+
 def main():
     for name, case in sorted(globals().items()):
         if name.startswith("test_") and callable(case):
