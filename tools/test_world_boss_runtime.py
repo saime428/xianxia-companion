@@ -272,6 +272,8 @@ def main():
                             assert not fails and result["ok"]
                         except support.MiniAppBeastError as exc:
                             assert fails and exc.code == "server_error"
+                    # The loop-lag probe reads the real loop clock, not the injected one.
+                    assert 0 <= timing.pop("event_loop_lag_max_ms") < 1000, timing
                     assert timing == {"executor_queue_ms": 2000.0, "transport_ms": 5000.0,
                                       "loop_resume_ms": 3000.0, "http_headers_wait_ms": 4000.0,
                                       "request_started_unix_ms": 1000000.0, "request_started_monotonic_ms": 100000.0,

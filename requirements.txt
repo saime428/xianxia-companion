@@ -4,7 +4,10 @@ jinja2
 pydantic
 python-multipart
 python-dotenv
-telethon
+# ponytail: pinned to what production runs. 1.45 (layer 229) moved button url/data
+# onto button.type, so every getattr(button, "url"/"data") reader silently gets None.
+# Upgrade path: read through button.type first, then lift the pin.
+telethon==1.44.0
 python-socks[asyncio]
 httpx
 websocket-client>=1.8,<2
