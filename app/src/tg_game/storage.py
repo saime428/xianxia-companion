@@ -705,6 +705,20 @@ class Storage:
                     UNIQUE(chat_id, message_id)
                 );
 
+                -- 群里所有人的观星 / 改换星移 / 天道演化结算；长期留存，不随 bound_messages 清理。
+                CREATE TABLE IF NOT EXISTS fate_evolution_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL DEFAULT 0,
+                    message_id INTEGER NOT NULL DEFAULT 0,
+                    reply_to_msg_id INTEGER NOT NULL DEFAULT 0,
+                    sender_id INTEGER NOT NULL DEFAULT 0,
+                    sender_username TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    UNIQUE(chat_id, message_id)
+                );
+
                 -- 只记录群（config.record_only_chat_ids）的原始消息。和 bound_messages 分表：
                 -- 股市行情等查询不按群过滤，混进去会污染；保留期同 bound_messages。
                 CREATE TABLE IF NOT EXISTS recorded_messages (
@@ -3723,7 +3737,7 @@ class Storage:
                     chat_type or "group",
                     bot_username or "",
                     normalized_feature_key,
-                    str(strategy or "")[:100],
+                    str(strategy or "")[:200],
                     1 if enabled else 0,
                     float(next_run_at or 0),
                     float(last_run_at or 0),
@@ -4044,6 +4058,56 @@ class Storage:
                 row,
             )
             return bool(cursor.rowcount)
+
+    def append_fate_evolution_log(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        kind: str,
+        text: str,
+        reply_to_msg_id: int = 0,
+        sender_id: int = 0,
+        sender_username: str = "",
+        created_at: float = 0,
+    ) -> bool:
+        """记一条天道演化相关的群消息。三个号都会看到同一条，UNIQUE 兜底只记一次。"""
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO fate_evolution_logs (
+                    chat_id, message_id, reply_to_msg_id, sender_id, sender_username,
+                    kind, text, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(chat_id or 0),
+                    int(message_id or 0),
+                    int(reply_to_msg_id or 0),
+                    int(sender_id or 0),
+                    str(sender_username or "")[:64],
+                    str(kind or "")[:20],
+                    str(text or "")[:2000],
+                    float(created_at or time.time()),
+                ),
+            )
+            return bool(cursor.rowcount)
+
+    def list_fate_evolution_logs(
+        self, *, chat_id: Optional[int] = None, since_ts: float = 0, kind: str = ""
+    ) -> list[dict]:
+        """按时间先后列出；chat_id / kind 不给就不过滤。"""
+        query = "SELECT * FROM fate_evolution_logs WHERE created_at>=?"
+        params: list[object] = [float(since_ts or 0)]
+        if chat_id is not None:
+            query += " AND chat_id=?"
+            params.append(int(chat_id))
+        if kind:
+            query += " AND kind=?"
+            params.append(kind)
+        with self.connect() as conn:
+            rows = conn.execute(query + " ORDER BY created_at ASC, id ASC", params).fetchall()
+        return [dict(row) for row in rows]
 
     def add_fishing_casts(self, profile_id: int, rounds: object, *, pond: str = "", bait: str = "") -> int:
         """逐竿记一行（rounds 取自 run_dwelling_fishing_loop_flow 的 data.rounds），返回写了几行。"""

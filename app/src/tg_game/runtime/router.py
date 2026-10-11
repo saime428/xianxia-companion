@@ -11,6 +11,7 @@ from tg_game.runtime.executors import (
     SectExecutor,
     observe_fishing_reply,
     observe_dual_cultivation_result,
+    observe_fate_evolution,
     notify_dual_cultivation_bonus,
     observe_companion_heart_tribulation_event,
     reschedule_artifact_touch_auto_on_reply,
@@ -565,6 +566,10 @@ class Router:
             observe_dual_cultivation_result(context, self.storage)
         except Exception:
             logger.exception("Dual cultivation observer failed")
+        try:
+            observe_fate_evolution(context, self.storage)
+        except Exception:
+            logger.exception("Fate evolution observer failed")
         try:
             observe_ldc_red_packet(context, self.storage)
         except Exception:

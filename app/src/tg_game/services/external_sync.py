@@ -269,6 +269,7 @@ def sync_external_account(
     if is_admin:
         storage.set_external_cookie_override(persisted_cookie)
     _sync_equipped_artifacts(storage, profile_id, payload)
+    _sync_sect_info(storage, profile_id, payload)
     _start_rebirth_if_escaped_soul(storage, profile_id, payload)
     biz_sword_formation.sync_auto_tasks_from_payload(
         storage, profile_id, payload, observed_at=fetch_started_at,
@@ -318,6 +319,32 @@ def _sync_equipped_artifacts(storage: Storage, profile_id: int, payload) -> None
     storage.update_profile_game_info(
         profile_id=profile_id,
         artifact_text=format_external_artifacts(payload),
+    )
+
+
+def _sync_sect_info(storage: Storage, profile_id: int, payload) -> None:
+    """把宗门同步进 profiles.sect_name 等列，理由同 _sync_equipped_artifacts。
+
+    星宫 / 万灵宗 / 天星宗的开关和调度都按 profiles.sect_name 认宗门，而这几列原来只有
+    网页登录/刷新会写。10-11 丙真人拜入星宫：侍妾补位每 5 分钟同步一次天机阁，
+    keepalive 的 15 分钟门槛永远到不了，档案停在「散修」，星宫的开关全被挡。
+    """
+    if not isinstance(payload, dict) or "sect_name" not in payload:
+        # 字段缺失时别写：写成空的会把宗门自动任务全关掉
+        return
+    from tg_game.features.sect.biz_sect_metadata import SECT_METADATA
+    from tg_game.web.biz_web_display_formatting import format_sect_position
+
+    sect_name = str(payload.get("sect_name") or "").strip()
+    sect_meta = SECT_METADATA.get(sect_name, {})
+    storage.update_profile_sect_info(
+        profile_id=profile_id,
+        sect_name=sect_name,
+        sect_leader="",
+        sect_position=format_sect_position(payload),
+        sect_description=sect_meta.get("description", ""),
+        sect_bonus_text=sect_meta.get("bonus", ""),
+        sect_contribution_text=str(payload.get("sect_contribution") or "").strip(),
     )
 
 

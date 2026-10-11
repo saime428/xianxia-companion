@@ -627,6 +627,9 @@ def build_module_detail_default_state(
             "dual_cultivation": build_companion_auto_view(
                 None, "dual_cultivation"
             ),
+            "xinggong_divine": build_companion_auto_view(
+                None, "xinggong_divine"
+            ),
         },
         "vase_followup_suggestions": VASE_FOLLOWUP_SUGGESTIONS,
         "pagoda_auto_state": build_pagoda_auto_view(None),

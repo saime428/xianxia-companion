@@ -15,6 +15,7 @@ from tg_game.features.soul.biz_soul_cultivation import SPEC as SOUL_SPEC
 from tg_game.features.sect.biz_taiyi_yindao import SPEC as TAIYI_SPEC
 from tg_game.features.sword.biz_sword_formation import SPEC as SWORD_SPEC
 from tg_game.features.vase.biz_vase_condense import SPEC as VASE_SPEC
+from tg_game.features.xinggong.biz_xinggong_divine import SPEC as DIVINE_SPEC
 
 REQUIRED = (
     "command",
@@ -34,6 +35,7 @@ for name, spec in (
     ("soul", SOUL_SPEC),
     ("dual", DUAL_SPEC),
     ("taiyi", TAIYI_SPEC),
+    ("divine", DIVINE_SPEC),
 ):
     for key in REQUIRED:
         assert key in spec, (name, key)
@@ -54,6 +56,11 @@ assert callable(DUAL_SPEC["reply_target"])
 assert DUAL_SPEC["labels"].get("no_reply_target")
 assert VASE_SPEC["followup"]({"strategy": "养树"}) == (".掌天瓶 养树", 30)
 assert VASE_SPEC["followup"]({"strategy": ""})[0] == ""
+# 只有观星带「按回包内容跟一条回复」和「只在窗口里发」这两个钩子；别的任务不该被它们影响
+for other in (VASE_SPEC, SWORD_SPEC, SOUL_SPEC, DUAL_SPEC, TAIYI_SPEC):
+    assert "reply_followup" not in other and "send_gate" not in other
+assert callable(DIVINE_SPEC["reply_followup"]) and callable(DIVINE_SPEC["send_gate"])
+assert "{followup}" in DIVINE_SPEC["labels"]["success_followup"]
 
 # 元神修炼：成功回包带时长，冷却回包按剩余时长重排
 parse = SOUL_SPEC["parse"]
@@ -298,9 +305,10 @@ for name, spec in (
     ("soul", SOUL_SPEC),
     ("dual", DUAL_SPEC),
     ("taiyi", TAIYI_SPEC),
+    ("divine", DIVINE_SPEC),
 ):
     key = next(k for k, v in REPLY_DRIVEN_AUTO_SPECS.items() if v is spec)
     assert COMPANION_AUTO_FEATURES.get(key, {}).get("command") == spec["command"], name
-assert len(REPLY_DRIVEN_AUTO_SPECS) == 5, sorted(REPLY_DRIVEN_AUTO_SPECS)
+assert len(REPLY_DRIVEN_AUTO_SPECS) == 6, sorted(REPLY_DRIVEN_AUTO_SPECS)
 
 print("ok")

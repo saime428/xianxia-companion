@@ -103,6 +103,7 @@ from tg_game.features.sword import biz_sword_formation as sword_feature
 from tg_game.features.soul import biz_soul_cultivation as soul_feature
 from tg_game.features.harmony import biz_dual_cultivation as dual_feature
 from tg_game.features.sect import biz_taiyi_yindao as taiyi_feature
+from tg_game.features.xinggong import biz_xinggong_divine as divine_feature
 from tg_game.features.tianji_trial import biz_tianji_trial_daily_auto
 from tg_game.features.tianji_trial import biz_tianji_trial_miniapp as tianji_trial_miniapp
 from tg_game.features.tianji_trial import biz_tianji_trial_remnant_state
@@ -358,6 +359,7 @@ REPLY_DRIVEN_AUTO_SPECS = {
     soul_feature.FEATURE_KEY: soul_feature.SPEC,
     dual_feature.FEATURE_KEY: dual_feature.SPEC,
     taiyi_feature.FEATURE_KEY: taiyi_feature.SPEC,
+    divine_feature.FEATURE_KEY: divine_feature.SPEC,
 }
 COMPANION_AUTO_FEATURES = {
     pagoda_auto.FEATURE_KEY: {
@@ -392,6 +394,9 @@ COMPANION_AUTO_FEATURES = {
     },
     taiyi_feature.FEATURE_KEY: {
         "command": taiyi_feature.GUIDE_COMMAND,
+    },
+    divine_feature.FEATURE_KEY: {
+        "command": divine_feature.DIVINE_COMMAND,
     },
     **SIMPLE_COOLDOWN_AUTO_FEATURES,
     ARTIFACT_TOUCH_FEATURE_KEY: {
@@ -2762,6 +2767,38 @@ def observe_dual_cultivation_result(context, storage: Storage) -> bool:
         record=record,
         text=context.text,
         created_at=time.time(),
+    )
+
+
+def observe_fate_evolution(context, storage: Storage) -> bool:
+    """把群里**任何人**的观星、改换星移和天道演化结算存进 fate_evolution_logs。
+
+    两个用处：bound_messages 48 小时就清了，哪一档抢的人少要靠长期样本；
+    自动观星发之前先看别人有没有把这一档观成 Bad（见 biz_xinggong_divine.send_gate）。
+    只读不发，纯记录。
+    """
+    if not context.chat_binding:
+        return False  # 只记绑定的游戏群，别的群和私聊里碰巧同名的指令不记
+    kind = divine_feature.classify_fate_message(context.text)
+    if not kind:
+        return False
+    chat_id = int(context.chat_id or 0)
+    message_id = int(getattr(context.event, "id", 0) or 0)
+    if kind in divine_feature.BOT_ONLY_FATE_KINDS and not context.is_bot_sender:
+        # 星盘、结算、改命回包只认机器人发的：有人转发一条旧的 Bad 星盘，就能骗自动观星跳过这一档。
+        # 路由在调观察器之前已经把消息落库，那里的 is_bot 判得更全（发送者实体没加载时也认得）。
+        profile_id = context.profile.id if context.profile else None
+        if not (storage.get_bound_message(chat_id, message_id, profile_id) or {}).get("is_bot"):
+            return False
+    sender = getattr(context.event, "sender", None)
+    return storage.append_fate_evolution_log(
+        chat_id=chat_id,
+        message_id=message_id,
+        reply_to_msg_id=int(context.reply_to_msg_id or 0),
+        sender_id=int(context.sender_id or 0),
+        sender_username=str(getattr(sender, "username", "") or ""),
+        kind=kind,
+        text=context.text,
     )
 
 
@@ -7783,6 +7820,28 @@ async def _run_companion_auto_scheduler(
                                         ),
                                         delay_seconds=followup_delay,
                                     )
+                            reply_followup = spec.get("reply_followup")
+                            if reply_followup:
+                                # 观星：跟的那条要看回包内容、必须回复在回包上，
+                                # 而且要压到结算前才发（delay 由钩子按回包时刻算）
+                                followup_command, followup_delay = reply_followup(
+                                    task, reply
+                                )
+                                if followup_command:
+                                    storage.enqueue_outgoing_command(
+                                        profile_id=int(profile_id),
+                                        chat_id=chat_id,
+                                        text=followup_command,
+                                        thread_id=thread_id,
+                                        reply_to_msg_id=int(reply["message_id"]),
+                                        chat_type=str(
+                                            task.get("chat_type") or "group"
+                                        ),
+                                        bot_username=str(
+                                            task.get("bot_username") or ""
+                                        ),
+                                        delay_seconds=followup_delay,
+                                    )
                             storage.update_companion_auto_task(
                                 task_id,
                                 workflow_state="",
@@ -7819,6 +7878,18 @@ async def _run_companion_auto_scheduler(
                             last_error=labels["unknown"],
                         )
                         continue
+                    send_gate = spec.get("send_gate")
+                    if send_gate:
+                        # 观星：只在可用档结算前的窗口里发，其余时候（刚开开关、重试、
+                        # 调度被耽搁、别人的星盘已经说这档是 Bad）推到钩子给的时刻
+                        gate_at, gate_reason = send_gate(storage, task, now)
+                        if gate_at > now:
+                            storage.update_companion_auto_task(
+                                task_id,
+                                next_run_at=gate_at,
+                                last_error=gate_reason or labels["pending"],
+                            )
+                            continue
                     reply_to_msg_id = None
                     reply_target_hook = spec.get("reply_target")
                     if reply_target_hook:

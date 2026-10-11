@@ -58,6 +58,10 @@ from tg_game.features.sect.biz_taiyi_yindao import (
     FEATURE_KEY as TAIYI_YINDAO_FEATURE_KEY,
     normalize_element as normalize_yindao_element,
 )
+from tg_game.features.xinggong.biz_xinggong_divine import (
+    FEATURE_KEY as XINGGONG_DIVINE_FEATURE_KEY,
+    build_strategy as build_divine_strategy,
+)
 # 冷却不在天机阁 payload 里的功能，以执行器的注册表为准，别再另抄一份
 from tg_game.runtime.executors import REPLY_DRIVEN_AUTO_SPECS
 from tg_game.features.companion.biz_companion_voyage import (
@@ -5128,6 +5132,9 @@ def create_app() -> FastAPI:
         vase_apply_only: str = Form(""),
         element: str = Form(""),
         yindao_apply_only: str = Form(""),
+        divine_target: str = Form(""),
+        divine_slots: str = Form(""),
+        divine_events: Optional[list[str]] = Form(None),
         chat_type: str = Form("group"),
         bot_username: str = Form("fanrenxiuxian_bot"),
         redirect_to: str = Form("/modules/other"),
@@ -5372,7 +5379,11 @@ def create_app() -> FastAPI:
                 extra_fields["strategy"] = normalize_vase_followup(vase_followup)
             elif normalized_feature_key == TAIYI_YINDAO_FEATURE_KEY:
                 extra_fields["strategy"] = normalize_yindao_element(element)
-            storage.upsert_companion_auto_task(
+            elif normalized_feature_key == XINGGONG_DIVINE_FEATURE_KEY:
+                extra_fields["strategy"] = build_divine_strategy(
+                    divine_target, divine_slots, divine_events or ()
+                )
+            task = storage.upsert_companion_auto_task(
                 profile_id=profile.id,
                 chat_id=resolved_chat_id,
                 feature_key=normalized_feature_key,
@@ -5384,6 +5395,9 @@ def create_app() -> FastAPI:
                 last_error="",
                 **extra_fields,
             )
+            # 等回包时被关掉的任务会留着等待状态；不清的话重开后会把关掉前那条旧回包
+            # 当成这次的（观星会去回复一条早已过期的星盘消息）。
+            storage.update_companion_auto_task(task["id"], workflow_state="")
             return RedirectResponse(url=redirect_to, status_code=303)
 
         payload = read_cached_external_payload(storage, profile.id)

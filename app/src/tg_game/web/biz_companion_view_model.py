@@ -21,6 +21,7 @@ from tg_game.features.sword import biz_sword_formation
 from tg_game.features.soul import biz_soul_cultivation
 from tg_game.features.sect import biz_taiyi_yindao
 from tg_game.features.harmony import biz_dual_cultivation
+from tg_game.features.xinggong import biz_xinggong_divine
 from tg_game.features.countdowns.biz_countdowns_view_model import (
     SHANGHAI_TZ,
     format_countdown_display,
@@ -68,6 +69,10 @@ COMPANION_AUTO_FEATURES = {
     biz_dual_cultivation.FEATURE_KEY: {
         "label": "温养双修",
         "command": biz_dual_cultivation.DUAL_COMMAND,
+    },
+    biz_xinggong_divine.FEATURE_KEY: {
+        "label": "星宫观星",
+        "command": biz_xinggong_divine.DIVINE_COMMAND,
     },
     biz_small_world_game.SMALL_WORLD_AUTO_FEATURE_KEY: {
         "label": "小世界",

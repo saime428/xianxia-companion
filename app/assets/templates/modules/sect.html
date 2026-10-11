@@ -672,6 +672,48 @@
     <div class="detail-card">
         <div class="section-header compact">
             <p>星宫</p>
+            <h2>自动观星</h2>
+        </div>
+        {% set divine_auto = companion_auto_state.xinggong_divine %}
+        {% set divine_parts = divine_auto.strategy.split('|') %}
+        {% set divine_target = divine_parts[0] %}
+        {% set divine_slots = divine_parts[1] if divine_parts|length > 1 and divine_parts[1] else '12,15,18,21' %}
+        {% set divine_events = divine_parts[2].split(',') if divine_parts|length > 2 else ['星辰异象', '五彩缤纷', '封魔裂隙回响'] %}
+        {% set divine_event_options = [('星辰异象', '元磁山核·乙'), ('五彩缤纷', '五彩土壤'), ('封魔裂隙回响', '坠魔谷禁制令'), ('天雷竹现世', '天雷竹'), ('地心火脉现世', '天火液丹方'), ('古修洞府现世', '灵石 150 + 二级妖丹 2'), ('灵眼之泉喷涌', '修为 +1000'), ('上古兽魂苏醒', '灵兽经验 +500')] %}
+        <div class="stack-list compact-stack">
+            <div class="kv-row"><span>自动状态</span><strong>{{ divine_auto.automation_state_display }}</strong></div>
+            <div class="kv-row"><span>下次检查</span><strong style="font-family: var(--font-mono);">{{ divine_auto.next_run_display if divine_auto.active else '-' }}</strong></div>
+            <div class="kv-row"><span>改命目标</span><strong>{{ ('@' ~ divine_target) if divine_target else '不改' }}</strong></div>
+            <div class="kv-row"><span>抢哪几档</span><strong style="font-family: var(--font-mono);">{{ divine_slots }} 点</strong></div>
+            <div class="kv-row"><span>只为这些改命</span><strong>{{ divine_events|select|join('、') or '都不改' }}</strong></div>
+        </div>
+        <form class="action-row top-gap" method="post" action="/runtime/commands/companion-auto" style="flex-wrap: wrap; gap: 10px;">
+            <input type="hidden" name="chat_id" value="{{ bound_chat_id }}">
+            <input type="hidden" name="thread_id" value="{{ bound_thread_id or '' }}">
+            <input type="hidden" name="chat_type" value="{{ bound_chat_type or 'group' }}">
+            <input type="hidden" name="bot_username" value="{{ bound_bot_username or 'fanrenxiuxian_bot' }}">
+            <input type="hidden" name="redirect_to" value="/modules/sect">
+            <input type="hidden" name="feature_key" value="xinggong_divine">
+            <input type="text" name="divine_target" value="{{ divine_target }}" placeholder="改命目标用户名，留空只观星" aria-label="改命目标用户名" {% if divine_auto.active %}readonly{% endif %}>
+            <input type="text" name="divine_slots" value="{{ divine_slots }}" placeholder="档位，如 12,15,18,21" aria-label="抢哪几档（3 的倍数点，零点除外）" {% if divine_auto.active %}readonly{% endif %}>
+            <fieldset style="flex-basis: 100%; border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 6px 14px;">
+                <legend class="muted" style="padding: 0; margin-bottom: 4px;">只为勾选的事件改命</legend>
+                {% for event_name, reward in divine_event_options %}
+                <label><input type="checkbox" name="divine_events" value="{{ event_name }}" {% if event_name in divine_events %}checked{% endif %} {% if divine_auto.active %}disabled{% endif %}> {{ event_name }}（{{ reward }}）</label>
+                {% endfor %}
+            </fieldset>
+            <button type="submit" class="inline-button auto-toggle-button{% if divine_auto.active %} active{% endif %}">{{ '关闭自动观星' if divine_auto.active else '开启自动观星' }}</button>
+        </form>
+        {% if divine_auto.last_error %}
+        <p class="muted top-gap">{{ divine_auto.last_error }}</p>
+        {% endif %}
+        <p class="muted top-gap">每天只能观一次。档位里最早的那档是首选，结算前一分钟才发 <code>.观星</code>；观出的事件在勾选的名单里、天命又不在目标身上时，压到结算前 20 秒才回复星盘消息 <code>.改换星移 @目标</code>，让别人来不及再改走。</p>
+        <p class="muted top-gap">改命要烧掉自己约一成修为，成功率 50%，失败不退，也不公布结果，所以只勾值得的。没勾的事件、Bad、没见过的新事件都不改；一个都不勾就是都不改。</p>
+        <p class="muted top-gap">后面的档是后备：首选档的窗口错过了，或者别人已经在那一档公开观出 Bad 或没勾的事件，就顺延到下一档。自己观出不要的结果，当天就没有第二次机会了。档位可填 3、6、9、12、15、18、21；要改先关再开。</p>
+    </div>
+    <div class="detail-card">
+        <div class="section-header compact">
+            <p>星宫</p>
             <h2>星力加持</h2>
         </div>
         {% if xinggong_state.star_formation_view and xinggong_state.star_formation_view.available %}

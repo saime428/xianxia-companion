@@ -211,7 +211,6 @@ from tg_game.web.biz_web_display_formatting import (
     format_market_effects as _format_market_effects,
     format_payload_display_text as _format_payload_display_text,
     format_remaining_delta as _format_remaining_delta,
-    format_sect_position as _format_sect_position,
     parse_chinese_duration_seconds as _parse_chinese_duration_seconds,
     payload_name_list as _payload_name_list,
     payload_name_summary as _payload_name_summary,
@@ -1843,9 +1842,6 @@ def _sync_profile_from_cultivator(
     game_username = (
         cultivator_payload.get("username") or profile.telegram_username or ""
     ).strip()
-    sect_name = (cultivator_payload.get("sect_name") or "").strip()
-    sect_position = _format_sect_position(cultivator_payload)
-    sect_meta = SECT_METADATA.get(sect_name, {})
     stage_caps = {**CULTIVATION_STAGE_CAPS, **(storage.get_level_thresholds() or {})}
     storage.update_profile_game_info(
         profile_id=profile_id,
@@ -1863,17 +1859,7 @@ def _sync_profile_from_cultivator(
         game_name=(cultivator_payload.get("dao_name") or "").strip(),
         account_name=(f"@{game_username.lstrip('@')}" if game_username else ""),
     )
-    storage.update_profile_sect_info(
-        profile_id=profile_id,
-        sect_name=sect_name,
-        sect_leader="",
-        sect_position=sect_position,
-        sect_description=sect_meta.get("description", ""),
-        sect_bonus_text=sect_meta.get("bonus", ""),
-        sect_contribution_text=str(
-            cultivator_payload.get("sect_contribution") or ""
-        ).strip(),
-    )
+    # 宗门那几列由 sync_external_account 写（每次同步都写，不只是网页刷新）
     if game_username:
         storage.bind_profile_telegram_account(
             profile_id,
