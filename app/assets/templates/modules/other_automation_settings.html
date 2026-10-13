@@ -41,4 +41,13 @@
         </form>
         <p class="muted top-gap">重新开启保留当天发送记录，不会重复发送已完成的通知。</p>
     </div>
+    <div class="detail-card">
+        <div class="section-header compact"><p>灵溪垂钓</p><h2>钓满后自动开鱼</h2></div>
+        <p class="muted">当天的竿钓满后，把鱼篓里的鱼都 <code>.开鱼</code>（每种鱼一条指令，含之前攒下的），一天一次。开鱼时间跟着垂钓的固定时间走。</p>
+        <div class="kv-row"><span>上次开鱼</span><strong>{% if automation_settings.fish_open.opened_at %}{{ automation_settings.fish_open.opened_count or 0 }} 条{% else %}尚未开过{% endif %}</strong></div>
+        <form method="post" action="/runtime/automation-settings/fish-open" class="form-grid top-gap">
+            <label class="full-span admin-execution-schedule-toggle"><input type="checkbox" role="switch" name="enabled" value="1" {% if automation_settings.fish_open.enabled %}checked{% endif %}><span>钓满后开鱼</span></label>
+            <button type="submit" class="full-span">保存开鱼设置</button>
+        </form>
+    </div>
 </section>

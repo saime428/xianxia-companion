@@ -423,6 +423,17 @@ def wild_experience_ready_at(payload: dict) -> float | None:
     return resolve_simple_cooldown_next_run_at(payload, WILD_EXPERIENCE_FEATURE_KEY)
 
 
+# 23:30~01:00 不开新一轮（用户 10-14 定：野外历练挪到 01:00 以后）。零点前后留给要定点的——天星宗观命定命、
+# 零点垂钓和开鱼：全局发送上限是 10 分钟 30 条，大号一轮野外历练光每场前的 .推命 .改命 就十几条。
+# 从 23:30 起就不开，是因为 23:5x 开跑的一轮会跨过零点，把新一天的 8 场接着在零点打掉。
+WILD_EXPERIENCE_QUIET_HOURS = ("23:30", "01:00")
+
+
+def wild_experience_quiet(current_time: str) -> bool:
+    start, end = WILD_EXPERIENCE_QUIET_HOURS
+    return current_time >= start or current_time < end
+
+
 def wild_experience_batch_due(
     ready_times: list,
     last_started_at: object,
@@ -689,7 +700,7 @@ def run_due_schedule(
         disable_profile_automations(storage, kind, profiles)
         if kind == "wild_experience":
             # 3 小时冷却制，不再是每天 run_time 跑一次
-            if not wild_experience_batch_due(
+            if wild_experience_quiet(current_time) or not wild_experience_batch_due(
                 [
                     wild_experience_ready_at(
                         _load_external(storage, int(profile.id))[1]

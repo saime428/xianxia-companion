@@ -126,6 +126,9 @@ def test_batch_due_follows_cooldown_not_clock():
     assert not age.wild_experience_batch_due([now - 1], now - 60, now)
     # 天机阁没这个字段时不开跑
     assert not age.wild_experience_batch_due([None], started, now)
+    # 零点前后不开新一轮：留给要定点的（观命定命、零点垂钓和开鱼），01:00 以后照常
+    assert [age.wild_experience_quiet(t) for t in ("23:29", "23:30", "23:59", "00:00", "00:59", "01:00", "12:00")] == [
+        False, True, True, True, True, False, False]
 
 
 def _fight_payload(**wild_fields) -> dict:

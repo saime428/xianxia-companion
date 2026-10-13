@@ -6,7 +6,8 @@ from tg_game.features import biz_ldc_red_packet as ldc
 from tg_game.features.stock import biz_stock_miniapp as stock
 
 
-FEATURE_PAGES = {"fate-cards": "other", "ldc-red-packet": "other", "wild-report": "other", "stock-schedule": "stock"}
+FEATURE_PAGES = {"fate-cards": "other", "ldc-red-packet": "other", "wild-report": "other", "fish-open": "other",
+                 "stock-schedule": "stock"}
 CHOICES = {"hide": "藏锋避劫", "accept": "顺势承命", "defy": "逆势改命"}
 
 
@@ -46,7 +47,8 @@ def save_settings(storage, profile_id, feature, form):
         storage.set_runtime_state(stock.SCHEDULE_STATE_KEY.format(profile_id=profile_id), str(minutes * 60) if enabled else "0")
         return
     key = {"fate-cards": f"fate_cards:{profile_id}", "ldc-red-packet": ldc.SWITCH_KEY.format(profile_id),
-           "wild-report": f"wild_experience_report:{profile_id}"}[feature]
+           "wild-report": f"wild_experience_report:{profile_id}",
+           "fish-open": f"fishing_auto_open:{profile_id}"}[feature]
     fields = {"enabled": enabled}
     expected = None
     if feature == "fate-cards":
@@ -89,6 +91,7 @@ def build_view(storage, profile_id):
         "ldc": {**packet, "min_total": minimum, "delay_low": low, "delay_high": high,
                 "grab_mode": packet.get("grab_mode") or "after_first"},
         "wild": wild,
+        "fish_open": read_state(storage, f"fishing_auto_open:{profile_id}"),
         "stock": {"enabled": enabled, "interval_minutes": seconds / 60 if enabled else 30,
                   "last_run": storage.get_runtime_state(stock.LAST_RUN_STATE_KEY.format(profile_id=profile_id)) or 0},
     }

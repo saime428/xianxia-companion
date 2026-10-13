@@ -899,6 +899,27 @@ def _extract_shop(data: object) -> dict:
     return view.get("shop") if isinstance(view.get("shop"), dict) else {}
 
 
+def _shop_prices(shop: dict) -> dict:
+    """商店里鱼饵、窝料的库存和现价。抓包报告只存结构不存数值，价格只能从这里看。"""
+
+    def cost(item: dict) -> object:
+        value = item.get("cost")
+        if isinstance(value, list):  # [{name, qty, owned}]
+            return {str(part.get("name") or ""): part.get("qty") for part in value if isinstance(part, dict)}
+        return value
+
+    def rows(key: str) -> list:
+        return [item for item in (shop.get(key) if isinstance(shop.get(key), list) else []) if isinstance(item, dict)]
+
+    return {
+        "baits": {str(b.get("name") or ""): {"count": b.get("count"), "cost": cost(b)} for b in rows("baits")},
+        "chums": {
+            str(c.get("name") or ""): {"uses": c.get("uses"), "remainingToday": c.get("remainingToday"), "cost": cost(c)}
+            for c in rows("chums")
+        },
+    }
+
+
 def _find_shop_option(options: object, selected: object, *, key_fields: tuple[str, ...]) -> dict:
     selected_text = str(selected or "").strip()
     for option in options if isinstance(options, list) else []:
@@ -946,15 +967,31 @@ def _prepare_fishing_cast(
 
     required_count = max(1, int(required_bait_count or 1))
     bait_count = max(0, int(_number(bait_option.get("count"), 0)))
-    if bait_count < required_count:
-        if not auto_buy_bait:
-            return _flow_result(False, "failed", error="fishing_bait_missing", events=events)
+    shop_prices = _shop_prices(shop)
+    if bait_count < 1 and not auto_buy_bait:
+        # 制饵是群命令（`.制饵 <名> <数量>`），这个同步流程只有 HTTP 通道，发不了 Telegram ——
+        # 把缺口报给调度器，由它去排命令、稍后重跑。手里还有饵就接着钓，钓光了再报
+        return {
+            **_flow_result(
+                True,
+                "need_bait",
+                data={"baitName": str(bait_option.get("name") or bait), "baitCount": 0, "baitQuantity": required_count},
+                events=events,
+            ),
+            "shopPrices": shop_prices,
+        }
+    if bait_count < required_count and auto_buy_bait:
         quantity = required_count - bait_count
         buy_request = build_fishing_miniapp_request(
             "buy_bait",
             token=token,
             init_data=init_data,
-            payload={"baitKey": str(bait_option.get("key") or ""), "quantity": quantity},
+            # 老页面现在每个补给请求都带一个新的 operationId（10-14 对照源码）
+            payload={
+                "baitKey": str(bait_option.get("key") or ""),
+                "quantity": quantity,
+                "operationId": str(uuid.uuid4()),
+            },
         )
         buy_result = execute_fishing_miniapp_request(
             buy_request,
@@ -992,18 +1029,21 @@ def _prepare_fishing_cast(
     if not next_token:
         return _flow_result(False, "failed", error="next token missing", events=events)
     today, limit = _extract_server_progress(next_result.get("data") or {})
-    return _flow_result(
-        True,
-        "prepared",
-        data={
-            "token": next_token,
-            "dailyUsed": today,
-            "dailyLimit": limit,
-            "pond": str(pond_option.get("name") or pond),
-            "bait": str(bait_option.get("name") or bait),
-        },
-        events=events,
-    )
+    return {
+        **_flow_result(
+            True,
+            "prepared",
+            data={
+                "token": next_token,
+                "dailyUsed": today,
+                "dailyLimit": limit,
+                "pond": str(pond_option.get("name") or pond),
+                "bait": str(bait_option.get("name") or bait),
+            },
+            events=events,
+        ),
+        "shopPrices": shop_prices,
+    }
 
 
 def extract_fishing_miniapp_catches(data: object) -> list[dict]:
@@ -1189,6 +1229,22 @@ def run_fishing_miniapp_loop_flow(
     server_limit = 0
     limit_reached = False
     index = 0
+    shop_prices: dict = {}
+
+    def need_bait(prepared: dict) -> dict:
+        data = {
+            **(prepared.get("data") if isinstance(prepared.get("data"), dict) else {}),
+            "settled_count": settled_count,
+            "rounds": rounds,
+            "catches": catches,
+        }
+        if server_limit > 0:
+            data.update(dailyUsed=max(server_today, 0), dailyLimit=server_limit)
+        return {
+            **_flow_result(True, "need_bait", data=data, events=events),
+            "shopPrices": prepared.get("shopPrices") or shop_prices,
+        }
+
     while settled_count < max_rounds:
         last_result = run_fishing_miniapp_flow(
             token=current_token,
@@ -1220,9 +1276,12 @@ def run_fishing_miniapp_loop_flow(
                     "dailyLimit": server_limit or FISHING_MINIAPP_DAILY_LIMIT_FALLBACK,
                 }
                 return _flow_result(True, "daily_limit", data=data, events=events)
+            if prepared.get("status") == "need_bait":
+                return need_bait(prepared)
             if not prepared.get("ok"):
                 return _flow_result(False, "failed", error=prepared.get("error"), data={"settled_count": settled_count, "rounds": rounds, "catches": catches}, events=events)
             prepared_data = prepared.get("data") if isinstance(prepared.get("data"), dict) else {}
+            shop_prices = prepared.get("shopPrices") or shop_prices
             current_token = str(prepared_data.get("token") or "")
             server_today = int(_number(prepared_data.get("dailyUsed"), server_today))
             server_limit = int(_number(prepared_data.get("dailyLimit"), server_limit))
@@ -1230,12 +1289,17 @@ def run_fishing_miniapp_loop_flow(
 
         index += 1
         round_catch = (extract_fishing_miniapp_catches(last_result.get("data") or {}) or [{}])[0]
+        round_result = _extract_result_view(last_result.get("data") or {})
         rounds.append(
             {
                 "index": index,
                 "ok": bool(last_result.get("ok")),
                 "status": last_result.get("status"),
                 "catch": round_catch,
+                # at / result / reason 给 executors 写逐竿记录（fishing_casts）用
+                "reason": str(round_result.get("reason") or ""),
+                "at": time.time(),
+                "result": round_result,
             }
         )
         if round_catch:
@@ -1267,9 +1331,12 @@ def run_fishing_miniapp_loop_flow(
             if server_limit > 0:
                 server_today = server_limit
             break
+        if prepared.get("status") == "need_bait":
+            return need_bait(prepared)
         if not prepared.get("ok"):
             return _flow_result(True, "next_failed", error=prepared.get("error"), data={"settled_count": settled_count, "rounds": rounds, "catches": catches, "dailyUsed": max(server_today, 0), "dailyLimit": server_limit or FISHING_MINIAPP_DAILY_LIMIT_FALLBACK}, events=events)
         prepared_data = prepared.get("data") if isinstance(prepared.get("data"), dict) else {}
+        shop_prices = prepared.get("shopPrices") or shop_prices
         current_token = str(prepared_data.get("token") or "")
         server_today = int(_number(prepared_data.get("dailyUsed"), server_today))
         server_limit = int(_number(prepared_data.get("dailyLimit"), server_limit))
@@ -1291,7 +1358,7 @@ def run_fishing_miniapp_loop_flow(
         if limit_reached or (server_limit > 0 and server_today >= server_limit)
         else "settled"
     )
-    return _flow_result(True, status, data=data, events=events)
+    return {**_flow_result(True, status, data=data, events=events), "shopPrices": shop_prices}
 
 
 def _dwelling_bite_delay_seconds(session: dict, *, now_ms: float) -> Optional[float]:
@@ -1569,6 +1636,31 @@ def _extract_init_data_from_webview_url(url: str) -> str:
     return ""
 
 
+def request_legacy_fishing_entry(*, estate_token: str, init_data: str, transport) -> tuple[str, str]:
+    """向洞府要一个老垂钓（3D 洞府之前那套）的入口：返回 (fish_ 令牌, 拿不到的原因)。
+
+    外府目录 09-21 起不再列出垂钓，但直接问 external 仍然给（10-14 实测）；所以不看目录。
+    """
+    response: dict = {}
+    for endpoint, payload in (("start", None), ("external", {"action": "fishing"})):
+        response = estate_miniapp.execute_estate_miniapp_request(
+            estate_miniapp.build_estate_miniapp_request(
+                endpoint, token=estate_token, init_data=init_data, payload=payload
+            ),
+            transport,
+        )
+        if not response.get("ok"):
+            return "", f"{endpoint}:{sanitize_miniapp_secret_text(response.get('error'))}"
+    url = urljoin(
+        f"{FISHING_MINIAPP_DEFAULT_API_BASE_URL}/",
+        str((response.get("data") or {}).get("url") or "").strip(),
+    )
+    token = _start_param_from_url(url)
+    if urlsplit(url).path != FISHING_MINIAPP_WEB_PATH or not token.lower().startswith("fish_"):
+        return "", "external:no_fishing_entry"
+    return token, ""
+
+
 def run_fishing_miniapp_public_flow(
     *,
     estate_token: str,
@@ -1582,21 +1674,44 @@ def run_fishing_miniapp_public_flow(
     capture_sink=None,
     capture_source: str = "",
 ) -> dict:
-    result = run_dwelling_fishing_loop_flow(
-        token=estate_token,
-        init_data=init_data,
-        transport=transport,
-        sleeper=sleeper,
-        max_rounds=max_rounds,
-        pond=pond,
-        bait=bait,
-        auto_buy_bait=auto_buy_bait,
-        capture_sink=capture_sink,
-        capture_source=capture_source,
+    # 优先走 3D 洞府之前的老垂钓接口：它不管侍妾在不在家。10-14 01:30 实测同一个号、两位侍妾都在海上，
+    # 洞府钓位 409 fishing_companion_sailing，老接口照常上鱼（群友也一直这么钓）。
+    # 入口拿不到（哪天游戏把它关了）才退回洞府钓位，那条路仍要等侍妾归航。
+    token, entry_error = request_legacy_fishing_entry(
+        estate_token=estate_token, init_data=init_data, transport=transport
     )
+    if token:
+        result = run_fishing_miniapp_loop_flow(
+            token=token,
+            init_data=init_data,
+            transport=transport,
+            sleeper=sleeper,
+            max_rounds=max_rounds,
+            pond=pond,
+            bait=bait,
+            auto_buy_bait=auto_buy_bait,
+            capture_sink=capture_sink,
+            capture_source=capture_source,
+        )
+    else:
+        result = run_dwelling_fishing_loop_flow(
+            token=estate_token,
+            init_data=init_data,
+            transport=transport,
+            sleeper=sleeper,
+            max_rounds=max_rounds,
+            pond=pond,
+            bait=bait,
+            auto_buy_bait=auto_buy_bait,
+            capture_sink=capture_sink,
+            capture_source=capture_source,
+        )
+        if not isinstance(result.get("data"), dict):
+            result["data"] = {}
+        result["data"]["legacyEntryError"] = entry_error
     result["entry"] = {
         "status": "captured",
-        "button_text": "3D 洞府灵溪垂钓",
+        "button_text": "灵溪垂钓（老接口）" if token else "3D 洞府灵溪垂钓",
         "host": _host_from_url(FISHING_MINIAPP_DEFAULT_API_BASE_URL),
         "start_param_kind": _start_param_kind(estate_token),
         "start_param_suffix": str(estate_token or "")[-4:],

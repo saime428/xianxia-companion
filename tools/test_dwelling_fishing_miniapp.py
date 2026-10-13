@@ -52,6 +52,8 @@ def _scripted(context=None, *, cast=None, hook=None, states=(), errors=None, fig
     fighting = {"sessionId": "s1", "status": "active", "phase": "fighting", "fight": fight, "result": {"ready": False}}
 
     def transport(request):
+        if request["url"].endswith(("/xianxia-dwelling/start", "/xianxia-dwelling/external")):
+            return 404, {"ok": False, "error": "not_found"}  # 老垂钓入口拿不到：下面测的都是退回洞府钓位那条路
         action = urlsplit(request["url"]).path.rsplit("/", 1)[-1]
         payload = dict(request["payload"])
         log.append((action, payload, request["url"]))
@@ -437,19 +439,30 @@ def test_voyage_waits_until_todays_fishing_is_done():
     at_sea = {"name": "南宫婉", "voyage": {"status": "sailing", "end_time": datetime.datetime.fromtimestamp(now + 3600, datetime.timezone.utc).isoformat()}}
 
     class FakeStorage:
+        needs_companion = "1"  # 上一轮退回了洞府钓位
+
         def __init__(self, *sessions):
             self.sessions = sessions
 
         def list_active_fishing_sessions(self, profile_id):
             return list(self.sessions)
 
-    def hold(sessions, attending, *residents):
+        def get_runtime_state(self, key):
+            assert key == "fishing_needs_companion:2", key
+            return self.needs_companion
+
+    def hold(sessions, attending, *residents, storage_class=FakeStorage):
         payload = {"companion": attending, "dongfu": {"companion_residence": list(residents)}}
-        return executors._fishing_holds_voyage(FakeStorage(*sessions), profile_id=2, payload=payload, now=now)
+        return executors._fishing_holds_voyage(storage_class(*sessions), profile_id=2, payload=payload, now=now)
 
     armed = {"state": "miniapp_batch", "daily_count": 3, "daily_limit": 15, "next_action_at": now + 60}
     running = {**armed, "state": "miniapp_batch_running", "last_action_at": now - 120}
     assert hold([armed], home, at_sea) is True                      # 这位一走就都在海上了
+
+    class LegacyWorks(FakeStorage):
+        needs_companion = ""
+
+    assert hold([armed], home, at_sea, storage_class=LegacyWorks) is False   # 老垂钓接口钓得动：侍妾走不走都不影响
     assert hold([armed], home) is True                              # 只有一位侍妾
     assert hold([running], home, at_sea) is True                    # 正在钓
     assert hold([armed], home, {"name": "凌玉灵"}) is False          # 另一位也在家，照样能钓
@@ -470,6 +483,9 @@ def test_executor_glue_crafts_once_then_falls_back_to_buying():
     class FakeStorage:
         def __init__(self):
             self.state, self.queued, self.latest = {}, [], None
+
+        def get_external_account(self, profile_id, provider):
+            return {}
 
         def get_runtime_state(self, key):
             return self.state.get(key)
@@ -664,6 +680,312 @@ def test_scheduler_records_every_cast():
     assert json.loads(rows[0]["result_json"])["bonusLoot"] == [{"name": "灵石", "qty": 3}], rows[0]
     assert all(abs(r["created_at"] - time.time()) < 60 for r in rows), rows
     assert session["catches"] == {"青鳞小鲫": 1}, session  # 会话照常更新
+
+
+def _legacy_server(*, bait_count=9, entry=True, daily_limit=5):
+    """洞府入口 + 老垂钓接口（/api/miniapp/xianxia-fishing/*）的假服务器；log 记 (接口, 载荷)。
+
+    形状按 10-14 的老页面源码和当晚实测回包：start 回 lobby 或 challenge，next 换发新令牌，result 回渔获。
+    """
+    log, state = [], {"casts": 0, "bait": bait_count}
+    challenge = _preview_fight(1, "steady", False, 7)
+
+    def transport(request):
+        name = urlsplit(request["url"]).path.split("/api/miniapp/", 1)[-1]
+        payload = dict(request["payload"])
+        log.append((name, payload))
+        if name == "xianxia-dwelling/start":
+            return 200, {"ok": True, "account": {"playerId": "1"}}
+        if name == "xianxia-dwelling/external":
+            assert payload["action"] == "fishing", payload
+            if not entry:
+                return 400, {"ok": False, "error": "external_app_unavailable"}
+            return 200, {"ok": True, "url": "/miniapp/xianxia-fishing?startapp=fish_entry0001"}
+        assert payload["token"].startswith("fish_"), (name, payload)
+        if name == "xianxia-fishing/start":
+            if payload["token"] == "fish_entry0001":
+                return 200, {"ok": True, "session": {"phase": "lobby"}}
+            return 200, {"ok": True, "session": {"phase": "bite"}, "challenge": challenge}
+        if name == "xianxia-fishing/shop":
+            return 200, {"ok": True, "shop": {
+                "ponds": [{"key": "qingxi", "name": "青溪浅滩", "unlocked": True}],
+                "baits": [{"key": "plain", "itemId": "item_fishing_bait_plain", "name": "凡饵", "count": state["bait"], "cost": 12, "unlocked": True}],
+                "chums": [{"key": "herb", "name": "灵草窝", "uses": 5, "remainingToday": 1, "cost": [{"name": "凝血草", "qty": 3, "owned": 9}]}],
+            }}
+        if name == "xianxia-fishing/buy-bait":
+            state["bait"] += int(payload["quantity"])
+            return 200, {"ok": True}
+        if name == "xianxia-fishing/next":
+            assert payload["pondKey"] == "qingxi" and payload["baitItemId"] == "item_fishing_bait_plain", payload
+            if state["casts"] >= daily_limit:
+                return 409, {"ok": False, "error": "fishing_daily_limit_reached"}
+            state["casts"] += 1
+            state["bait"] -= 1
+            return 200, {"ok": True, "token": f"fish_cast{state['casts']:04d}", "today": state["casts"], "limit": daily_limit}
+        if name == "xianxia-fishing/finish":
+            assert payload["fishingProof"]["mode"] == "xianxiaFishingV2" and "landed" not in payload["fishingProof"], payload
+            return 200, {"ok": True, "result": {"details": {}}}
+        if name == "xianxia-fishing/result":
+            return 200, {"ok": True, "result": {"ready": True, "caught": True, "fish": {"name": "银须灵鲢", "weight": 2.66}, "rarityLabel": "灵鱼",
+                                                 "bonusLoot": [], "reason": "lift", "weatherKey": "rain"}}
+        raise AssertionError(f"unexpected request: {name}")
+
+    return transport, log
+
+
+def test_public_flow_prefers_the_legacy_api():
+    """10-14 实测：两位侍妾都在海上，洞府钓位 409，老垂钓接口照常上鱼——所以先走老接口，洞府钓位一个请求都不发。"""
+    transport, log = _legacy_server()
+    result, _ = _run(transport, max_rounds=2)
+    names = [name for name, _ in log]
+    assert names[:3] == ["xianxia-dwelling/start", "xianxia-dwelling/external", "xianxia-fishing/start"], names
+    assert not any(name.startswith("xianxia-dwelling/fishing/") for name in names), names
+    assert result["ok"] is True and result["data"]["settled_count"] == 2, json.dumps(result, ensure_ascii=False)[:600]
+    assert "legacyEntryError" not in result["data"], result["data"]
+    assert result["entry"]["button_text"] == "灵溪垂钓（老接口）", result["entry"]
+    # 逐竿记录要的三样：时刻、原因、服务器原样结果（天象、保底标记都在里面）
+    rounds = result["data"]["rounds"]
+    assert [(r["catch"]["fish"], r["reason"], r["result"]["weatherKey"]) for r in rounds] == [("银须灵鲢", "lift", "rain")] * 2, rounds
+    assert all(abs(r["at"] - time.time()) < 60 for r in rounds), rounds
+    # 商店现价带出来（抓包报告不存数值）
+    prices = result["shopPrices"]   # 挂在结果顶层：放进 data 会被调度器当成今日竿数解析
+    assert "shopPrices" not in result["data"], result["data"]
+    assert prices["baits"]["凡饵"]["cost"] == 12 and prices["chums"]["灵草窝"] == {"uses": 5, "remainingToday": 1, "cost": {"凝血草": 3}}, prices
+
+
+def test_public_flow_falls_back_to_the_dwelling_spot_when_the_legacy_entry_is_gone():
+    for transport, log, expected in (
+        (*_scripted(), "start:not_found"),                                   # 连洞府 start 都不通
+        (*_legacy_server(entry=False), "external:external_app_unavailable"),  # 入口被关了
+    ):
+        if expected.startswith("external"):
+            # 入口被关时退回洞府钓位：这台假服务器没有洞府钓位，context 会报错——只看有没有去试
+            result, _ = _run(transport, max_rounds=1)
+            assert [name for name, _ in log][:3] == ["xianxia-dwelling/start", "xianxia-dwelling/external", "xianxia-dwelling/fishing/context"], log
+        else:
+            result, _ = _run(transport, max_rounds=1)
+            assert result["ok"] is True and _actions(log) == ["context", "cast", "hook"], (result, log)
+        assert result["data"]["legacyEntryError"] == expected, result["data"]
+        assert result["entry"]["button_text"] == "3D 洞府灵溪垂钓", result["entry"]
+
+
+def test_legacy_flow_reports_missing_bait_or_buys_with_an_operation_id():
+    # 制饵优先、还没制过：把缺口报给调度器去排 .制饵，不碰 next
+    transport, log = _legacy_server(bait_count=0)
+    result, _ = _run(transport, max_rounds=5, auto_buy_bait=False)
+    assert result["ok"] is True and result["status"] == "need_bait", result
+    assert (result["data"]["baitName"], result["data"]["baitCount"], result["data"]["baitQuantity"]) == ("凡饵", 0, 1), result["data"]
+    assert "xianxia-fishing/next" not in [name for name, _ in log], log
+    try:  # 调度器不能把「缺饵」记成钓了一竿，也不能把商店里的 count 当成今日竿数（进场时还没有今日竿数可报）
+        from tg_game.runtime import executors
+        updates = executors._build_fishing_miniapp_result_updates({"daily_count": 3, "daily_limit": 5}, result, now=time.time(), bot_message_id=0)
+        assert updates["daily_count"] == 3, updates
+    except ImportError as exc:
+        print(f"  (skipped need_bait count: {type(exc).__name__})")
+    # 允许买：10-14 01:40 丁真人两位侍妾都在海上，老接口买饵 200（洞府钓位买饵是 409）
+    transport, log = _legacy_server(bait_count=0)
+    result, _ = _run(transport, max_rounds=1, auto_buy_bait=True)
+    buy = next(payload for name, payload in log if name == "xianxia-fishing/buy-bait")
+    assert buy["baitKey"] == "plain" and buy["quantity"] == 1 and UUID_RE.match(buy["operationId"]), buy
+    assert result["ok"] is True and result["data"]["settled_count"] == 1, result
+    # 不许买、手里有 3 个：3 个都钓掉再报缺（不能因为「不够整批」就带着饵停下——只制饵模式会把当天关掉）
+    transport, log = _legacy_server(bait_count=3)
+    result, _ = _run(transport, max_rounds=5, auto_buy_bait=False)
+    assert result["status"] == "need_bait" and result["data"]["settled_count"] == 3, result["data"]
+    assert (result["data"]["baitCount"], result["data"]["baitQuantity"], result["data"]["dailyUsed"]) == (0, 2, 3), result["data"]
+    # 结算一直等不到的那一竿：留在 rounds 里但标 ok=False（调度器不把它记成空竿）
+    transport, log = _legacy_server()
+    pending = lambda request: (200, {"ok": True, "result": {"ready": False}}) if request["url"].endswith("/xianxia-fishing/result") else transport(request)
+    result, _ = _run(pending, max_rounds=1)
+    assert result["ok"] is False and [r["ok"] for r in result["data"]["rounds"]] == [False], result
+
+
+def test_bait_crafting_orders_by_yield_and_skips_when_materials_are_short():
+    try:
+        from tg_game.runtime import executors
+    except Exception as exc:
+        print(f"  (skipped bait crafting: {type(exc).__name__})")
+        return
+
+    class FakeStorage:
+        def __init__(self, materials):
+            self.state, self.queued, self.materials = {}, [], materials
+
+        def get_external_account(self, profile_id, provider):
+            return {"me_json": json.dumps({"inventory": json.dumps({"materials": self.materials})})}
+
+        def get_runtime_state(self, key):
+            return self.state.get(key)
+
+        def set_runtime_state(self, key, value):
+            self.state[key] = value
+
+        def get_latest_outgoing_command(self, chat_id, profile_id=None, text="", thread_id=None):
+            return None
+
+        def enqueue_outgoing_command(self, **kwargs):
+            self.queued.append(kwargs)
+            return len(self.queued)
+
+    now = time.time()
+
+    def craft(materials, session, *, count=0, batch=True):
+        storage = FakeStorage(materials)
+        # 老接口进场时的报法：只说下一竿缺 1 个
+        result = {"status": "need_bait", "data": {"baitName": session["bait"], "baitCount": count, "baitQuantity": 1}}
+        updates = executors._request_fishing_bait_craft(
+            storage, result, profile_id=3, chat_id=-100123, thread_id=1000003, session=session, batch_mode=batch, now=now)
+        return [q["text"] for q in storage.queued], updates, storage
+
+    small = {"bait": "凡饵", "daily_limit": 5, "daily_count": 0, "chat_type": "group", "bot_username": "fanrenxiuxian_bot"}
+    big = {**small, "bait": "妖血饵", "daily_limit": 15}
+    # 10-12~10-14 小号天天「制饵失败，资源不足：水草团x1」：5 竿下了 5 份凡饵，其实一份出 2 个、3 份就够，水草团 4 个够用
+    assert craft({"mat_fish_meat": 125, "mat_fishing_waterweed": 4}, small)[0] == [".制饵 凡饵 3"]
+    assert craft({"mat_fish_meat": 125, "mat_fishing_waterweed": 4}, small, count=2)[0] == [".制饵 凡饵 2"]   # 手里还有 2 个
+    assert craft({"mat_fish_meat": 125, "mat_fishing_waterweed": 1}, small)[0] == [".制饵 凡饵 1"]            # 能制几份制几份，剩下的下一轮买
+    assert craft({"mat_fish_meat": 125, "mat_fishing_waterweed": 4}, {**small, "daily_count": 3})[0] == [".制饵 凡饵 1"]  # 今天只剩 2 竿
+    # 一份都凑不出：不发注定失败的 .制饵，记成今天制过了，立刻重跑（按「缺饵时」开关去买或停手）
+    queued, updates, storage = craft({"mat_fish_meat": 125}, small)
+    assert queued == [] and updates["next_action_at"] == now and updates["enabled"] is True, (queued, updates)
+    assert executors._fishing_bait_crafted_today(storage, profile_id=3, chat_id=-100123, now=now) is True
+    # 大号：按会话里今天剩的 15 竿一次制齐；灵鱼肉只够 8 个就制 8 个
+    assert craft({"mat_fish_meat": 60, "mat_fish_scale": 272}, big)[0] == [".制饵 妖血饵 15"]
+    assert craft({"mat_fish_meat": 33, "mat_fish_scale": 272}, big)[0] == [".制饵 妖血饵 8"]
+    assert craft({"mat_fish_meat": 60, "mat_fish_scale": 272}, big, batch=False)[0] == [".制饵 妖血饵 1"]      # 试钓只要 1 个
+    # 天机阁没同步到材料：不设上限，照旧发出去试
+    assert craft(None, small)[0] == [".制饵 凡饵 3"]
+    # 流程报了服务器口径的今日竿数（洞府钓位、老接口钓到一半）：按它算，不看会话里过时的数
+    storage = FakeStorage({"mat_fish_meat": 600, "mat_fish_scale": 272})
+    reported = {"status": "need_bait", "data": {"baitName": "妖血饵", "baitCount": 0, "baitQuantity": 12, "dailyUsed": 3, "dailyLimit": 15}}
+    executors._request_fishing_bait_craft(storage, reported, profile_id=3, chat_id=-100123, thread_id=1000003,
+                                          session={**big, "daily_limit": 5}, batch_mode=True, now=now)
+    assert [q["text"] for q in storage.queued] == [".制饵 妖血饵 12"], storage.queued
+
+
+def test_scheduler_with_the_legacy_api_records_casts_prices_and_releases_companions():
+    try:
+        import asyncio
+        import tempfile
+        from types import SimpleNamespace
+
+        from tg_game.runtime import executors
+        from tg_game.storage import Storage
+    except Exception as exc:
+        print(f"  (skipped legacy scheduler: {type(exc).__name__})")
+        return
+
+    flows = []
+
+    async def fake_flow(client, **kwargs):
+        return flows.pop(0)
+
+    real_flow = executors.fishing_miniapp.run_fishing_miniapp_public_production_flow
+    executors.fishing_miniapp.run_fishing_miniapp_public_production_flow = fake_flow
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "t.db")
+            storage.init_schema()
+            pid = storage.create_profile("甲真人").id
+            needs_key = executors.FISHING_NEEDS_COMPANION_KEY.format(profile_id=pid)
+            storage.upsert_fishing_session(profile_id=pid, chat_id=-100123, enabled=True, state="miniapp_batch", daily_limit=5)
+            client = SimpleNamespace(_tg_game_profile_id=pid)
+
+            # 入口拿不到、退回洞府钓位的一轮：之后要为垂钓留人
+            flows.append(_run(_scripted()[0], max_rounds=1)[0])
+            asyncio.run(executors._run_fishing_auto_scheduler(client, storage, run_once=True))
+            assert storage.get_runtime_state(needs_key) == "1"
+
+            # 流程在碰到任何接口之前就抛了异常（洞府入口没发现到）：不知道走的哪条路，留人标记不动；没结算的竿不进逐竿记录
+            rearm = lambda: storage.update_fishing_session(storage.get_fishing_session(pid, -100123)["id"], enabled=True, state="miniapp_batch", next_action_at=0)
+            rearm()
+            flows.append({"ok": False, "status": "failed", "error": "洞府公共入口未找到", "data": {}, "events": []})
+            asyncio.run(executors._run_fishing_auto_scheduler(client, storage, run_once=True))
+            assert storage.get_runtime_state(needs_key) == "1"
+            rearm()
+            flows.append({"ok": False, "status": "result_pending", "error": "fishing_result_pending", "entry": {},
+                          "data": {"rounds": [{"index": 1, "ok": False, "status": "result_pending", "catch": {}, "at": time.time(), "result": {}}]}, "events": []})
+            asyncio.run(executors._run_fishing_auto_scheduler(client, storage, run_once=True))
+            with storage.connect() as conn:
+                assert conn.execute("SELECT count(*) FROM fishing_casts").fetchone()[0] == 1   # 只有第一轮钓上的那一竿
+
+            # 老接口钓得动的一轮：不用留人了；逐竿记录带服务器原样结果，商店现价存下来
+            storage.update_fishing_session(storage.get_fishing_session(pid, -100123)["id"], enabled=True, state="miniapp_batch", next_action_at=0)
+            flows.append(_run(_legacy_server()[0], max_rounds=2)[0])
+            asyncio.run(executors._run_fishing_auto_scheduler(client, storage, run_once=True))
+            assert storage.get_runtime_state(needs_key) == ""
+            prices = json.loads(storage.get_runtime_state(executors.FISHING_SHOP_PRICES_KEY.format(profile_id=pid)))
+            assert prices["baits"]["凡饵"]["cost"] == 12, prices
+            with storage.connect() as conn:
+                rows = [dict(row) for row in conn.execute("SELECT * FROM fishing_casts ORDER BY id")]
+            assert [(r["fish"], r["reason"], json.loads(r["result_json"]).get("weatherKey")) for r in rows[-2:]] == [("银须灵鲢", "lift", "rain")] * 2, rows
+            assert storage.get_fishing_session(pid, -100123)["daily_count"] == 2
+    finally:
+        executors.fishing_miniapp.run_fishing_miniapp_public_production_flow = real_flow
+
+
+def test_fish_opening_queues_one_command_per_species_once_a_day():
+    try:
+        import asyncio
+
+        from tg_game.runtime import executors
+    except Exception as exc:
+        print(f"  (skipped fish opening: {type(exc).__name__})")
+        return
+
+    class FakeStorage:
+        def __init__(self, switch):
+            self.state = {"fishing_auto_open:3": json.dumps(switch)}
+            self.queued = []
+
+        def get_runtime_state(self, key):
+            return self.state.get(key)
+
+        def update_runtime_state_fields(self, key, fields, expected_fields=None):
+            self.state[key] = json.dumps({**json.loads(self.state.get(key) or "{}"), **fields})
+
+        def get_game_items(self):
+            return {"mat_fish_yinxu_lian": {"name": "银须灵鲢"}, "mat_fish_qinglin_ji": {"name": "青鳞小鲫"},
+                    "mat_fish_meat": {"name": "灵鱼肉"}, "mat_fish_scale": {"name": "灵鱼鳞"}, "mat_fish_odd": {"name": "怪 鱼"}}
+
+        def get_external_account(self, profile_id, provider):
+            return {"me_json": json.dumps({"inventory": {"materials": {"mat_fish_yinxu_lian": 9}}})}   # 缓存是旧的
+
+        def enqueue_outgoing_command(self, **kwargs):
+            self.queued.append(kwargs)
+            return len(self.queued)
+
+    fresh = {"inventory": json.dumps({"materials": {
+        "mat_fish_yinxu_lian": 2, "mat_fish_qinglin_ji": 1, "mat_fish_meat": 125, "mat_fish_scale": 90,
+        "mat_fish_odd": 3, "mat_fish_unknown": 2, "mat_fishing_waterweed": 4, "mat_001": 500,
+    }})}
+    session = {"chat_type": "group", "bot_username": "fanrenxiuxian_bot"}
+    now = time.time()
+    refreshed = fresh
+
+    def run(storage, at=now):
+        real = executors._refresh_companion_payload
+        executors._refresh_companion_payload = lambda _storage, _pid: refreshed
+        try:
+            return asyncio.run(executors._queue_fish_opening(storage, profile_id=3, chat_id=-100123, thread_id=1000003, session=session, now=at))
+        finally:
+            executors._refresh_companion_payload = real
+
+    # 开着：按刚刷新的库存每种鱼一条指令、带数量（零点全局发送上限 10 分钟 30 条）；鱼肉鱼鳞、不认识的、名字不能进指令的都不开
+    storage = FakeStorage({"enabled": True})
+    assert run(storage) == 2
+    assert [(q["text"], q["delay_seconds"], q["thread_id"]) for q in storage.queued] == [
+        (".开鱼 青鳞小鲫 1", 0, 1000003), (".开鱼 银须灵鲢 2", 5, 1000003)], storage.queued
+    assert json.loads(storage.state["fishing_auto_open:3"])["opened_count"] == 3
+    # 同一天不排第二次（指令还在路上、天机阁里鱼还没扣掉）；第二天再开
+    assert run(storage) == 0 and len(storage.queued) == 2
+    assert run(storage, at=now + 86400) == 2 and json.loads(storage.state["fishing_auto_open:3"])["enabled"] is True
+    # 没开开关：什么都不发
+    off = FakeStorage({})
+    assert run(off) == 0 and off.queued == [] and "opened_at" not in json.loads(off.state["fishing_auto_open:3"])
+    # 天机阁刷不出来：退回缓存里的库存
+    refreshed = None
+    cached = FakeStorage({"enabled": True})
+    assert run(cached) == 1 and [q["text"] for q in cached.queued] == [".开鱼 银须灵鲢 9"]
 
 
 def test_private_fish_token_path_stays_off_dwelling_api():

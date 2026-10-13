@@ -232,6 +232,12 @@ PYTHONPATH=app/src .venv/bin/python -B -m tg_game.features.world_boss.world_boss
   .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('wild_experience_report:<id>','{\"enabled\": true}',time.time()));c.commit()"
   ```
 
+- **钓满后自动开鱼**（当天的竿钓满后把鱼篓里的鱼都 `.开鱼`，每种鱼一条指令，一天一次；垂钓固定时间定在 `00:01` 时就是零点钓完即开）：网页「其他」页有开关，也可以直接写库：
+
+  ```bash
+  .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('fishing_auto_open:<id>','{\"enabled\": true}',time.time()));c.commit()"
+  ```
+
 - **某个号不参加野外历练**（诸元神巡令统一托管时跳过这个号，其余号照常）：写 `1` 关闭，删掉这条或写 `0` 恢复。
 
   ```bash

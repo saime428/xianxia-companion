@@ -67,20 +67,20 @@ class ControlsTests(unittest.TestCase):
                 for feature, fields in (
                     ('fate-cards', {'choice': 'accept', 'question': 'cultivation'}),
                     ('ldc-red-packet', {'min_total': '300', 'delay_low': '2', 'delay_high': '4'}),
-                    ('wild-report', {}), ('stock-schedule', {'interval_minutes': '45'}),
+                    ('wild-report', {}), ('fish-open', {}), ('stock-schedule', {'interval_minutes': '45'}),
                 ):
                     response = await client.post('/runtime/automation-settings/' + feature,
                                                  data={**fields, 'enabled': '1', 'profile_id': str(self.other.id)})
                     self.assertEqual(response.status_code, 303)
                     self.assertIn('settings_saved=1', response.headers['location'])
                 view = ui.build_view(self.storage, self.pid)
-                self.assertTrue(all(view[k]['enabled'] for k in ('fate', 'ldc', 'wild', 'stock')))
+                self.assertTrue(all(view[k]['enabled'] for k in ('fate', 'ldc', 'wild', 'fish_open', 'stock')))
                 self.assertEqual(view['fate']['history'], [1])
                 self.assertEqual(view['wild']['sent'], '2026-10-02')
                 self.assertEqual(view['stock']['interval_minutes'], 45)
                 other = ui.build_view(self.storage, self.other.id)
-                self.assertFalse(any(other[k].get('enabled') for k in ('fate', 'ldc', 'wild', 'stock')))
-                for page, labels in (('other', ('天机命脉', 'LDC 自动抢红包', '停止批量卜筮')),
+                self.assertFalse(any(other[k].get('enabled') for k in ('fate', 'ldc', 'wild', 'fish_open', 'stock')))
+                for page, labels in (('other', ('天机命脉', 'LDC 自动抢红包', '停止批量卜筮', '钓满后自动开鱼')),
                                      ('stock', ('股市定时分析',)), ('sect', ('普通闭关前推命',))):
                     response = await client.get('/modules/' + page)
                     self.assertEqual(response.status_code, 200, page)
@@ -89,11 +89,11 @@ class ControlsTests(unittest.TestCase):
                 response = await client.post('/runtime/automation-settings/ldc-red-packet', data={'enabled': '1', 'min_total': 'nan'})
                 self.assertIn('settings_error=', response.headers['location'])
                 self.assertEqual(self.storage.get_runtime_state(f'ldc_red_packet:{self.pid}'), before)
-                for feature in ('fate-cards', 'ldc-red-packet', 'wild-report', 'stock-schedule'):
+                for feature in ('fate-cards', 'ldc-red-packet', 'wild-report', 'fish-open', 'stock-schedule'):
                     response = await client.post('/runtime/automation-settings/' + feature, data={})
                     self.assertIn('settings_saved=1', response.headers['location'])
                 view = ui.build_view(self.storage, self.pid)
-                self.assertFalse(any(view[k].get('enabled') for k in ('fate', 'ldc', 'wild', 'stock')))
+                self.assertFalse(any(view[k].get('enabled') for k in ('fate', 'ldc', 'wild', 'fish_open', 'stock')))
                 self.assertEqual(self.state('wild_experience_report')['sent'], '2026-10-02')
                 self.assertEqual(self.storage.list_outgoing_commands(self.pid), [])
                 self.assertEqual((await client.post('/runtime/automation-settings/unknown')).status_code, 404)
