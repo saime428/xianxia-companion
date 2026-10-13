@@ -45,14 +45,14 @@ def main() -> None:
         storage.upsert_bound_message(profile.id, CHAT, 1, 101, None, 999, "bot", "incoming", True, PROMPT)
         assert trial.maybe_answer_soul_trial(storage, message_id=101, reply_to_msg_id=None, text=PROMPT, now=now, **common)["answered"] is True
         assert trial.maybe_answer_soul_trial(storage, message_id=101, reply_to_msg_id=None, text=PROMPT, now=now, **common)["answered"] is False
-        assert queued(storage) == [(".抉择 强行突破", 101)], queued(storage)
+        assert queued(storage) == [(".抉择 稳固道心", 101)], queued(storage)
 
         # path 2: a prompt that names nobody was missed; my .第二元神 panel says 心魔试炼中 -> answer the recent prompt
         storage.upsert_bound_message(profile.id, CHAT, 1, 102, None, 999, "bot", "incoming", True, "心魔试炼降临，请回复 .抉择 强行突破 / .抉择 稳固道心")
         storage.upsert_bound_message(profile.id, CHAT, 1, 103, None, 1, "demo_main", "outgoing", False, ".第二元神")
         panel = "【你的第二元神：火之元神】\n状态: 心魔试炼中"
         assert trial.maybe_answer_soul_trial(storage, message_id=104, reply_to_msg_id=103, text=panel, now=now, **common)["prompt_message_id"] == 102
-        assert queued(storage)[-1] == (".抉择 强行突破", 102), queued(storage)
+        assert queued(storage)[-1] == (".抉择 稳固道心", 102), queued(storage)
 
         # a stale prompt (older than 45 min) is not answered from path 2
         storage.upsert_bound_message(profile.id, CHAT, 1, 105, None, 999, "bot", "incoming", True, "心魔试炼降临，请回复 .抉择 强行突破 / .抉择 稳固道心")

@@ -162,6 +162,107 @@ def check_observer():
         assert divine.public_fate(storage, CHAT + 1, NOW + 60) == ("", "")
 
 
+def check_shift_record():
+    """改命记录：排队时记一笔 → 回包记修为 → 目标号同步天机阁时按结算前后的背包对账。"""
+    import json
+
+    from tg_game.services import external_sync
+
+    def payload(**counts):
+        materials = {key: value for key, value in counts.items() if key.startswith("mat_")}
+        items = [{"item_id": key, "name": {"quest_item_ycs_b": "元磁山核·乙"}.get(key, key), "quantity": value}
+                 for key, value in counts.items() if not key.startswith("mat_")]
+        return {"sect_name": "散修", "cultivation_points": 5000, "inventory": {"materials": materials, "items": items}}
+
+    with tempfile.TemporaryDirectory() as folder:
+        storage = Storage(Path(folder) / "shift.db")
+        storage.init_schema()
+        shifter = storage.create_profile("shifter").id
+        target = storage.create_profile("target").id
+        storage.bind_profile_telegram_account(shifter, telegram_user_id="11", telegram_username="alt_acct")
+        storage.bind_profile_telegram_account(target, telegram_user_id="22", telegram_username="Main_Acct")
+        storage.upsert_external_account(target, "asc_aiopenai", "22", "main_acct", "connected", "session=offline", payload(mat_204=9), "")
+        task = {"profile_id": shifter, "chat_id": CHAT, "strategy": "main_acct|12|星辰异象,五彩缤纷,天雷竹现世"}
+
+        def attempt_for(fate, strategy=None):
+            reply = {"text": PANEL.format(fate=fate, holder="lucky_one"), "created_at": NOW, "message_id": PANEL_MSG}
+            assert divine.shift_followup(storage, {**task, "strategy": strategy or task["strategy"]}, reply)[0]
+            return storage.list_fate_shift_attempts()[-1]
+
+        def sync(at, *, took=1.0, **counts):
+            """目标号的一次天机阁同步：at 时刻发起，took 秒后返回。"""
+            divine.settle_shift_attempts(storage, target, payload(**counts), started_at=at, finished_at=at + took)
+            return storage.list_fate_shift_attempts()[-1]
+
+        def announce(at):
+            """观察器记下这一档的结算快报（奖励就是这时候发的）。"""
+            storage.append_fate_evolution_log(chat_id=CHAT, message_id=int(at), kind="settlement",
+                                              text="【天机阁快报 - ...】", created_at=at)
+
+        # 排队时：认出目标是自己的号，带上当时缓存的背包；待对账
+        row = attempt_for("Good - 星辰异象")
+        assert (row["outcome"], row["event"], row["target"], row["target_profile_id"]) == ("pending", "星辰异象", "main_acct", target), row
+        assert row["settlement_at"] == SETTLEMENT and json.loads(row["before_json"])["mat_204"] == 9, row
+        # 回包：只有发改命的那个号的记录会记上修为
+        assert not divine.note_shift_reply(storage, target, CHAT, SHIFT_REPLY)
+        assert divine.note_shift_reply(storage, shifter, CHAT, SHIFT_REPLY)
+        assert storage.list_fate_shift_attempts()[-1]["cost"] == 82878
+        # 结算前的同步只更新「之前」的快照
+        assert json.loads(sync(SETTLEMENT - 10, mat_204=10)["before_json"])["mat_204"] == 10
+        # 跨着结算的慢请求两头都不算：它带回的背包可能已经有奖励，不能当「之前」
+        row = sync(SETTLEMENT - 3, took=8, mat_204=10, quest_item_ycs_b=1)
+        assert row["outcome"] == "pending" and "quest_item_ycs_b" not in json.loads(row["before_json"]), row
+        # 快报还没出（这次是整点后 95 秒才出）：不对账；快报出来之前发起的请求也不算
+        assert sync(SETTLEMENT + 92, mat_204=10)["outcome"] == "pending"
+        announce(SETTLEMENT + 95)
+        assert sync(SETTLEMENT + 94, mat_204=10)["outcome"] == "pending"
+        # 快报之后：奖励多出来了 = 拿到
+        row = sync(SETTLEMENT + 200, mat_204=10, mat_001=71, quest_item_ycs_b=1)
+        assert row["outcome"] == "got" and "元磁山核·乙 +1" in row["gained"], row
+        # 没多出奖励 = 白烧；别的东西变多不算
+        attempt_for("Good - 天雷竹现世")
+        assert divine.note_shift_reply(storage, shifter, CHAT, SHIFT_REPLY)
+        row = sync(SETTLEMENT + 200, mat_204=9, mat_001=500)
+        assert row["outcome"] == "missed" and "mat_001 +" in row["gained"], row
+        # 奖励编号不知道的事件：判不了，把多出来的东西原样记下
+        attempt_for("Good - 五彩缤纷")
+        assert divine.note_shift_reply(storage, shifter, CHAT, SHIFT_REPLY)
+        row = sync(SETTLEMENT + 200, mat_204=9, mystery_soil=1)
+        assert row["outcome"] == "unclear" and "mystery_soil +1" in row["gained"], row
+        # 指令没发出去（没有回包）或被游戏拒了（回包里没有烧修为）：不是一次改命，不能算进「没拿到」
+        attempt_for("Good - 星辰异象")
+        row = sync(SETTLEMENT + 200, mat_204=9)
+        assert row["outcome"] == "unknown" and row["gained"] == "没见到烧修为的回包：没有回包", row
+        attempt_for("Good - 星辰异象")
+        assert divine.note_shift_reply(storage, shifter, CHAT, "【改换星移】无法读取你回复的星盘消息。\n请确认……")
+        row = sync(SETTLEMENT + 200, mat_204=9)
+        assert row["outcome"] == "unknown" and row["gained"].endswith("【改换星移】无法读取你回复的星盘消息。"), row
+        # 这次同步没带背包（或背包是空的）：不动，等下一次
+        attempt_for("Good - 星辰异象")
+        assert divine.note_shift_reply(storage, shifter, CHAT, SHIFT_REPLY)
+        for empty in ({"sect_name": "散修"}, {"inventory": {"materials": {}, "items": []}}):
+            divine.settle_shift_attempts(storage, target, empty, started_at=SETTLEMENT + 200, finished_at=SETTLEMENT + 201)
+            assert storage.list_fate_shift_attempts()[-1]["outcome"] == "pending"
+        # 真正的挂接点：目标号任何一次天机阁同步都会顺手对账
+        with patch.object(external_sync, "fetch_cultivator_payload",
+                          lambda *a, **k: (payload(mat_204=9, quest_item_ycs_b=2), "main_acct", "", "")), \
+                patch("time.time", return_value=SETTLEMENT + 300):
+            external_sync.sync_external_account(storage, target, cookie_text="session=offline")
+        assert storage.list_fate_shift_attempts()[-1]["outcome"] == "got"
+        # 目标不是自己的号：看不到背包，直接标成对不了账
+        assert attempt_for("Good - 星辰异象", "stranger_x|12|星辰异象")["outcome"] == "unknown"
+        # 观察器：本号 .改换星移 的回包才记修为（别的号看到同一条不记）
+        row = attempt_for("Good - 星辰异象")
+        storage.upsert_bound_message(shifter, CHAT, None, 601, PANEL_MSG, 11, "alt_acct", "outgoing", False, SHIFT)
+        storage.upsert_bound_message(target, CHAT, None, 601, PANEL_MSG, 11, "alt_acct", "incoming", False, SHIFT)
+        for pid in (target, shifter):
+            event = SimpleNamespace(id=602, raw_text=SHIFT_REPLY, chat_id=CHAT, sender_id=77, sender=None)
+            executors.observe_fate_evolution(SimpleNamespace(
+                event=event, text=SHIFT_REPLY, chat_id=CHAT, sender_id=77, reply_to_msg_id=601,
+                chat_binding=object(), profile=SimpleNamespace(id=pid), is_bot_sender=True), storage)
+            assert storage.list_fate_shift_attempts()[-1]["cost"] == (82878 if pid == shifter else 0), pid
+
+
 def check_template():
     """网页上的勾选项是写死在模板里的，必须和代码认的事件、默认勾选一一对应。"""
     html = (ROOT / "app/assets/templates/modules/sect.html").read_text(encoding="utf-8")
@@ -235,6 +336,7 @@ runpy.run_path(str(SRC / "tg_game/features/xinggong/biz_xinggong_divine.py"), ru
 with patch("time.time", return_value=NOW):
     check()
     check_observer()
+    check_shift_record()
 # 不在结算前的窗口里：不发，推到下一个可用档（18:00）的窗口
 with patch("time.time", return_value=OFF_WINDOW):
     commands, task = run(None)

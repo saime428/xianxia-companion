@@ -56,12 +56,15 @@ def save_settings(storage, profile_id, feature, form):
             raise ValueError("请选择页面提供的命择和问天主题。")
         fields.update(choice=choice, question=question)
     elif feature == "ldc-red-packet":
-        minimum = _number(form.get("min_total", "200"), "红包总额门槛", 200, 1e12)
+        mode = str(form.get("grab_mode") or read_state(storage, key).get("grab_mode") or "after_first")
+        if mode not in ldc.GRAB_MODES:
+            raise ValueError("请选择有效的红包领取方式。")
+        minimum = _number(form.get("min_total", "200"), "红包总额门槛", 0, 1e12)
         low = _number(form.get("delay_low", "1"), "最短等待（秒）", 1, 300)
         high = _number(form.get("delay_high", "3"), "最长等待（秒）", 1, 300)
         if low > high:
             raise ValueError("最短等待不能大于最长等待。")
-        fields.update(min_total=minimum, delay=[low, high])
+        fields.update(min_total=minimum, delay=[low, high], grab_mode=mode)
         if enabled:
             # A stale enabled checkbox must not undo a newer automatic brake.
             brake = form.get("braked_at")
@@ -83,7 +86,8 @@ def build_view(storage, profile_id):
     return {
         "fate": {**fate, "choice": fate.get("choice") or "hide", "question": fate.get("question") or "cultivation",
                  "choices": CHOICES, "questions": question_options(fate), "status_label": labels.get(fate.get("status"), "尚无结果")},
-        "ldc": {**packet, "min_total": minimum, "delay_low": low, "delay_high": high},
+        "ldc": {**packet, "min_total": minimum, "delay_low": low, "delay_high": high,
+                "grab_mode": packet.get("grab_mode") or "after_first"},
         "wild": wild,
         "stock": {"enabled": enabled, "interval_minutes": seconds / 60 if enabled else 30,
                   "last_run": storage.get_runtime_state(stock.LAST_RUN_STATE_KEY.format(profile_id=profile_id)) or 0},

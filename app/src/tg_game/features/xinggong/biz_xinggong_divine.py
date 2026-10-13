@@ -16,6 +16,7 @@
 或写着我们不要的事件（群里所有人的星盘都记在 fate_evolution_logs）。
 自己观出不要的结果就没有后备了——次数已经用掉。
 """
+import json
 import logging
 import re
 import time
@@ -190,12 +191,17 @@ def shift_command(task: Optional[dict], reply_text: str) -> str:
     return f"{SHIFT_COMMAND} @{target}"
 
 
-def shift_followup(task: Optional[dict], reply: dict, now: Optional[float] = None) -> tuple[str, int]:
-    """要跟的改命指令，以及还要压多少秒再发（压到结算前 SHIFT_LEAD_SECONDS）。"""
-    command = shift_command(task, str((reply or {}).get("text") or ""))
+def shift_followup(storage, task: Optional[dict], reply: dict, now: Optional[float] = None) -> tuple[str, int]:
+    """要跟的改命指令，以及还要压多少秒再发（压到结算前 SHIFT_LEAD_SECONDS）。
+
+    要改命时顺手在 fate_shift_attempts 记一笔（storage 传 None 就只算不记）。
+    """
+    text = str((reply or {}).get("text") or "")
+    command = shift_command(task, text)
     if not command:
         return "", 0
-    now = time.time() if now is None else now
+    live_clock = now is None
+    now = time.time() if live_clock else now
     reply_ts = float((reply or {}).get("created_at") or now)
     settlement = next_settlement(reply_ts)
     if now >= settlement:
@@ -205,7 +211,172 @@ def shift_followup(task: Optional[dict], reply: dict, now: Optional[float] = Non
         )
         return "", 0
     send_at = min(settlement - SHIFT_LEAD_SECONDS, reply_ts + SHIFT_WINDOW_SECONDS)
+    if storage is not None:
+        try:
+            record_shift_attempt(storage, task, _FATE_PATTERN.search(text).group(2), settlement)
+        except Exception:
+            # 记账出错不能耽误改命本身，这条指令是卡着秒发的
+            logger.exception("改命记录没写进去")
+        if live_clock:
+            now = time.time()  # 记账要写库，偶尔会等锁；延迟按写完之后的时刻算，发出时刻才不会被它推后
     return command, max(int(send_at - now), 0)
+
+
+# ---- 改命对账 ----
+# 改命成没成游戏不说（没有成功/失败消息，结算快报也不写得主），只能自己对：目标是自己的号时，
+# 比较它在天机阁背包里结算前后的数量。只有奖励编号列在这里的事件能自动判「拿到 / 没拿到」，
+# 其余记成 unclear，把多出来的东西原样写下，人来看。
+EVENT_REWARD_KEYS = {
+    "星辰异象": "quest_item_ycs_b",
+    "封魔裂隙回响": "quest_item_zhuimo_token",
+    "天雷竹现世": "mat_204",
+    "地心火脉现世": "recipe_301",
+}
+# 奖励跟着结算快报一起发，快报在整点后 4~98 秒才出（64 次里 8 次超过一分钟）。所以「结算后」以
+# 观察器记下的这一档快报为准；一直没见到快报（观察器漏了）才退回到整点后这么久。
+SETTLE_FALLBACK_SECONDS = 300
+_COST_PATTERN = re.compile(r"消耗\s*([\d,]+)\s*点修为")
+
+
+def _as_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def inventory_counts(payload: object) -> dict[str, int]:
+    """天机阁 payload 里的背包压平成 {物品编号: 数量}，外加修为；没带背包返回空字典。"""
+    inventory = payload.get("inventory") if isinstance(payload, dict) else None
+    if isinstance(inventory, str):
+        try:
+            inventory = json.loads(inventory)
+        except ValueError:
+            return {}
+    if not isinstance(inventory, dict):
+        return {}
+    materials = inventory.get("materials")
+    counts = {str(key): _as_int(value) for key, value in (materials if isinstance(materials, dict) else {}).items()}
+    for item in inventory.get("items") or []:
+        if isinstance(item, dict) and item.get("item_id"):
+            counts[str(item["item_id"])] = _as_int(item.get("quantity"))
+    if not counts:
+        return {}  # 背包字段在但是空的：当成没带，否则会把「之前」冲成空、之后全算多出来
+    counts["cultivation_points"] = _as_int(payload.get("cultivation_points"))
+    return counts
+
+
+def record_shift_attempt(storage, task: Optional[dict], event: str, settlement: float) -> None:
+    """改命指令排进队列时记一笔；结果等目标号同步天机阁时由 settle_shift_attempts 补上。"""
+    from tg_game.services.external_sync import ASC_PROVIDER  # 那边会 import 本模块，放函数里避开循环
+
+    target, _hours, _events = split_strategy(task)
+    target_profile = next(
+        (p for p in storage.list_profiles() if str(p.telegram_username or "").lower() == target.lower()), None
+    )
+    before, before_at = {}, 0.0
+    if target_profile:
+        account = storage.get_external_account(target_profile.id, ASC_PROVIDER) or {}
+        try:
+            before = inventory_counts(json.loads(account.get("me_json") or "{}"))
+        except ValueError:
+            before = {}
+        before_at = float(account.get("last_verified_at") or 0)
+    storage.add_fate_shift_attempt(
+        profile_id=_as_int((task or {}).get("profile_id")),
+        chat_id=_as_int((task or {}).get("chat_id")),
+        event=event,
+        target=target,
+        target_profile_id=target_profile.id if target_profile else 0,
+        settlement_at=settlement,
+        before_json=json.dumps(before) if before else "",
+        before_at=before_at if before else 0,
+        # 目标不是自己的号就看不到它的背包，永远对不了账
+        outcome="pending" if target_profile else "unknown",
+    )
+
+
+def note_shift_reply(storage, profile_id: int, chat_id: int, text: str, now: Optional[float] = None) -> bool:
+    """自己那条 .改换星移 的回包：把烧掉的修为和原文记到最近一笔还没回包的改命上。"""
+    now = time.time() if now is None else now
+    for attempt in reversed(storage.list_fate_shift_attempts()):
+        if (
+            int(attempt["profile_id"]) == int(profile_id)
+            and int(attempt["chat_id"]) == int(chat_id)
+            and not attempt["reply_text"]
+            and now - float(attempt["created_at"]) < 600
+        ):
+            cost = _COST_PATTERN.search(str(text or ""))
+            storage.update_fate_shift_attempt(
+                attempt["id"],
+                reply_text=str(text or "")[:500],
+                cost=int(cost.group(1).replace(",", "")) if cost else 0,
+            )
+            return True
+    return False
+
+
+def _describe_gained(storage, payload: dict, gained: dict[str, int]) -> str:
+    names = {key: str(meta.get("name") or key) for key, meta in storage.get_game_items().items()}
+    inventory = payload.get("inventory")
+    if isinstance(inventory, str):
+        inventory = json.loads(inventory)
+    for item in (inventory or {}).get("items") or []:
+        if isinstance(item, dict) and item.get("item_id") and item.get("name"):
+            names[str(item["item_id"])] = str(item["name"])
+    names["cultivation_points"] = "修为"
+    return "、".join(f"{names.get(key, key)} +{amount}" for key, amount in sorted(gained.items())[:20]) or "什么都没多"
+
+
+def _rewards_out_at(storage, chat_id: int, settlement: float) -> float:
+    """这一档的奖励最晚什么时候已经发出：见到结算快报就是快报的时刻，没见到就按兜底时长算。"""
+    for row in storage.list_fate_evolution_logs(chat_id=chat_id, since_ts=settlement, kind="settlement"):
+        if float(row["created_at"]) < settlement + SLOT_SECONDS:
+            return float(row["created_at"])
+    return settlement + SETTLE_FALLBACK_SECONDS
+
+
+def settle_shift_attempts(
+    storage, profile_id: int, payload: object, *, started_at: float, finished_at: float
+) -> None:
+    """目标号每次同步天机阁时调用：结算前不断把「之前」的快照换成最新的，结算后对一次账。
+
+    started_at / finished_at 是这次天机阁请求的起止时刻。跨着结算的请求两头都不算：
+    它拿到的背包可能已经带上奖励，当「之前」会把拿到判成没拿到；也可能还没带上，当「之后」同样判错。
+    """
+    counts = None
+    for attempt in storage.list_fate_shift_attempts(outcome="pending"):
+        if int(attempt["target_profile_id"]) != int(profile_id):
+            continue
+        if counts is None:
+            counts = inventory_counts(payload)
+        if not counts:
+            return  # 这次同步没带背包，等下一次
+        settlement = float(attempt["settlement_at"])
+        if finished_at < settlement:
+            storage.update_fate_shift_attempt(attempt["id"], before_json=json.dumps(counts), before_at=finished_at)
+            continue
+        if started_at < _rewards_out_at(storage, int(attempt["chat_id"]), settlement):
+            continue
+        if _as_int(attempt["cost"]) <= 0:
+            # 没见到「消耗 N 点修为」的回包：指令没发出去，或者被游戏拒了。没烧修为就不是一次改命，
+            # 不能算进「没拿到」里
+            reason = str(attempt["reply_text"] or "").strip().splitlines()[:1]
+            storage.update_fate_shift_attempt(
+                attempt["id"], outcome="unknown", gained="没见到烧修为的回包：" + (reason[0] if reason else "没有回包")
+            )
+            continue
+        try:
+            before = json.loads(attempt["before_json"] or "{}")
+        except ValueError:
+            before = {}
+        if not before:
+            storage.update_fate_shift_attempt(attempt["id"], outcome="unknown", gained="没有结算前的背包快照")
+            continue
+        gained = {key: value - _as_int(before.get(key)) for key, value in counts.items() if value > _as_int(before.get(key))}
+        reward = EVENT_REWARD_KEYS.get(attempt["event"])
+        outcome = ("got" if gained.get(reward, 0) > 0 else "missed") if reward else "unclear"
+        storage.update_fate_shift_attempt(attempt["id"], outcome=outcome, gained=_describe_gained(storage, payload, gained))
 
 
 # 这三类只可能出自游戏机器人；人发的同样文本（转发、粘贴）不算数
@@ -336,13 +507,20 @@ if __name__ == "__main__":
     assert send_gate(Readings((beijing(9, 4), BAD)), {"strategy": "|12,18"}, opens) == (opens, "")
     # 改命压到结算前 SHIFT_LEAD_SECONDS；已经过了这个点就立刻发；结算都过了就不发
     reply = {"text": GOOD, "created_at": opens + 5}
-    assert shift_followup(task, reply, opens + 10) == (shift, READ_LEAD_SECONDS - SHIFT_LEAD_SECONDS - 10)
-    assert shift_followup(task, reply, noon - 5) == (shift, 0)
-    assert shift_followup(task, reply, noon + 1) == ("", 0)
-    assert shift_followup(task, {"text": BAD, "created_at": opens + 5}, opens + 10) == ("", 0)
+    assert shift_followup(None, task, reply, opens + 10) == (shift, READ_LEAD_SECONDS - SHIFT_LEAD_SECONDS - 10)
+    assert shift_followup(None, task, reply, noon - 5) == (shift, 0)
+    assert shift_followup(None, task, reply, noon + 1) == ("", 0)
+    assert shift_followup(None, task, {"text": BAD, "created_at": opens + 5}, opens + 10) == ("", 0)
     # 没按窗口观的星（离结算远）：5 分钟有效期内尽早改，不等结算
     early = {"text": GOOD, "created_at": beijing(10)}
-    assert shift_followup(task, early, beijing(10, 0, 5)) == (shift, SHIFT_WINDOW_SECONDS - 5)
+    assert shift_followup(None, task, early, beijing(10, 0, 5)) == (shift, SHIFT_WINDOW_SECONDS - 5)
+    # 背包压平：材料字典 + 物品列表 + 修为；没带背包就是空的
+    payload = {"cultivation_points": "88", "inventory": json.dumps({"materials": {"mat_204": 9, "bad": "x"},
+                                                              "items": [{"item_id": "quest_item_ycs_b", "quantity": 1}, {"name": "没编号"}]})}
+    assert inventory_counts(payload) == {"mat_204": 9, "bad": 0, "quest_item_ycs_b": 1, "cultivation_points": 88}
+    assert inventory_counts({"cultivation_points": 5}) == inventory_counts(None) == inventory_counts({"inventory": "坏的"}) == {}
+    assert inventory_counts({"cultivation_points": 5, "inventory": {"materials": {}, "items": []}}) == {}
+    assert set(EVENT_REWARD_KEYS) <= set(GOOD_EVENTS)
     # 观完排到明天零点后，再由 send_gate 排到明天的首选档
     wake = opens + 10 + seconds_until_next_run(opens + 10)
     assert wake == beijing(0, 1, day=12)

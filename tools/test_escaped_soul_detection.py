@@ -139,10 +139,49 @@ def rebirth_picks_most_elements():
             assert [r[0] for r in conn.execute("select text from outgoing_commands where profile_id=?", (profile_id,))] == [".重生 2"]
 
 
+def rebirth_prefers_ice_wind_per_profile():
+    pick = lambda text: profile_rebirth.select_rebirth_candidate(text, preferred_roots="冰风")["index"]  # noqa: E731
+    five_elements = ("伪灵根(金木水火土)", "稳妥之身")
+    assert pick(offer(five_elements, ("异灵根(冰)", "赌命之身"))) == 2
+    assert pick(offer(five_elements, ("异灵根(风)", "赌命之身"))) == 2
+    assert pick(offer(("异灵根(冰)", "赌命之身"), ("异灵根(风)", "稳妥之身"))) == 2
+    assert pick(offer(("异灵根(风)", "赌命之身"), ("异灵根(冰)", "稳妥之身"))) == 2
+    assert pick(offer(("异灵根(雷)", "稳妥之身"), five_elements)) == 2
+    assert pick(offer(five_elements, ("天灵根(火)", "赌命之身")).replace("旧法与旧缘", "冰风旧法与旧缘")) == 1
+    assert profile_rebirth.select_rebirth_candidate("没有候选", preferred_roots="冰风") is None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        storage, preferred_id = new_alt(tmp)
+        other_id = storage.create_profile("其他角色").id
+        storage.create_chat_binding(other_id, CHAT, bot_username="fanrenxiuxian_bot")
+        storage.set_runtime_state(f"rebirth_preferred_roots:{preferred_id}", "冰风")
+        text = offer(five_elements, ("异灵根(风)", "赌命之身"))
+        for profile_id, expected in ((preferred_id, 2), (other_id, 1)):
+            profile_rebirth.start_profile_rebirth(
+                storage, profile_id=profile_id, chat_id=CHAT, thread_id=None,
+                chat_type="group", bot_username="fanrenxiuxian_bot",
+            )
+            result = profile_rebirth.handle_profile_rebirth_reply(
+                storage, profile_id=profile_id, chat_id=CHAT, message_id=5, text=text,
+            )
+            assert result["event"] == "rebirth_choice_queued" and result["selected"]["index"] == expected, result
+            with storage.connect() as conn:
+                commands = [r[0] for r in conn.execute("select text from outgoing_commands where profile_id=?", (profile_id,))]
+            assert commands == [".夺舍重生", f".重生 {expected}"], commands
+
+        profile_rebirth.handle_profile_rebirth_reply(
+            storage, profile_id=preferred_id, chat_id=CHAT, message_id=6,
+            text="夺舍成功！你的神魂与新肉身完美融合。",
+        )
+        assert not profile_rebirth.is_profile_rebirth_locked(storage, preferred_id)
+        assert storage.get_runtime_state(f"rebirth_preferred_roots:{preferred_id}") == "冰风"
+
+
 def main() -> None:
     asyncio.run(edited_rift_reply_starts_rebirth())
     refresh_with_escaped_soul_starts_rebirth()
     rebirth_picks_most_elements()
+    rebirth_prefers_ice_wind_per_profile()
     print("escaped soul detection: ok")
 
 

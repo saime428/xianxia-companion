@@ -431,6 +431,33 @@ async def rebirth_replies_keep_exact_queue_correlation():
         assert storage.get_outgoing_command(command_id)["status"] == "confirmed"
 
 
+async def direct_send_records_outgoing_message():
+    # 10-13：直发的 .探寻裂缝 没进 bound_messages（Telethon 不回显自己发的消息），【改命回天】回包成了
+    # reply_unattributed，本地以为推命改命都还在，零点 8 场深入裸打。发出去就要有这一行，回包才认得上。
+    with case() as (storage, profile_id):
+        now = time.time()
+        tx.save_profile_record(storage, profile_id, state={
+            "current_prediction": "探索", "current_prediction_until": now + 8 * 3600,
+            "current_change": "探索", "current_change_until": now + 2400,
+        })
+        sent = await send_utils.send_message_with_thread_fallback(
+            FakeClient(storage, profile_id), CHAT, ".探寻裂缝", profile_id=profile_id,
+        )
+        row = storage.get_bound_message(CHAT, sent.id, profile_id)
+        assert row and row["direction"] == "outgoing" and row["text"] == ".探寻裂缝", row
+        # 回包原文：没有「探寻成功/裂缝」字样，命星说明里的「斗法」不能把路线带偏，推命 探索 也要清掉
+        result = tx.handle_bot_reply(
+            storage, profile_id=profile_id, chat_id=CHAT, reply_to_msg_id=sent.id, message_id=sent.id + 1, now=now,
+            text="【改命回天】\n命盘【贪狼】照命，主偏财夺势，闭关奇遇与探寻收获更盛，斗法更擅夺取战果，但炼制时心火浮躁。\n"
+            "【推命命中】司命演算吻合，天机值 +1，宗门贡献 +30\n【改命待发】此道改命尚可维持 42分钟\n"
+            "空间风暴本该重创你的元婴，司命盘替你拽偏了这道灾线。【改命回天】你强行拨正命轨，硬从凶数中抢回一线生机。",
+        )
+        state = tx.get_profile_record(storage, profile_id)["state"]
+        assert result.get("handled") is True, result
+        assert state["current_prediction"] == "" and state["current_change"] == "", state
+        assert state["prediction_consumed_at"] == now, state
+
+
 async def main():
     def reject_network(event, args):
         if event in {"socket.connect", "socket.getaddrinfo"}:
@@ -443,6 +470,7 @@ async def main():
     await pause_keeps_daily_queue()
     await controls_during_real_throttle_wait()
     await topic_fallback_rechecks_controls()
+    await direct_send_records_outgoing_message()
     await cancellation_during_network_call_stays_cancelled()
     paused_worker_restart_preserves_queue()
     replies_match_message_ids()

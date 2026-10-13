@@ -99,6 +99,41 @@ class ControlsTests(unittest.TestCase):
                 self.assertEqual((await client.post('/runtime/automation-settings/unknown')).status_code, 404)
         asyncio.run(check())
 
+    def test_packet_amount_threshold_accepts_zero_and_small_amounts_over_http(self):
+        token = self.storage.create_app_session(self.pid)
+        async def check():
+            app = self.web.create_app()
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test',
+                    cookies={self.web.APP_SESSION_COOKIE: token}) as client:
+                for amount in ('199', '0', '0.01'):
+                    response = await client.post('/runtime/automation-settings/ldc-red-packet',
+                        data={'enabled': '1', 'grab_mode': 'instant', 'min_total': amount})
+                    self.assertEqual(response.status_code, 303)
+                    self.assertEqual(self.state('ldc_red_packet')['min_total'], float(amount))
+                    self.assertEqual(self.state('ldc_red_packet')['grab_mode'], 'instant')
+                view = ui.build_view(self.storage, self.other.id)['ldc']
+                self.assertFalse(view.get('enabled'))
+                response = await client.get('/modules/other')
+                self.assertIn('name="min_total" min="0"', response.text)
+                before = self.state('ldc_red_packet')
+                response = await client.post('/runtime/automation-settings/ldc-red-packet',
+                    data={'enabled': '1', 'min_total': '-1'})
+                self.assertEqual(response.status_code, 303)
+                self.assertIn('settings_error=', response.headers['location'])
+                self.assertEqual(self.state('ldc_red_packet'), before)
+        asyncio.run(check())
+
+    def test_instant_packet_mode_is_saved_and_account_scoped(self):
+        self.save('ldc-red-packet', enabled='1', grab_mode='instant', min_total='200')
+        self.assertEqual(ui.build_view(self.storage, self.pid)['ldc']['grab_mode'], 'instant')
+        self.assertFalse(ui.build_view(self.storage, self.other.id)['ldc'].get('enabled'))
+        self.save('ldc-red-packet', enabled='1', min_total='300')
+        self.assertEqual(self.state('ldc_red_packet')['grab_mode'], 'instant')
+        before = self.state('ldc_red_packet')
+        with self.assertRaises(ValueError):
+            self.save('ldc-red-packet', enabled='1', grab_mode='invalid')
+        self.assertEqual(self.state('ldc_red_packet'), before)
+
     def test_automatic_brake_cannot_be_undone_by_stale_form(self):
         self.save('ldc-red-packet', enabled='1')
         ldc._brake(self.storage, self.pid, '未绑定')
@@ -128,7 +163,7 @@ class ControlsTests(unittest.TestCase):
         for feature, fields in (
             ('fate-cards', {'choice': 'invalid'}), ('fate-cards', {'question': 'invented'}),
             ('ldc-red-packet', {'delay_low': '5', 'delay_high': '1'}),
-            ('ldc-red-packet', {'min_total': '199'}),
+            ('ldc-red-packet', {'min_total': '-1'}),
             ('stock-schedule', {'interval_minutes': 'inf'}),
             ('stock-schedule', {'interval_minutes': '0'}),
         ):

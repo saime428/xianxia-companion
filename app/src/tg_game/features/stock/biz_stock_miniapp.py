@@ -1,4 +1,5 @@
-"""天道交易所只读行情与买入、止盈、减仓、清仓建议；不自动交易。
+"""天道交易所只读行情与买入、止盈、减仓、清仓建议；本文件的建议都不自动执行。
+唯一会下单的是 biz_stock_tick_trader（默认关），它借用这里的入口缓存和 submit_market_trade。
 
 每轮保存 start(1D)，每六小时补取 symbol(1Y)，按真实时间窗口读取 MiniApp 数据。
 买入：现价进入低价区（< BUY_BELOW）。卖出：浮盈 +30% 止盈一半（只提一次）、+60% 清仓；卖过一半后
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 MARKET_WEB_PATH = "/miniapp/xianxia-market"
 MARKET_API_PREFIX = "/api/miniapp/xianxia-market/"
-MARKET_ENDPOINTS = ("start", "overview", "symbol")
+MARKET_ENDPOINTS = ("start", "overview", "symbol", "trade")
 MARKET_ACTION = "market"
 MARKET_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{4,160}$")
 HISTORY_RANGE_KEY = "1Y"
@@ -90,6 +91,7 @@ DIGEST_HOUR = 8  # 北京时间
 BEIJING = timezone(timedelta(hours=8))
 
 _LAUNCH_CACHE: dict = {}  # profile_id -> {"token", "init_data", "at"}，只在内存里
+_LAUNCH_LOCKS: dict = {}  # profile_id -> asyncio.Lock
 
 
 def _url_shape(url: str) -> str:
@@ -220,14 +222,16 @@ async def run_market_snapshot_production_flow(
     client: object, storage: object, profile_id: int = 0, *, transport=None, with_history: bool = True
 ) -> dict:
     pid = int(profile_id or 0)
-    cached = _LAUNCH_CACHE.get(pid)
-    if cached and time.time() - float(cached.get("at") or 0) < LAUNCH_CACHE_SECONDS:
-        launch = cached
-    else:
-        launch = await resolve_market_launch(client, storage, transport=transport)
-        if not launch.get("ok"):
-            return {"ok": False, "error": launch.get("error"), "symbols": {}}
-        launch = _LAUNCH_CACHE[pid] = {**launch, "at": time.time()}
+    # 行情快照和逐跳交易两条协程共用这份入口：缓存过期时只让一个去取，另一个等它取完直接用
+    async with _LAUNCH_LOCKS.setdefault(pid, asyncio.Lock()):
+        cached = _LAUNCH_CACHE.get(pid)
+        if cached and time.time() - float(cached.get("at") or 0) < LAUNCH_CACHE_SECONDS:
+            launch = cached
+        else:
+            launch = await resolve_market_launch(client, storage, transport=transport)
+            if not launch.get("ok"):
+                return {"ok": False, "error": launch.get("error"), "symbols": {}}
+            launch = _LAUNCH_CACHE[pid] = {**launch, "at": time.time()}
     result = await asyncio.to_thread(
         run_market_snapshot_flow,
         token=launch["token"],
@@ -242,6 +246,24 @@ async def run_market_snapshot_production_flow(
         )
     result["launch_cached"] = bool(cached) and launch is cached
     return result
+
+
+async def submit_market_trade(profile_id: int, *, side: str, symbol: str, value: int, transport=None) -> dict:
+    """下一笔现货单：买入 value = 投入灵石，卖出 value = 股数（页面 submitTrade 的同一请求）。
+
+    只用刚读行情时缓存的那份入口，不为下单另取；被拒就原样返回，由调用方决定要不要重来。
+    status_code 为 0（没收到回包）或 >=500 时成交与否未知，调用方必须拿持仓对账，不能当作失败重发。
+    """
+    launch = _LAUNCH_CACHE.get(int(profile_id or 0)) or {}
+    if side not in ("buy", "sell") or int(value) <= 0:
+        raise ValueError(f"bad market trade: {side} {value}")
+    if not launch.get("ok"):
+        return {"ok": False, "status_code": -1, "data": {}, "error": "交易所入口未就绪"}
+    request = build_market_request(
+        "trade", token=launch["token"], init_data=launch["init_data"], side=side, symbol=symbol, rangeKey="1D",
+        **{"amount" if side == "buy" else "quantity": int(value)},
+    )
+    return await asyncio.to_thread(execute_pagoda_request, request, transport or _urllib_transport)
 
 
 def _number(value: object, default=0.0):

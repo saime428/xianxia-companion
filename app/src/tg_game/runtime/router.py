@@ -24,6 +24,7 @@ from tg_game.features.xinggong.biz_xinggong_star_board import (
     is_starboard_insufficient_reply,
 )
 from tg_game.features.biz_ldc_red_packet import observe_ldc_red_packet, track_ldc_red_packet
+from tg_game.features import biz_xuangu_quiz
 from tg_game.features.tianxing import ensure_schema as ensure_tianxing_schema
 from tg_game.features.soul.biz_soul_cultivation import maybe_resume_after_return
 from tg_game.features.soul.biz_soul_trial import maybe_answer_soul_trial
@@ -328,6 +329,7 @@ class Router:
     async def startup(self, client: object) -> None:
         self.storage.init_schema()
         ensure_tianxing_schema(self.storage)
+        biz_xuangu_quiz.ensure_schema(self.storage)
         settings = get_settings()
         profile = self._resolve_runtime_profile()
         if profile:
@@ -570,6 +572,10 @@ class Router:
             observe_fate_evolution(context, self.storage)
         except Exception:
             logger.exception("Fate evolution observer failed")
+        try:
+            biz_xuangu_quiz.observe_xuangu_quiz(context, self.storage)
+        except Exception:
+            logger.exception("Xuangu quiz observer failed")
         try:
             observe_ldc_red_packet(context, self.storage)
         except Exception:

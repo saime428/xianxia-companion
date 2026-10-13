@@ -1980,6 +1980,16 @@ class WorldBossMonitor:
                     # Keep the established estimate while the new extreme error
                     # is unconfirmed. Do not store it in the 12-hit tail history.
                     return None, "late_hit_spike_pending"
+                if (
+                    request_excess_ms is not None
+                    and request_excess_ms >= WORLD_BOSS_HOLD_FEEDBACK_SPIKE_MS
+                    and abs(error) <= request_excess_ms + WORLD_BOSS_HOLD_FEEDBACK_SLACK_MS
+                    and self._request_spike_skips < WORLD_BOSS_HOLD_FEEDBACK_SKIP_LIMIT
+                ):
+                    # Filter explained repeats without spending the first
+                    # extreme sample's skip budget or clearing its pending flag.
+                    self._request_spike_skips += 1
+                    return None, "request_spike_skipped"
                 feedback = "repeated_late_hit_skew"
             else:
                 self._pending_hold_spike = False

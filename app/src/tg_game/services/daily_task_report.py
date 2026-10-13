@@ -87,8 +87,8 @@ def _boss_reward(notices, username, event):
 # without it; the three boss drops once each, 2/59 hold each. The game's own 至宝/珍稀掉落 labels
 # are not used: 空间之核/九天神雷木/太虚仙露 come from 4-5% of rifts and ~20/59 hold them, and boss
 # 珍稀掉落 lists 四级妖丹. 九转凝魂丹丹方 (~0.9%) left out on request. game_items.rarity is all 0.
-# Re-survey when drops change. 昆吾通行令 added on request (命运卡 gives it, usually +0).
-RARE_ITEMS = ("庚金", "衍神玉简", "大衍诀残篇·衍神", "大衍灵傀图谱", "昆吾通行令")
+# Re-survey when drops change. 昆吾通行令 and 幸运符 are highlighted on request.
+RARE_ITEMS = ("庚金", "衍神玉简", "大衍诀残篇·衍神", "大衍灵傀图谱", "昆吾通行令", "幸运符")
 _NAMES = "|".join(map(re.escape, RARE_ITEMS))
 # 【X】 in rift/问心塔/青元子 text, "X ×n" in 野外 loot, "X +n" (n>0) in 命运卡;
 # not 庚金砂, 青竹蜂云剑（…庚金相） or the daily "昆吾通行令 +0".
@@ -97,6 +97,31 @@ _RARE = re.compile(f"【({_NAMES})】|(?<![\\w·（])({_NAMES})(?= ×| \\+[1-9])
 
 def _rare_items(line):
     return list(dict.fromkeys(a or b for a, b in _RARE.findall(line)))
+
+
+def _fishing_bonus_lines(db, profile_id, since, until):
+    """Successful casts retain their actual bonus drops, separately from fish counts."""
+    rows = db.execute("SELECT created_at,pond,result_json FROM fishing_casts WHERE profile_id=? AND caught>0 AND created_at>=? AND created_at<? ORDER BY created_at,id", (profile_id, since, until))
+    lines = []
+    for at, pond, raw in rows:
+        loot = _json(raw).get("bonusLoot")
+        if not isinstance(loot, list):
+            continue
+        parts = []
+        for item in loot:
+            if not isinstance(item, dict):
+                continue
+            qty = item.get("qty")
+            if isinstance(qty, bool) or not re.fullmatch(r"[0-9]+", str(qty)) or int(qty) <= 0:
+                continue
+            name = "幸运符" if item.get("itemId") == "item_lucky_charm" else _short(item.get("name"), 40)
+            if name:
+                parts.append(f"【{name}】×{int(qty)}")
+        if parts:
+            when = datetime.fromtimestamp(at, GAME_TZ)
+            source = f"（{_short(pond, 30)}）" if pond else ""
+            lines.append(f"垂钓 {when:%m-%d %H:%M}{source}：额外获得" + "、".join(parts))
+    return lines
 
 
 def due_window(config, now):
@@ -131,6 +156,9 @@ def build_report(storage, start, end):
             pid, name, raw, username = account
             payload = _json(raw)
             results, errors = [], []
+            from tg_game.features.market.stone_gambling import report_lines as stone_report_lines
+            stone_identity = db.execute("SELECT telegram_user_id FROM profiles WHERE id=?", (pid,)).fetchone()
+            results.extend(stone_report_lines(db, stone_identity[0], since, until))
             def fresh(value):
                 return isinstance(value, dict) and since <= _stamp(value.get("updated_at") or value.get("completed_at")) < until
             def add(label, run, detail):
@@ -164,6 +192,7 @@ def build_report(storage, start, end):
             fish = db.execute("SELECT count(*),coalesce(sum(caught),0) FROM fishing_casts WHERE profile_id=? AND created_at>=? AND created_at<?", (pid, since, until)).fetchone()
             if fish[0]:
                 results.append(f"垂钓 {fish[0]}竿／钓获{fish[1]}")
+            results.extend(_fishing_bonus_lines(db, pid, since, until))
             hearts = db.execute("SELECT count(*) FROM companion_heart_tribulation_logs WHERE profile_id=? AND event_type='settlement_recorded' AND created_at>=? AND created_at<?", (pid, since, until)).fetchone()[0]
             if hearts:
                 results.append(f"心劫结算 {hearts}次")

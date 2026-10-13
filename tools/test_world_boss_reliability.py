@@ -185,6 +185,39 @@ class ReliabilityChecks(unittest.IsolatedAsyncioTestCase):
             finally:
                 await monitor.stop()
 
+    async def test_three_slow_hits_preserve_holds_after_requests_recover(self):
+        for seed in range(10):
+            clock = Clock()
+            server = replay.TimedServer(clock)
+            server.starts_at = 0
+            server.windows = [dict(window(i, 2000 + 3500 * i), perfectMs=210) for i in range(12)]
+            server.challenge.update(durationMs=45000, maxDurationMs=45000, windowCount=12)
+            # Approximate today's hit-response burst, without contacting the game.
+            delays = {'w5': .35, 'w6': .71, 'w7': .48}
+
+            async def post(origin, path, payload, timeout):
+                if path.endswith('/hit'):
+                    await clock.sleep(delays.get(payload.get('windowId'), 0))
+                return await server.post(origin, path, payload, timeout)
+
+            with tempfile.TemporaryDirectory() as directory:
+                monitor, _ = monitor_for(Path(directory), clock)
+                monitor.post_json = post
+                monitor._timing = CombatTiming(rng=random.Random(seed))
+                monitor._start_combat(server.challenge, {'maxHp': 100}, 0, server.windows)
+                hits = []
+                try:
+                    for index, target in enumerate(server.windows):
+                        result = await clock.run(monitor._hit_window(
+                            ENTRY, 'offline', 'offline', 'offline', 0, target, index))
+                        hits.append(result['diagnostic'])
+                    for hit in hits[8:]:
+                        self.assertEqual(hit['hold_reserve_ms'], 100, (seed, hit))
+                        self.assertGreaterEqual(hit['planned_hold_ms'], 1050, (seed, hit))
+                        self.assertTrue(hit['accepted_perfect'], (seed, hit))
+                finally:
+                    await monitor.stop()
+
     async def test_token_replacement_does_not_bypass_retry_after(self):
         clock, calls = Clock(), []
         delay = 3
@@ -487,6 +520,80 @@ class DistributionChecks(unittest.TestCase):
             _, state = monitor._observe_hold_feedback(
                 1500, 1000, late_delta_ms=400, perfect_ms=210, request_excess_ms=600)
             self.assertEqual(state, 'late_hit_spike_pending')
+
+    def test_three_extreme_request_spikes_do_not_poison_recovered_holds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, _ = monitor_for(Path(directory), Clock())
+            monitor._timing.enabled = True
+            for _ in range(5):
+                monitor._observe_hold_feedback(1110, 1110, late_delta_ms=10, perfect_ms=210,
+                                               request_excess_ms=0)
+            feedback = []
+            # 10-12 demo_main hits 6..8: server hold minus truthful local hold.
+            for server, local, delta, excess in (
+                (1445.7, 1121, 296.7, 346),
+                (1775.4, 1123, 670.7, 707),
+                (1489.1, 1109, 403.8, 472),
+            ):
+                _, state = monitor._observe_hold_feedback(
+                    server, local, late_delta_ms=delta, perfect_ms=210,
+                    request_excess_ms=excess)
+                feedback.append(state)
+            self.assertEqual(feedback, ['late_hit_spike_pending'] + ['request_spike_skipped'] * 2)
+            plan = monitor._timing.plan(210, monitor._planned_hold_ms(), monitor._hold_skew_ms)
+            self.assertEqual(plan.hold_reserve_ms, 100)
+            self.assertGreaterEqual(plan.hold_ms, 1050)
+            monitor._observe_hold_feedback(825, 825, late_delta_ms=1, perfect_ms=210,
+                                           request_excess_ms=0)
+            self.assertFalse(monitor._pending_hold_spike)
+            self.assertEqual(monitor._request_spike_skips, 0)
+
+    def test_sustained_extreme_request_latency_is_still_learned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, _ = monitor_for(Path(directory), Clock())
+            monitor._timing.enabled = True
+            feedback = []
+            for _ in range(4):
+                _, state = monitor._observe_hold_feedback(
+                    1500, 1000, late_delta_ms=400, perfect_ms=210,
+                    request_excess_ms=550)
+                feedback.append(state)
+            self.assertEqual(feedback, ['late_hit_spike_pending']
+                             + ['request_spike_skipped'] * 2 + ['repeated_late_hit_skew'])
+            self.assertGreater(monitor._hold_skew_ms, 0)
+            self.assertGreater(monitor._timing.plan(
+                210, monitor._planned_hold_ms(), monitor._hold_skew_ms).hold_reserve_ms, 100)
+
+    def test_skipped_extreme_request_spike_keeps_pending_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, _ = monitor_for(Path(directory), Clock())
+            _, state = monitor._observe_hold_feedback(
+                1500, 1000, late_delta_ms=400, perfect_ms=210)
+            self.assertEqual(state, 'late_hit_spike_pending')
+            _, state = monitor._observe_hold_feedback(
+                1500, 1000, late_delta_ms=400, perfect_ms=210, request_excess_ms=550)
+            self.assertEqual(state, 'request_spike_skipped')
+            self.assertTrue(monitor._pending_hold_spike)
+            _, state = monitor._observe_hold_feedback(
+                1500, 1000, late_delta_ms=400, perfect_ms=210, request_excess_ms=0)
+            self.assertEqual(state, 'repeated_late_hit_skew')
+
+    def test_first_extreme_hit_preserves_budget_for_unknown_direction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            monitor, _ = monitor_for(Path(directory), Clock())
+            # 10-05 demo_alt2_new: a moderate error, a first extreme hit, then a
+            # slow hit whose direction is unknown. It must still be filtered.
+            _, state = monitor._observe_hold_feedback(
+                1005.8, 1131, late_delta_ms=286, perfect_ms=210, request_excess_ms=448)
+            self.assertEqual(state, 'request_spike_skipped')
+            _, state = monitor._observe_hold_feedback(
+                1081.8, 668, late_delta_ms=406.5, perfect_ms=210, request_excess_ms=449)
+            self.assertEqual(state, 'late_hit_spike_pending')
+            self.assertEqual(monitor._request_spike_skips, 1)
+            _, state = monitor._observe_hold_feedback(
+                1848, 1098, late_delta_ms=None, perfect_ms=210, request_excess_ms=850)
+            self.assertEqual(state, 'request_spike_skipped')
+            self.assertEqual(list(monitor._timing.hold_errors), [])
 
     def test_reentering_same_battle_does_not_clear_concurrent_death(self):
         with tempfile.TemporaryDirectory() as directory:

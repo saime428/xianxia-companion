@@ -8,8 +8,8 @@
 自动抢（track_ldc_red_packet）：只有 runtime_state `ldc_red_packet:<pid>` 开着的号动手，日志前缀「LDC抢红包」。
 红包本体（09-30 实测）长这样，按钮 data 每个包都是 ldcrp:grab，bot 按消息号认包：
     🧧 【LDC 红包】｜@发包人 / 1000.00 LDC / 10 份 / 请直接点击下方按钮抢红包 / 需已绑定论坛｜30 分钟
-用户定的规则：只抢总额大于 200、至少 2 份的包；不做第一个——看到「恭喜 X 抢到…（剩余 a / b 份）」
-且还有剩余，再随机等 1–3 秒点一次；没人抢的包不碰。结果发这个号的收藏夹。
+只抢总额超过门槛、至少 2 份的包。instant 模式收到红包本体就立即领取；
+after_first 模式等别人先抢后随机等待。每包只点一次，结果发这个号的收藏夹。
 """
 
 import asyncio
@@ -118,7 +118,8 @@ NOTICE_RE = re.compile(r"抢到\s*([\d.]+)\s*LDC[\s\S]*?剩余\s*(\d+)\s*/\s*(\d
 GOT_RE = re.compile(r"(?:抢到|获得)\D{0,6}([\d.]+)\s*LDC")
 SWITCH_KEY = "ldc_red_packet:{}"
 MIN_TOTAL = 200.0  # 只抢总额大于这个的
-DELAY_SECONDS = (1.0, 3.0)  # 看到别人抢到后再等这么久
+DELAY_SECONDS = (1.0, 3.0)  # after_first 模式的等待时间
+GRAB_MODES = {"instant", "after_first"}
 PACKET_TTL_SECONDS = 30 * 60  # 红包 30 分钟过期
 CLICK_TIMEOUT_SECONDS = 30
 AMOUNT_SLACK = 0.05  # 两位小数的金额加减
@@ -127,7 +128,8 @@ BRAKE_WORDS = ("天牢", "封禁", "没有绑定", "未绑定", "没绑定", "�
 GRAB_TAG = "LDC抢红包"
 
 # 场上的红包（大小都记，好把抢到通知认到对的包上）只放进程内存：profile_id -> {消息号: 账}。
-# state：watch 不抢 / wait 等别人先抢 / armed 已排上点击 / done 点过或抢完；30 分钟后整条删掉，
+# state：watch 不抢 / wait 等别人先抢 / armed 已排上点击 / done 点过或抢完；instant 从本体直接 armed。
+# 30 分钟后整条删掉，
 # 删之前同一消息号再来（编辑）不会重新入账，所以每包最多点一次。ponytail: 重启丢账，最多错过一个包；
 # 「剩余 0」的通知对谁都对得上，几个同份数的包同时在场时认不出谁抢完了，旧账留到 30 分钟（只会让后来的包更难认准、
 # 少抢，不会多点）；要精确就给 worker 挂 MessageDeleted——红包抢完即删
@@ -176,7 +178,7 @@ def parse_packet(context):
 
 
 def track_ldc_red_packet(context, storage, *, now=None):
-    """开了开关的号：记下大红包，等别人先抢到再点。返回这条消息引起的动作（自检用），无关返回 None。"""
+    """按账号模式领取大红包。返回这条消息引起的动作（自检用），无关返回 None。"""
     sender_id = int(context.sender_id or 0)
     if sender_id != PACKET_BOT_ID and sender_id not in NOTICE_BOT_IDS:
         return None
@@ -197,9 +199,9 @@ def track_ldc_red_packet(context, storage, *, now=None):
     now = time.time() if now is None else now
     live = _live.setdefault(int(profile.id), {})
     for packet_id in [key for key, info in live.items() if now - info["seen"] > PACKET_TTL_SECONDS]:
-        del live[packet_id]  # 30 分钟过期；没人抢到过的大包也就这样放过，不做第一个
+        del live[packet_id]  # 30 分钟过期，清除去重记录
     if sender_id == PACKET_BOT_ID:
-        return _track_packet(context, live, switch, now)
+        return _track_packet(context, storage, live, switch, now)
     notice = NOTICE_RE.search(text)
     if not notice:
         return None
@@ -207,7 +209,7 @@ def track_ldc_red_packet(context, storage, *, now=None):
     return _track_notice(context, storage, live, switch, got, left, shares, left_total)
 
 
-def _track_packet(context, live, switch, now):
+def _track_packet(context, storage, live, switch, now):
     packet = parse_packet(context)
     if not packet or context.message_id in live:
         return None
@@ -219,6 +221,12 @@ def _track_packet(context, live, switch, now):
         "seen": now, "total": total, "shares": shares, "left": shares, "left_total": total,
         "packer": packer, "chat_id": context.chat_id, "state": "wait" if target else "watch",
     }
+    if target and switch.get("grab_mode") == "instant":
+        live[context.message_id]["state"] = "armed"
+        logger.info("%s %s 收到大包立即领取：%s 的 %g LDC / %d 份",
+                    GRAB_TAG, context.message_id, packer, total, shares)
+        _spawn(_grab(context.client, storage, int(context.profile.id), context.message_id, 0))
+        return "armed"
     logger.info(
         "%s %s %s：%s 的 %g LDC / %d 份", GRAB_TAG, "盯上（等别人先抢）" if target else "只记账不抢",
         context.message_id, packer, total, shares,
@@ -258,7 +266,8 @@ def _track_notice(context, storage, live, switch, got, left, shares, left_total)
 
 @tracked_flow
 async def _grab(client, storage, profile_id, packet_id, delay):
-    await asyncio.sleep(delay)
+    if delay > 0:
+        await asyncio.sleep(delay)
     info = _live.get(profile_id, {}).get(packet_id)
     if not info or info["state"] != "armed":
         logger.info("%s %s 等的时候被抢完了，不点", GRAB_TAG, packet_id)

@@ -9,6 +9,7 @@ from pathlib import Path
 from telethon import TelegramClient, events
 
 from tg_game.config import get_settings, telegram_client_kwargs
+from tg_game.features.market.stone_gambling import is_cut_retry
 from tg_game.features.tianxing import maybe_queue_daily_observe
 from tg_game.runtime_status import build_runtime_status, dump_runtime_status
 from tg_game.services.automation_switch import AutomationPausedError, is_automation_paused
@@ -50,6 +51,7 @@ from tg_game.telegram.resume_guard import (
 )
 from tg_game.telegram.send_utils import (
     OutgoingCommandNotSendingError,
+    _record_sent_outgoing_message,
     send_message_with_thread_fallback,
 )
 
@@ -255,62 +257,6 @@ def _schedule_xinggong_tianji_refresh(
     )
 
 
-def _record_sent_outgoing_message(
-    storage: Storage,
-    *,
-    profile_id: int,
-    chat_id: int,
-    fallback_thread_id: int | None,
-    text: str,
-    message: object,
-) -> None:
-    message_id = int(getattr(message, "id", None) or 0)
-    if message_id <= 0:
-        return
-
-    reply_to = getattr(message, "reply_to", None)
-    reply_to_msg_id = getattr(reply_to, "reply_to_msg_id", None)
-    thread_id = None
-    for candidate in [
-        getattr(reply_to, "reply_to_top_id", None),
-        getattr(message, "reply_to_top_id", None),
-        getattr(reply_to, "top_msg_id", None),
-        getattr(message, "top_msg_id", None),
-        fallback_thread_id,
-    ]:
-        if candidate:
-            thread_id = int(candidate)
-            break
-    binding = storage.resolve_chat_binding_for_event(
-        int(profile_id),
-        int(chat_id),
-        thread_id,
-        int(reply_to_msg_id) if reply_to_msg_id else None,
-    )
-    if binding and binding.thread_id:
-        thread_id = int(binding.thread_id)
-
-    profile = storage.get_profile(int(profile_id))
-    sender_text = str(getattr(profile, "telegram_user_id", "") or "").strip()
-    sender_id = int(sender_text) if sender_text.isdigit() else 0
-    if sender_id <= 0:
-        sender_id = int(getattr(message, "sender_id", None) or 0)
-    sender_username = str(getattr(profile, "telegram_username", "") or "").strip()
-
-    storage.upsert_bound_message(
-        profile_id=int(profile_id),
-        chat_id=int(chat_id),
-        thread_id=thread_id,
-        message_id=message_id,
-        reply_to_msg_id=int(reply_to_msg_id) if reply_to_msg_id else None,
-        sender_id=sender_id,
-        sender_username=sender_username,
-        direction="outgoing",
-        is_bot=False,
-        text=text,
-    )
-
-
 async def _refresh_external_sessions(storage: Storage) -> None:
     while True:
         try:
@@ -470,6 +416,7 @@ async def _dispatch_outgoing_commands(
                 previous_sent_at
                 and monotonic_now - previous_sent_at
                 < OUTGOING_DUPLICATE_WINDOW_SECONDS
+                and not is_cut_retry(storage,int(command['id']))
             ):
                 # 同一条指令刚发过，多半是两条代码路径各入队一次；
                 # 直接合并，等前一条的回包即可，不重复刷屏

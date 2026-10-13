@@ -375,6 +375,28 @@ def test_tianxing_profile_predicts_before_every_fight():
             # 非天星宗号不受影响，直接开打，不发任何天星指令
             assert run(plain.id) is True and fights == ["均衡", "均衡", "均衡"], fights
             assert _outgoing(storage, plain.id) == [], _outgoing(storage, plain.id)
+            # 10-13：本地以为推命改命都挂着，其实早被裂缝用掉了。这一场的 notes 只有命盘一句、没有推命/改命
+            # 字样，等于裸打；打完这一场就该发现不对，下一场前先查天机盘（修前：状态原样，60 秒连打 8 场）
+            _confirm_outgoing(storage)
+            tx.save_profile_record(
+                storage,
+                star.id,
+                state={
+                    **fixed,
+                    "current_prediction": "探索",
+                    "current_prediction_until": time.time() + 3600,
+                    "current_change": "探索",
+                    "current_change_until": time.time() + tx.TIANXING_CHANGE_FATE_SECONDS,
+                },
+            )
+            storage.update_external_account_payload(
+                star.id, "asc_aiopenai", lambda payload: wild.defer_request(payload, 0)
+            )
+            next_attempt.clear()
+            next_attempt["notes"] = ["命盘【贪狼】照命，主偏财夺势，闭关奇遇与探寻收获更盛，斗法更擅夺取战果，但炼制时心火浮躁。"]
+            assert run(star.id) is True and len(fights) == 4, fights
+            assert run(star.id) is False and len(fights) == 4, fights
+            assert _outgoing(storage, star.id)[5:] == [".天机盘"], _outgoing(storage, star.id)
     finally:
         wild.run_public_production_flow = original
 

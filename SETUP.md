@@ -175,7 +175,7 @@ TZ=Asia/Shanghai .venv/bin/python run_services.py all
 
 - **闭关洞府**：自动闭关 / 深度闭关、极阴、南陇、探寻裂缝、元婴。
 - **宗门大殿**：宗门点卯；星宫（问安、助阵、星辰采集、自动观星）；落云灵树；天星宗号还有天星配置（推命 / 改命）。
-  - **自动观星**（星宫号）：游戏每天只让观一次。在卡片上填改命目标的用户名、要抢的档位（天道演化每 3 小时整点结算，可填 3、6、9、12、15、18、21，最早的是首选，后面的是后备），再勾上值得改命的事件。程序卡在结算前一分钟才发 `.观星`，观到勾选的事件才在结算前 20 秒回复 `.改换星移 @目标`，让别人来不及再改走。**改命要烧掉自己约一成修为，成功率 50%，失败不退，也不公布结果**，所以默认只勾三种稀有事件；目标留空或一个都不勾，就只观星不改命。要改配置先关再开。群里所有人的观星和每次结算都会长期记下来，`tools/fate_evolution_stats.py` 可以按档看哪一档抢的人少。
+  - **自动观星**（星宫号）：游戏每天只让观一次。在卡片上填改命目标的用户名、要抢的档位（天道演化每 3 小时整点结算，可填 3、6、9、12、15、18、21，最早的是首选，后面的是后备），再勾上值得改命的事件。程序卡在结算前一分钟才发 `.观星`，观到勾选的事件才在结算前 20 秒回复 `.改换星移 @目标`，让别人来不及再改走。**改命要烧掉自己约一成修为，成功率 50%，失败不退，也不公布结果**，所以默认只勾三种稀有事件；目标留空或一个都不勾，就只观星不改命。要改配置先关再开。群里所有人的观星和每次结算都会长期记下来，`tools/fate_evolution_stats.py` 可以按档看哪一档抢的人少。游戏不公布改命成没成，所以自己每次改命也会记一笔：烧了多少修为、目标号（得是本程序里登录的号）结算前后背包多了什么，同一个脚本会列出来，用来判断这修为烧得值不值。
 - **三界游历**：侍妾自动（远航、代卜、入梦、心劫、双修、剑阵、凝液……）、闯塔 / 天机试炼 / 噬金虫的每日开关、法宝、慕兰、世界 BOSS。**自动拼图**跟着「自动入梦」走，不用单独开：随行侍妾哪张残图四片凑齐了就自动 `.拼图`。
 - **私人仙府**：洞府寻宝每日。
 - **诸元神巡令**（只有管理员能进）：野外历练的定时和策略只能在这里设（群里的 `.野外历练` 已经失效）。寻宝、天机试炼、闯塔、噬金虫也可以在这里统一托管；托管之后，模块页上对应的每日开关会提示「已由诸元神巡令统一托管」，这是正常的。
@@ -218,6 +218,14 @@ PYTHONPATH=app/src .venv/bin/python -B -m tg_game.features.world_boss.world_boss
   .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('stock_market_snapshot_every_seconds:<id>','1800',time.time()));c.commit()"
   ```
 
+- **天道交易所逐跳自动交易**（默认关；整个程序只有这一项会真的下单）：行情约 10 分钟一跳，单跳涨幅超过门槛（默认 1.5%）就按盘面价买入 `amount` 灵石，过 3 跳卖出。同一时间只持一笔；账号里原本就有持仓的标的不买也不卖。连亏 5 笔自动关开关，当天净亏超过单笔金额的 5% 停到第二天。门槛可以加一项 `"signal_pct": 1.8` 来改。每一笔记在 `stock_tick_trades` 表里。这是拿灵石冒险，过去的行情有这个规律不等于以后一直有，先用小金额试：
+
+  ```bash
+  .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('stock_tick_trader:<id>','{\"enabled\": true, \"amount\": 10000}',time.time()));c.commit()"
+  ```
+
+- **自动赌石**（每天定时一次，默认没有启用任何账号）：由独立的 `xianxia-stone-gambling.service` 负责，启用、预算、停用和核对的命令见仓库根目录的 `STONE-GAMBLING.md`。
+
 - **野外历练日报**（发到这个号自己 TG 的收藏夹，不进游戏群）：当天的野外历练打满后发一份，逐场列出胜负、修为和掉落；天星宗的号还会列出推命命中几次、改命挡下几场败局，方便算天机值的账。一天只发一次。野外历练本身要先在诸元神巡令里开着：
 
   ```bash
@@ -230,10 +238,10 @@ PYTHONPATH=app/src .venv/bin/python -B -m tg_game.features.world_boss.world_boss
   .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('wild_experience_disabled:<id>','1',time.time()));c.commit()"
   ```
 
-- **自动抢 LDC 红包**（群里有人 `.发红包` 后 bot 发的【LDC 红包】，抢到的 LDC 进这个号绑定的 linux.do 论坛账户，先私聊 bot 发 `.绑定论坛 论坛ID 论坛用户名` 绑好）：只抢总额大于 `min_total`、至少 2 份的包；不抢第一个，看到别人抢到了、还有剩余，才随机等 `delay` 秒点一次；没人抢的包不碰；讨红包的按钮一律不碰。每次点完把 bot 的回复发到这个号的收藏夹。bot 回复里出现「绑定」「天牢」「封禁」，或者天道封禁点了这个号，会自动关掉开关。日志前缀 `LDC抢红包`：
+- **自动抢 LDC 红包**（群里有人 `.发红包` 后 bot 发的【LDC 红包】，抢到的 LDC 进这个号绑定的 linux.do 论坛账户，先私聊 bot 发 `.绑定论坛 论坛ID 论坛用户名` 绑好）：只抢总额大于 `min_total`、至少 2 份、不是自己发的包，每个包最多点一次；`min_total` 可以设成 0（不限金额）。领取方式 `grab_mode` 有两种，不写就是 `after_first`：`after_first` 不抢第一个，看到别人抢到了、还有剩余，才随机等 `delay` 秒点一次，没人抢的包不碰；`instant` 看到达标的包立刻点，不等别人，也不用 `delay`。门槛和领取方式在网页的自动化设置里也能改。讨红包的按钮一律不碰。每次点完把 bot 的回复发到这个号的收藏夹。bot 回复里出现「绑定」「天牢」「封禁」，或者天道封禁点了这个号，会自动关掉开关。日志前缀 `LDC抢红包`：
 
   ```bash
-  .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('ldc_red_packet:<id>','{\"enabled\": true, \"min_total\": 200, \"delay\": [1, 3]}',time.time()));c.commit()"
+  .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('ldc_red_packet:<id>','{\"enabled\": true, \"min_total\": 200, \"grab_mode\": \"after_first\", \"delay\": [1, 3]}',time.time()));c.commit()"
   ```
 
 - **天星宗斗法**（`tools/tianxing_duel_daily.py`）：群和话题读 `.env`，照文件头的示例加到计划任务里。只有天星宗号用得上。

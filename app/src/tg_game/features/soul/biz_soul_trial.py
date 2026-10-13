@@ -29,7 +29,7 @@ from tg_game.storage import Storage
 
 logger = logging.getLogger(__name__)
 
-TRIAL_CHOICE = "强行突破"  # 用户自己选的；实测 强行突破 经验多、稳固道心 修为多
+TRIAL_CHOICE = "稳固道心"  # 用户 10-13 定：不再强行突破，改稳（实测 强行突破 经验多、稳固道心 修为多）
 DECISION_COMMAND = ".抉择"
 # 用户确认提示原文里就带这两句完整指令；两句都在才算心魔试炼提示，其他 抉择 玩法不会误中
 PROMPT_MARKERS = (".抉择 强行突破", ".抉择 稳固道心")

@@ -1,7 +1,7 @@
 import re
 from typing import Callable, Optional
 
-from tg_game.dungeon_defs import DUNGEON_DEFINITIONS
+from tg_game.dungeon_defs import DUNGEON_DEFINITIONS, dungeon_reply_matches
 
 
 def get_dungeon_definition(dungeon_key: str) -> dict:
@@ -59,10 +59,6 @@ def list_dungeon_feed_source_messages(
     prefixes = [
         str(prefix or "").strip() for prefix in prefixes if str(prefix or "").strip()
     ]
-    reply_prefixes = dungeon_def.get("reply_prefixes") or []
-    reply_prefixes = [
-        str(p or "").strip() for p in reply_prefixes if str(p or "").strip()
-    ]
     messages_by_id = {
         int(msg.get("message_id") or 0): msg
         for msg in messages
@@ -84,7 +80,7 @@ def list_dungeon_feed_source_messages(
         if not bool(msg.get("is_bot")):
             return False
         bot_text = str(msg.get("text") or "").strip()
-        if any(bot_text.startswith(p) for p in reply_prefixes):
+        if dungeon_reply_matches(dungeon_def, bot_text):
             return True
         reply_to = int(msg.get("reply_to_msg_id") or 0)
         depth = 0

@@ -9,8 +9,12 @@ DUNGEON_DEFINITIONS = [
             "`.加入副本 <房间ID>`：加入队伍，5 人满队",
             "`.进入虚天殿`：队长满员后出发",
             "`.选择道路 冰/火`：第二关分支抉择，由队长操作；冰路偏神魂/养魂收益，火路偏妖丹/攻伐收益",
+            "`.阵策 稳/压/势`：定下道路后的推进阵策（稳扎稳打/强压阵眼/猎机夺势），由队长操作",
             "`.争鼎 求稳/夺鼎`：第三关胜出后的最终争宝抉择，由队长操作",
+            "`.后殿抉择 收手/冲关`：第三关结算后是否继续冲第四、第五关，已得奖励不会回吐",
+            "`.后殿阵策 镇/夺/卦`：第四关试阵之法（镇碑固脉/裂纹夺隙/借卦逆推）",
             "`.虚天殿奖励`：查看奖励池与结算",
+            "`.虚天殿帮助`：查看虚天殿说明",
             "`.解散副本`：未出发时解散队伍并返还残图",
         ],
         "command_prefixes": [
@@ -18,12 +22,39 @@ DUNGEON_DEFINITIONS = [
             ".加入副本",
             ".进入虚天殿",
             ".选择道路",
+            ".阵策",
+            ".选择战术",
             ".争鼎",
+            ".后殿抉择",
+            ".后殿阵策",
+            ".请离",
             ".虚天殿奖励",
+            ".虚天殿帮助",
             ".解散副本",
         ],
+        # 进本后的播报都不回复任何消息，标题里也没有「虚天殿」
         "reply_prefixes": [
             "虚天殿·",
+            "队伍已进入虚天殿",
+            "第一幕·前殿探路",
+            "卦象验阵",
+            "前殿",
+            "第二关·",
+            "第三关·",
+            "第四关·",
+            "第五关·",
+            "鼎前抉择",
+            "战利品结算·",
+            "后殿",
+        ],
+        # 前殿过险（以「【灵医】…」这类职业名起头）、第二关定策/回合/过关、第三关回合（首领二选一）
+        "reply_markers": [
+            "前殿气势",
+            "主攻阵眼锁定为",
+            "破阵进度",
+            "冰火炼心阵",
+            "万天明之影",
+            "蛮胡子之影",
         ],
         "keywords": [
             "虚天殿",
@@ -39,39 +70,65 @@ DUNGEON_DEFINITIONS = [
     {
         "key": "kunwu",
         "title": "昆吾山",
+        # 现行「昆吾山·封魔塔」，照 bot `.昆吾山帮助` 回包写
         "help_lines": [
             "`.开启昆吾山`：队长开房，需昆吾通行令",
-            "`.加入昆吾山 <房间ID>`：加入队伍，当前最多 3 人",
-            "`.进入昆吾山`：队长带队出发",
-            "`.选择 岔路X`：楼层岔路抉择",
-            "`.选择 强行摘取/静待时机`：特殊奇遇抉择",
-            "`.昆吾山奖励`：查看登顶奖励与收益说明",
-            "`.解散昆吾山`：队长解散当前房间",
+            "`.加入昆吾山 <房间ID>`：加入队伍",
+            "`.进入昆吾山`：队长带队出发，固定 5 人，每位队员进本消耗 1 枚通行令",
+            "`.昆吾抉择 路径1/路径2/路径3/路径4`：第一幕入山策略",
+            "`.昆吾抉择 1/2/3`：第二幕宫殿抉择，选项每场随机",
+            "`.昆吾抉择 镇/夺/断`：第三幕阵眼处理，依次为八灵尺、化龙玺、黑风旗",
+            "`.昆吾山状态`：查看封印、魔气、山禁、宝压、玲珑与士气",
+            "`.昆吾山奖励`：查看奖励池与五件法宝掉落",
+            "`.昆吾山帮助`：查看封魔塔指令",
+            "`.使用 镇山封纹/太阴火种/圭灵牌影/化龙玺残印/黑风旗残幅`：为下一次塔心决战提供碎片支援",
+            "`.使用 封魔塔真符 <法宝名>`：解封已认主的昆吾五宝",
+            "`.使用 昆吾灵钥`：下一次昆吾成功通关提高遗响门概率",
+            "`.解散昆吾山`：队长解散房间",
+            "`.催动挪移令`：使用登顶奖励大挪移令",
         ],
         "command_prefixes": [
             ".开启昆吾山",
             ".加入昆吾山",
             ".进入昆吾山",
-            ".选择 岔路",
-            ".选择 强行摘取",
-            ".选择 静待时机",
+            ".昆吾抉择",
+            ".昆吾山状态",
             ".昆吾山奖励",
+            ".昆吾山帮助",
+            ".使用 镇山封纹",
+            ".使用 太阴火种",
+            ".使用 圭灵牌影",
+            ".使用 化龙玺残印",
+            ".使用 黑风旗残幅",
+            ".使用 封魔塔真符",
+            ".使用 昆吾灵钥",
             ".解散昆吾山",
+            ".催动挪移令",
         ],
         "reply_prefixes": [
             "昆吾山·",
+            "昆吾山状态",
+            "昆吾碎片支援",
+            "第四幕·玲珑封魔塔",
+        ],
+        # 幕结果、阵眼处理完毕、第四幕「【第 N 回合】」的标题不带副本名，
+        # 坠魔谷、苍坤洞府、虚天殿也用同样的标题，只能认每条都带的状态行
+        "reply_markers": [
+            "| 山禁 ",
         ],
         "keywords": [
             "昆吾山",
             "开启昆吾山",
             "加入昆吾山",
             "进入昆吾山",
-            "解散昆吾山",
+            "昆吾抉择",
+            "昆吾山状态",
             "昆吾山奖励",
+            "昆吾山帮助",
+            "解散昆吾山",
             "催动挪移令",
-            "岔路",
-            "强行摘取",
-            "静待时机",
+            "封魔塔",
+            "塔心魔影",
         ],
     },
     {
@@ -84,6 +141,7 @@ DUNGEON_DEFINITIONS = [
             "`.坠魔抉择 路径1/路径2/路径3`：第一幕分支",
             "`.坠魔抉择 1/2`：第二幕抉择",
             "`.坠魔谷状态`：查看当前进度、魔染、封印与士气",
+            "`.坠魔谷帮助`：查看坠魔谷说明",
             "`.解散坠魔谷`：队长解散房间",
         ],
         "command_prefixes": [
@@ -92,11 +150,17 @@ DUNGEON_DEFINITIONS = [
             ".进入坠魔谷",
             ".坠魔抉择",
             ".坠魔谷状态",
+            ".坠魔谷帮助",
             ".坠魔谷奖励",
             ".解散坠魔谷",
         ],
         "reply_prefixes": [
             "坠魔谷·",
+            "第三幕·古魔祭坛",
+        ],
+        # 第三幕的「【第 N 回合】」不回复任何消息，标题和昆吾山、虚天殿的一样
+        "reply_markers": [
+            "残识血量",
         ],
         "keywords": [
             "坠魔谷",
@@ -249,8 +313,9 @@ DUNGEON_DEFINITIONS = [
             ".苍坤洞府奖励",
             ".苍坤抉择",
         ],
+        # 标题写的是「苍坤上人洞府」；幕结果都回复 .苍坤抉择，靠回复链归属
         "reply_prefixes": [
-            "苍坤洞府·",
+            "苍坤上人洞府·",
         ],
         "keywords": [
             "苍坤洞府",
@@ -264,17 +329,50 @@ DUNGEON_DEFINITIONS = [
             "苍坤抉择",
         ],
     },
+    {
+        "key": "duodeng",
+        "title": "黄龙夺灯",
+        # 2026-10-12 上线，照 bot `.夺灯帮助` 回包写。和别的副本不同：进本后每人每轮都要自己发 .夺灯行动。
+        # 进本后的播报还没见过实样，标题不带「黄龙夺灯」又不回复指令的认不出，见到后补 reply_markers
+        "help_lines": [
+            "`.开启夺灯`：开房，固定 5 人，每人结丹初期以上，每日一次",
+            "`.加入夺灯 <房间ID>`：加入队伍",
+            "`.退出夺灯`：队员退出",
+            "`.解散夺灯`：队长解散房间，不扣门票和次数",
+            "`.夺灯路线 封阵/摄焰`：队长定路线；封阵出灯座纹芯/灯盏灵枢，摄焰出青焰本源/祭灯古诀",
+            "`.夺灯职业 御山/灵医/咒师/影刃/破军`：换职业，须具备对应灵根",
+            "`.夺灯分工 牵制/护法/镇焰/潜袭/破阵`：换分工",
+            "`.夺灯配置`：查看队伍配置",
+            "`.进入夺灯`：正式出发，每人消耗 1 张黄龙夺灯令（20 LDC）",
+            "`.夺灯状态`：查看战况",
+            "`.夺灯行动 <本轮编号> <动作> [东/南/西/北/中或@队友]`：每人每轮自己出手；防守、回元全员可用，灵医可治疗",
+            "`.夺灯接任`：队长失联 90 秒后接任队长",
+            "`.夺灯接替 <分工>`：接替倒下队友的分工，消耗本轮行动",
+            "`.夺灯退路 山道/雾谷`：突围时队长选退路",
+            "`.夺灯帮助`：查看说明；`.夺灯奖励` 回的是同一份",
+            "`.元明灯`：四核心重聚进度；`.元明灯 重聚` / `.元明灯 温养`",
+        ],
+        # 路线、职业、分工、配置、状态、行动、接任、接替、退路、帮助、奖励都以「.夺灯」起头
+        "command_prefixes": [
+            ".开启夺灯",
+            ".加入夺灯",
+            ".退出夺灯",
+            ".解散夺灯",
+            ".进入夺灯",
+            ".夺灯",
+            ".元明灯",
+        ],
+        "reply_prefixes": [
+            "黄龙夺灯",
+            "元明灯·",
+        ],
+    },
 ]
 
 _ALL_DUNGEON_PREFIXES: list[str] = []
 for entry in DUNGEON_DEFINITIONS:
     for prefix in entry.get("command_prefixes") or []:
         _ALL_DUNGEON_PREFIXES.append(prefix.strip().lower())
-
-_ALL_DUNGEON_REPLY_PREFIXES: list[str] = []
-for entry in DUNGEON_DEFINITIONS:
-    for prefix in entry.get("reply_prefixes") or []:
-        _ALL_DUNGEON_REPLY_PREFIXES.append(prefix.strip())
 
 
 def is_dungeon_command_text(text: str) -> bool:
@@ -286,12 +384,22 @@ def is_dungeon_command_text(text: str) -> bool:
     return any(t_lower.startswith(prefix) for prefix in _ALL_DUNGEON_PREFIXES)
 
 
-def is_dungeon_reply_text(text: str) -> bool:
-    """判断bot消息文本是否是副本回包（以副本名前缀开头）"""
+def dungeon_reply_matches(entry: dict, text: str) -> bool:
+    """判断bot消息文本是否是该副本的回包。
+
+    回包标题都带「【」（「【坠魔谷·集结】」），比前缀时先去掉；
+    标题不带副本名的回包靠 reply_markers（正文里出现即算）。
+    """
     t = (text or "").strip()
-    if not t:
-        return False
-    return any(t.startswith(prefix) for prefix in _ALL_DUNGEON_REPLY_PREFIXES)
+    head = t.lstrip("【")
+    return any(head.startswith(p) for p in entry.get("reply_prefixes") or []) or any(
+        marker in t for marker in entry.get("reply_markers") or []
+    )
+
+
+def is_dungeon_reply_text(text: str) -> bool:
+    """判断bot消息文本是否是任意副本的回包"""
+    return any(dungeon_reply_matches(entry, text) for entry in DUNGEON_DEFINITIONS)
 
 
 def get_dungeon_reply_prefixes(dungeon_key: str) -> list[str]:
@@ -304,3 +412,21 @@ def get_dungeon_reply_prefixes(dungeon_key: str) -> list[str]:
                 if str(p or "").strip()
             ]
     return []
+
+
+def dungeon_key_for_text(text: str) -> str:
+    """这条消息属于哪个副本：指令按 command_prefixes，回包按标题/标记；都不是返回空串。
+
+    不看发送者是不是 bot：发送者实体没加载时 is_bot 是假的，玩家转贴的结算也值得留。
+    """
+    t = (text or "").strip()
+    if not t:
+        return ""
+    t_lower = t.lower()
+    for entry in DUNGEON_DEFINITIONS:
+        if any(
+            t_lower.startswith(prefix.strip().lower())
+            for prefix in entry.get("command_prefixes") or []
+        ) or dungeon_reply_matches(entry, t):
+            return str(entry.get("key") or "")
+    return ""

@@ -16,12 +16,15 @@
     {% set packet = automation_settings.ldc %}
     <div class="detail-card">
         <div class="section-header compact"><p>群内红包</p><h2>LDC 自动抢红包</h2></div>
-        <p class="muted">只抢总额超过门槛、至少两份的红包，等别人先抢后再随机等待；不抢自己的包，每包最多点一次。</p>
+        <p class="muted">只抢总额超过门槛、至少两份的红包。立即领取模式收到消息就点击；不抢自己的包，每包最多点一次。</p>
         {% if packet.braked %}<p role="status">上次自动停用：{{ packet.braked }}。重新开启需主动勾选。</p>{% endif %}
         <form method="post" action="/runtime/automation-settings/ldc-red-packet" class="form-grid top-gap">
             <input type="hidden" name="braked_at" value="{{ packet.braked_at or '' }}">
             <label class="full-span admin-execution-schedule-toggle"><input type="checkbox" role="switch" name="enabled" value="1" {% if packet.enabled %}checked{% endif %}><span>自动抢红包</span></label>
-            <label class="full-span">总额门槛（LDC）<input type="number" name="min_total" min="200" max="1000000000000" step="any" value="{{ packet.min_total }}" required></label>
+            <label class="full-span">总额门槛（LDC）<input type="number" name="min_total" min="0" max="1000000000000" step="any" value="{{ packet.min_total }}" required></label>
+            <p class="muted full-span">总额门槛设为 0 时不限制红包金额。</p>
+            <label class="full-span">领取方式<select name="grab_mode"><option value="instant" {% if packet.grab_mode == 'instant' %}selected{% endif %}>看到大包立即领取</option><option value="after_first" {% if packet.grab_mode == 'after_first' %}selected{% endif %}>等别人先抢后随机等待</option></select></label>
+            <p class="muted full-span">下面的等待时间仅用于“等别人先抢”模式；立即领取模式不等待。</p>
             <label>最短等待（秒）<input type="number" name="delay_low" min="1" max="300" step="any" value="{{ packet.delay_low }}" required></label>
             <label>最长等待（秒）<input type="number" name="delay_high" min="1" max="300" step="any" value="{{ packet.delay_high }}" required></label>
             <button type="submit" class="full-span">保存红包设置</button>

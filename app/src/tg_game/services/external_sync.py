@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import time
 from typing import Optional
@@ -10,9 +11,12 @@ from tg_game.clients.asc_client import (
 )
 from tg_game.config import get_settings
 from tg_game.features.sword import biz_sword_formation
+from tg_game.features.xinggong import biz_xinggong_divine
 from tg_game.services import profile_rebirth
 from tg_game.storage import Storage
 
+
+logger = logging.getLogger(__name__)
 
 ASC_PROVIDER = "asc_aiopenai"
 REBIRTH_RESTART_GRACE_SECONDS = 30 * 60
@@ -254,6 +258,7 @@ def sync_external_account(
         profile,
         api_token="" if should_rebootstrap_token else stored_api_token,
     )
+    fetch_finished_at = time.time()
     persisted_cookie = resolve_external_cookie(normalized_cookie, refreshed_cookie)
     stored_cookie = persisted_cookie if is_admin else ""
     storage.upsert_external_account(
@@ -274,6 +279,13 @@ def sync_external_account(
     biz_sword_formation.sync_auto_tasks_from_payload(
         storage, profile_id, payload, observed_at=fetch_started_at,
     )
+    try:
+        biz_xinggong_divine.settle_shift_attempts(
+            storage, profile_id, payload, started_at=fetch_started_at, finished_at=fetch_finished_at,
+        )
+    except Exception:
+        # 改命对账只是记录，出错不能连累所有号的天机阁同步
+        logger.exception("改命对账失败 profile=%s", profile_id)
     return payload if isinstance(payload, dict) else {}
 
 

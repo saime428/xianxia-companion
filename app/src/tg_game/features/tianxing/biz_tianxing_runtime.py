@@ -85,6 +85,7 @@ def default_state() -> dict[str, Any]:
         "last_panel_checked_at": 0,
         "prediction_consumed_route": "",
         "prediction_consumed_at": 0,
+        "exploration_released_at": 0,
         "current_change": "",
         "current_change_until": 0,
         "current_change_until_source": "",
@@ -569,6 +570,10 @@ def handle_bot_reply(
     parsed = parse_tianxing_text(text, now=current_time, family=resolved_family)
     if not parsed.get("is_tianxing"):
         return {"handled": False, "reason": "not_tianxing"}
+    if _is_exploration_downstream_command(command_text) and parsed.get("result") in {"prediction_hit", "prediction_miss", "change_triggered"}:
+        # 裂缝的【改命回天】回包没有「探寻成功/裂缝」字样，命星说明里的「斗法更擅夺取战果」把路线带偏成斗法，
+        # 挂着的推命 探索 因此清不掉。回的是探索指令，就按探索算。
+        parsed["action"] = "探索"
 
     route = _route_from_parsed(parsed)
     append_audit_event(
@@ -1858,7 +1863,14 @@ def build_exploration_route_gate(
         float(state.get("last_panel_checked_at") or 0),
         change_until - TIANXING_CHANGE_FATE_SECONDS,
     )
-    if (
+    # 半小时是按时间猜的，10-13 没兜住：23:57 对盘，00:00 裂缝【改命回天】把推命改命都用掉、回包又没认领上，
+    # 00:19 野外历练离对盘才 21 分钟，8 场深入裸打。放行出去的探索动作一定会应验当时挂着的推命，结算进了
+    # 本地就会刷新 prediction_consumed_at；放行之后既没见到结算、也没再对过盘 = 本地状态不可信，先对盘。
+    outcome_unseen = float(state.get("exploration_released_at") or 0) > max(
+        float(state.get("last_panel_checked_at") or 0),
+        float(state.get("prediction_consumed_at") or 0),
+    )
+    if outcome_unseen or (
         change_route == "探索"
         and change_until > current_time
         and current_time - change_confirmed_at > EXPLORATION_PANEL_FRESH_SECONDS
@@ -1873,7 +1885,7 @@ def build_exploration_route_gate(
             command=".天机盘",
             queue_enabled=True,
             phase="sent_waiting_ack",
-            reason="先查天机盘确认改命还在",
+            reason="上次放行的探索没见到结算，先查天机盘" if outcome_unseen else "先查天机盘确认改命还在",
             event_type="panel_required",
             now=current_time,
             next_time=current_time + config["ack_timeout_sec"],
@@ -1888,6 +1900,7 @@ def build_exploration_route_gate(
     ):
         missing.append(".改命 探索")
     if not missing:
+        save_profile_record(storage, int(profile_id), state={**state, "exploration_released_at": current_time})
         return {
             "allowed": True,
             "route": "探索",

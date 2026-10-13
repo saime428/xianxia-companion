@@ -98,6 +98,7 @@ from tg_game.features.estate.biz_estate_miniapp import (
 from tg_game.features.pagoda import biz_pagoda_miniapp as pagoda_miniapp
 from tg_game.features.pagoda import biz_pagoda_state as pagoda_state
 from tg_game.features.stock import biz_stock_miniapp
+from tg_game.features.stock import biz_stock_tick_trader
 from tg_game.features.vase import biz_vase_condense as vase_feature
 from tg_game.features.sword import biz_sword_formation as sword_feature
 from tg_game.features.soul import biz_soul_cultivation as soul_feature
@@ -2791,10 +2792,18 @@ def observe_fate_evolution(context, storage: Storage) -> bool:
         if not (storage.get_bound_message(chat_id, message_id, profile_id) or {}).get("is_bot"):
             return False
     sender = getattr(context.event, "sender", None)
+    reply_to_msg_id = int(context.reply_to_msg_id or 0)
+    if kind == "shift_reply" and context.profile and reply_to_msg_id:
+        # 是本号自己那条 .改换星移 的回包：把烧掉的修为记到改命记录上
+        parent = storage.get_bound_message(chat_id, reply_to_msg_id, context.profile.id) or {}
+        if str(parent.get("direction") or "") == "outgoing" and str(parent.get("text") or "").startswith(
+            divine_feature.SHIFT_COMMAND
+        ):
+            divine_feature.note_shift_reply(storage, context.profile.id, chat_id, context.text)
     return storage.append_fate_evolution_log(
         chat_id=chat_id,
         message_id=message_id,
-        reply_to_msg_id=int(context.reply_to_msg_id or 0),
+        reply_to_msg_id=reply_to_msg_id,
         sender_id=int(context.sender_id or 0),
         sender_username=str(getattr(sender, "username", "") or ""),
         kind=kind,
@@ -7825,7 +7834,7 @@ async def _run_companion_auto_scheduler(
                                 # 观星：跟的那条要看回包内容、必须回复在回包上，
                                 # 而且要压到结算前才发（delay 由钩子按回包时刻算）
                                 followup_command, followup_delay = reply_followup(
-                                    task, reply
+                                    storage, task, reply
                                 )
                                 if followup_command:
                                     storage.enqueue_outgoing_command(
@@ -8653,6 +8662,31 @@ async def _run_miniapp_pending_scheduler(client: object, storage: Storage) -> No
             logger.exception(
                 "Miniapp pending scheduler error for profile=%s: %s", profile_id, exc
             )
+            await asyncio.sleep(10)
+
+
+async def _run_stock_tick_trader_scheduler(client: object, storage: Storage) -> None:
+    """逐跳交易自己一条协程：信号只在一跳（约 10 分钟）内有效，等不起小程序串行队列里十几分钟的一局。"""
+    profile_id = int(getattr(client, "_tg_game_profile_id", 0) or 0)
+    if not profile_id:
+        return
+    while True:
+        try:
+            if biz_stock_tick_trader.pass_due(profile_id):
+                if (
+                    profile_rebirth.is_profile_rebirth_locked(storage, profile_id)
+                    or is_network_paused(storage, profile_id, now=time.time())
+                    or is_automation_paused(storage)
+                ):
+                    biz_stock_tick_trader.defer(profile_id, 30)
+                else:
+                    await biz_stock_tick_trader.run_pass(client, storage, profile_id)
+            await asyncio.sleep(biz_stock_tick_trader.LOOP_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Stock tick trader error for profile=%s: %s", profile_id, exc)
+            biz_stock_tick_trader.defer(profile_id, 60)
             await asyncio.sleep(10)
 
 
@@ -10810,6 +10844,10 @@ class GeneralGameExecutor(BaseExecutor):
         _register_client_background_task(
             client,
             asyncio.create_task(_run_miniapp_pending_scheduler(client, storage)),
+        )
+        _register_client_background_task(
+            client,
+            asyncio.create_task(_run_stock_tick_trader_scheduler(client, storage)),
         )
         _register_client_background_task(
             client,

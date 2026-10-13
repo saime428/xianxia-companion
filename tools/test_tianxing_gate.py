@@ -74,6 +74,25 @@ def main() -> None:
         result = gate(storage, profile.id, now + 5)
         assert result["allowed"] is False and queued(storage, profile.id)[-1] == ".改命 探索", (result, queued(storage, profile.id))
 
+        # 3c. 10-13：gate 放行了裂缝，回包【改命回天】【推命命中】没认领上，本地推命/改命原样；19 分钟后的野外历练
+        # 离上次对盘才 21 分钟，半小时规则兜不住。放行之后既没见到结算也没对过盘，就先查盘（修前：8 场深入裸打）
+        with storage.connect() as conn:
+            conn.execute("update outgoing_commands set status='confirmed'")
+        tx.save_profile_record(storage, profile.id, state={**armed, "last_panel_checked_at": now - 180})
+        assert gate(storage, profile.id, now)["allowed"] is True
+        before = queued(storage, profile.id)
+        result = gate(storage, profile.id, now + 1116)
+        assert result["allowed"] is False and queued(storage, profile.id)[len(before):] == [".天机盘"], (result, queued(storage, profile.id))
+        # 见到结算就不用查：正常日一场接一场，只补推命，不多发 .天机盘
+        with storage.connect() as conn:
+            conn.execute("update outgoing_commands set status='confirmed'")
+        tx.save_profile_record(storage, profile.id, state={**armed, "last_panel_checked_at": now - 180})
+        assert gate(storage, profile.id, now)["allowed"] is True
+        tx.apply_settlement_text(storage, profile.id, "【野外历练】\n【推命命中】司命演算吻合，天机值 +1，宗门贡献 +30\n【改命待发】此道改命尚可维持 23小时58分钟", now=now + 8)
+        before = queued(storage, profile.id)
+        result = gate(storage, profile.id, now + 9)
+        assert result["allowed"] is False and queued(storage, profile.id)[len(before):] == [".推命 探索"], (result, queued(storage, profile.id))
+
         # 4. a duel settlement consumes the pending 斗法 推命 (not only 炼制 any more)
         state = tx.normalize_state({"current_prediction": "斗法", "current_prediction_until": now + 3600})
         parsed = tx.parse_tianxing_text("【天道战报·文字版】\n胜者：@me\n【推命命中】司命演算吻合，天机值 +1，宗门贡献 +30", now=now)

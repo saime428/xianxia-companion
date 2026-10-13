@@ -253,14 +253,15 @@ def _root_priority(root: str) -> int:
     return 99
 
 
-def select_rebirth_candidate(text: str) -> Optional[dict]:
-    # 用户 09-18 定的：灵根越多越好，最好金木水火土五行齐全；真/伪只在五行数相同时才比
+def select_rebirth_candidate(text: str, *, preferred_roots: str = "") -> Optional[dict]:
+    # 账号偏好优先，未命中时沿用 09-18 的五行数量、命途、灵根类型顺序。
     candidates = parse_rebirth_candidates(text)
     if not candidates:
         return None
     return min(
         candidates,
         key=lambda item: (
+            not any(root in item["root"] for root in preferred_roots),
             -_element_count(item["root"]),
             _fate_priority(item.get("fate", "")),
             _root_priority(item["root"]),
@@ -383,7 +384,10 @@ def handle_profile_rebirth_reply(
             **queue_result,
         }
 
-    selected = select_rebirth_candidate(normalized)
+    selected = select_rebirth_candidate(
+        normalized,
+        preferred_roots=storage.get_runtime_state(f"rebirth_preferred_roots:{profile_id}") or "",
+    )
     if selected:
         if state.get("manual_choice"):
             # 用户要求自己挑灵根：停在候选列表，不自动发 .重生 N；

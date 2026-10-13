@@ -119,6 +119,9 @@ def _ensure_send_allowed(
         command = storage.get_outgoing_command(outgoing_command_id) if storage else None
         if not command or command.get("status") != "sending":
             raise OutgoingCommandNotSendingError("排队指令已取消或不再处于发送状态。")
+        if str(text).strip() == ".赌石" or str(text).strip().startswith(".切 "):
+            from tg_game.features.market.stone_gambling import guard_command
+            guard_command(storage, outgoing_command_id)
 
 
 async def _send_topic_reply(
@@ -139,6 +142,62 @@ async def _send_topic_reply(
         reply_to=types.InputReplyToMessage(reply_to_msg_id=reply_to, top_msg_id=top_msg_id),
     )
     return client._get_response_message(request, await client(request), peer)
+
+
+def _record_sent_outgoing_message(
+    storage: Optional[Storage],
+    *,
+    profile_id: Optional[int],
+    chat_id: int,
+    fallback_thread_id: Optional[int],
+    text: str,
+    message: object,
+) -> None:
+    message_id = int(getattr(message, "id", None) or 0)
+    if not storage or not profile_id or message_id <= 0:
+        return
+
+    reply_to = getattr(message, "reply_to", None)
+    reply_to_msg_id = getattr(reply_to, "reply_to_msg_id", None)
+    thread_id = None
+    for candidate in [
+        getattr(reply_to, "reply_to_top_id", None),
+        getattr(message, "reply_to_top_id", None),
+        getattr(reply_to, "top_msg_id", None),
+        getattr(message, "top_msg_id", None),
+        fallback_thread_id,
+    ]:
+        if candidate:
+            thread_id = int(candidate)
+            break
+    binding = storage.resolve_chat_binding_for_event(
+        int(profile_id),
+        int(chat_id),
+        thread_id,
+        int(reply_to_msg_id) if reply_to_msg_id else None,
+    )
+    if binding and binding.thread_id:
+        thread_id = int(binding.thread_id)
+
+    profile = storage.get_profile(int(profile_id))
+    sender_text = str(getattr(profile, "telegram_user_id", "") or "").strip()
+    sender_id = int(sender_text) if sender_text.isdigit() else 0
+    if sender_id <= 0:
+        sender_id = int(getattr(message, "sender_id", None) or 0)
+    sender_username = str(getattr(profile, "telegram_username", "") or "").strip()
+
+    storage.upsert_bound_message(
+        profile_id=int(profile_id),
+        chat_id=int(chat_id),
+        thread_id=thread_id,
+        message_id=message_id,
+        reply_to_msg_id=int(reply_to_msg_id) if reply_to_msg_id else None,
+        sender_id=sender_id,
+        sender_username=sender_username,
+        direction="outgoing",
+        is_bot=False,
+        text=text,
+    )
 
 
 async def _send_with_network_tracking(
@@ -162,11 +221,17 @@ async def _send_with_network_tracking(
         guard_network_pause=guard_network_pause,
         outgoing_command_id=outgoing_command_id,
     )
-    try:
+    def checked_before_send():
+        _ensure_send_allowed(storage, profile_id, text,
+                             guard_network_pause=guard_network_pause,
+                             outgoing_command_id=outgoing_command_id)
         if before_send:
             before_send()
+
+    try:
+        checked_before_send()
         if reply_to and top_msg_id and int(reply_to) != int(top_msg_id):
-            message = await _send_topic_reply(client, chat_id, text, int(reply_to), int(top_msg_id), before_send)
+            message = await _send_topic_reply(client, chat_id, text, int(reply_to), int(top_msg_id), checked_before_send)
         elif reply_to:
             message = await client.send_message(chat_id, text, reply_to=reply_to)
         else:
@@ -176,6 +241,21 @@ async def _send_with_network_tracking(
             mark_network_send_failure(storage, profile_id, exc)
         raise
     clear_network_pause(storage, profile_id)
+    # Telethon v1 不把本客户端自己发的消息派给事件处理器（只有补频道差分时才顺带带回来），直发的指令
+    # （裂缝、心劫、宗门）在 bound_messages 里有没有这一行全凭运气，而回包认领靠它：10-13、09-25 两次
+    # 裂缝【改命回天】没认领上，本地以为推命改命还在，零点 8 场深入裸打。发出去就落库。
+    # 话题只用 top_msg_id 兜底（和事件路径算出来的一样）；队列那边随后再写一次，带上指令自己的话题。
+    try:
+        _record_sent_outgoing_message(
+            storage,
+            profile_id=profile_id,
+            chat_id=chat_id,
+            fallback_thread_id=top_msg_id,
+            text=text,
+            message=message,
+        )
+    except Exception:  # 记账失败不能变成「发送失败」，否则调用方会重发
+        logger.exception("Failed to record sent message profile=%s chat=%s text=%r", profile_id, chat_id, text)
     return message
 
 

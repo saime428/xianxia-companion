@@ -1,5 +1,5 @@
 """LDC 红包：观察只让大号 client 记日志、不点；自动抢只点 ldcrp:grab，只抢 >200、至少 2 份，
-等别人先抢到才点、每包一次，讨红包（ldcbeg:*，点了是我们付钱）一律不碰。
+兼容等待模式并覆盖收到大包立即领取、每包一次，讨红包（ldcbeg:*，点了是我们付钱）一律不碰。
 
 运行：.venv/bin/python -X utf8 tools/test_ldc_red_packet.py
 """
@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("TG_GAME_BOUND_CHAT_ID", "-1001000000001")
 os.environ.setdefault("AUTHORIZED_USER_ID", "1000000099")  # 别用公开版占位值，构建脚本会拒绝
@@ -219,8 +220,67 @@ async def grab_scenarios(storage):
     await settle()
 
 
+async def instant_scenarios(storage):
+    ldc._live.clear()
+    client = FakeClient()
+    switch_on(storage, grab_mode="instant", delay=[300, 300])
+
+    def packet(mid, text=PACKET, button=GRAB, profile=admin, sender=ldc.PACKET_BOT_ID):
+        return ctx(profile, sender=sender, text=text, reply_markup=button, client=client, msg_id=mid)
+
+    def track(event):
+        return ldc.track_ldc_red_packet(event, storage)
+
+    async def settle():
+        await asyncio.gather(*list(ldc._tasks))
+
+    # No first-grabber notice and no sleep, even with a legacy five-minute delay configured.
+    with patch.object(ldc.asyncio, "sleep", side_effect=AssertionError("instant mode must not sleep")):
+        assert track(packet(2001)) == "armed"
+        assert track(packet(2001)) is None
+        assert track(packet(2002)) == "armed", "same-size simultaneous packets both trigger"
+        await settle()
+    assert [(x.msg_id, x.data) for x in client.clicks] == [(2001, ldc.GRAB_DATA), (2002, ldc.GRAB_DATA)]
+    assert track(packet(2001)) is None, "edited packet cannot be claimed twice"
+    notice = ctx(sender=BOT, text="抢到 10 LDC，剩余 9 / 10 份，990 LDC", client=client)
+    track(notice)
+    await settle()
+    assert len(client.clicks) == 2, "later notices cannot re-arm a packet"
+
+    assert track(packet(2010, PACKET.replace("1000.00", "200.00"))) == "skip"
+    assert track(packet(2011, PACKET.replace("10 份", "1 份"))) == "skip"
+    assert track(packet(2012, button=BEG)) is None
+    assert track(packet(2013, sender=12345)) is None
+    own = SimpleNamespace(id=2, telegram_user_id=admin.telegram_user_id, telegram_username="rich_sender")
+    assert track(packet(2014, profile=own)) == "skip"
+    assert track(packet(2015, profile=alt)) is None
+    await settle()
+    assert len(client.clicks) == 2, "small, own, single-share and begging packets stay excluded"
+
+    assert track(packet(2020)) == "armed"
+    pause_automation(storage, now=time.time())
+    await settle()
+    resume_automation(storage)
+    assert len(client.clicks) == 2
+    assert track(packet(2021)) == "armed"
+    switch_on(storage, enabled=False, grab_mode="instant")
+    await settle()
+    assert len(client.clicks) == 2, "closing switch before callback prevents claiming"
+
+    switch_on(storage, grab_mode="instant")
+    storage.set_runtime_state("deployment_drain", "1")
+    assert track(packet(2022)) == "draining"
+    storage.set_runtime_state("deployment_drain", "0")
+    client.answer = "未绑定论坛身份"
+    assert track(packet(2023)) == "armed"
+    await settle()
+    assert len(client.clicks) == 3 and not ldc.read_switch(storage, 2)["enabled"]
+    assert track(packet(2024)) is None
+
+
 with tempfile.TemporaryDirectory() as tmp:
     grab_storage = Storage(Path(tmp) / "ldc.db")
     grab_storage.init_schema()
     asyncio.run(grab_scenarios(grab_storage))
+    asyncio.run(instant_scenarios(grab_storage))
 print("ok")

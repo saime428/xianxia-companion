@@ -1,0 +1,23 @@
+[Unit]
+Description=Xianxia stone sample collector and bounded daily gambling
+After=xianxia-companion.service
+Wants=xianxia-companion.service
+
+[Service]
+Type=simple
+User=xianxia
+Group=xianxia
+WorkingDirectory=/opt/xianxia-companion
+Environment=TZ=Asia/Shanghai
+ExecStart=/opt/xianxia-companion/.venv/bin/python tools/stone_gambling.py watch
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/xianxia-companion/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

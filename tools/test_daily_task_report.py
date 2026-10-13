@@ -104,6 +104,51 @@ class DailyReportTests(unittest.TestCase):
         self.assertTrue(next(l for l in lines if "九天神雷木" in l).startswith("探缝"))  # game says 意外之喜, data says common
         self.assertEqual(report._rare_items("命运卡已结算；奖励：天机残痕 +4、昆吾通行令 +0"), [])  # the usual daily line
 
+    def test_fishing_lucky_charm_highlights_actual_drops_and_respects_window_and_owner(self):
+        lucky = {"bonusLoot": [{"dailyGuaranteed": False, "itemId": "item_lucky_charm", "name": "幸运符", "qty": 2}]}
+        stamp = datetime(2026, 10, 2, 9, 6, 19, tzinfo=GAME_TZ).timestamp()
+        other = self.storage.create_profile("其他号").id
+        with self.storage.connect() as db:
+            for pid, caught, at, qty in (
+                (self.pid, 1, stamp, 2),
+                (self.pid, 1, self.start.timestamp()-1, 31),
+                (self.pid, 1, self.end.timestamp(), 32),
+                (other, 1, stamp, 33),
+                (self.pid, 0, stamp, 34)):
+                value = {"bonusLoot": [{**lucky["bonusLoot"][0], "qty": qty}]}
+                db.execute("INSERT INTO fishing_casts(profile_id,caught,pond,result_json,created_at) VALUES(?,?,?, ?,?)", (pid, caught, "乱星海礁", json.dumps(value), at))
+            # An item-id-only response still identifies the charm at the window start.
+            db.execute("INSERT INTO fishing_casts(profile_id,caught,result_json,created_at) VALUES(?,1,?,?)", (self.pid, json.dumps({"bonusLoot": [{"itemId": "item_lucky_charm", "qty": 1}]}), self.start.timestamp()))
+        lines = report.build_report(self.storage, self.start, self.end).splitlines()
+        self.assertEqual(lines[2], "🎁 稀有掉落：测试号 【幸运符】")
+        self.assertIn("🎁 垂钓 10-02 09:06（乱星海礁）：额外获得【幸运符】×2", lines)
+        self.assertIn("🎁 垂钓 10-01 23:50：额外获得【幸运符】×1", lines)
+        self.assertEqual(sum("额外获得" in line for line in lines), 2)
+        for qty in (31, 32, 33, 34):
+            self.assertNotIn(f"×{qty}", "\n".join(lines))
+
+    def test_fishing_bonus_invalid_records_do_not_report_drops(self):
+        records = ["invalid", "[]", '{"bonusLoot": {"name": "幸运符", "qty": 1}}',
+                   json.dumps({"bonusLoot": [None, "幸运符"]})]
+        for qty in (None, 0, -1, True, "bad", 1.5):
+            records.append(json.dumps({"bonusLoot": [{"name": "幸运符", "qty": qty}]}))
+        with self.storage.connect() as db:
+            for raw in records:
+                db.execute("INSERT INTO fishing_casts(profile_id,caught,result_json,created_at) VALUES(?,1,?,?)", (self.pid, raw, self.end.timestamp()-1))
+            db.execute("INSERT INTO fishing_casts(profile_id,caught,result_json,created_at) VALUES(?,1,?,?)", (self.pid, json.dumps({"bonusLoot": [{"name": "养魂木", "qty": "3"}]}), self.end.timestamp()-1))
+        text = report.build_report(self.storage, self.start, self.end)
+        self.assertNotIn("幸运符", text)
+        self.assertNotIn("🎁", text)
+        self.assertIn("额外获得【养魂木】×3", text)
+
+    def test_lucky_charm_from_other_recorded_rewards_is_highlighted(self):
+        payload = {"wild_experience_miniapp": {"run": {"status": "completed", "updated_at": self.end.timestamp()-1,
+                   "attempts": [{"cultivation_delta": 1, "loot": [{"name": "幸运符", "quantity": 1}]}]}}}
+        self.storage.update_external_account_payload(self.pid, ASC_EXTERNAL_PROVIDER, lambda _: payload)
+        lines = report.build_report(self.storage, self.start, self.end).splitlines()
+        self.assertEqual(lines[2], "🎁 稀有掉落：测试号 【幸运符】")
+        self.assertTrue(any(line.startswith("🎁 野外") and "幸运符 ×1" in line for line in lines))
+
     def test_world_boss_reward_comes_from_result_notice(self):
         start = self.end.timestamp() - 3600
         self.storage.upsert_external_account(self.pid, ASC_EXTERNAL_PROVIDER, "", "me", "connected", "", {}, "")

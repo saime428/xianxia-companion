@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import secrets
 import sqlite3
 import time
@@ -7,10 +8,17 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from tg_game.config import ALLOWED_GAME_BOT_IDS
+from tg_game.dungeon_defs import dungeon_key_for_text
 from tg_game.models import ChatBinding, FeatureModule, ModuleSetting, PlayerProfile
 from tg_game.sect_command_guard import validate_sect_command_scope
 from tg_game.features.companion.biz_companion_roster import list_companions
 
+
+logger = logging.getLogger(__name__)
+
+# 实战消息要长期留存的副本（dungeon_defs 里的 key）：昆吾山、坠魔谷、黄龙夺灯。
+# 别的副本也认得出，要记就往这里加；这里有、dungeon_defs 里还没定义的 key 只是暂时认不出，不碍事。
+ARCHIVED_DUNGEON_KEYS = frozenset({"kunwu", "zhuimo", "duodeng"})
 
 BOUND_MESSAGE_RETENTION_SECONDS = 48 * 3600
 BOUND_MESSAGE_CLEANUP_INTERVAL_SECONDS = 3600
@@ -719,6 +727,25 @@ class Storage:
                     UNIQUE(chat_id, message_id)
                 );
 
+                -- 自己每一次 .改换星移：烧了多少修为、目标号结算前后背包多了什么。游戏不公布改命成没成，只能这样对账。
+                CREATE TABLE IF NOT EXISTS fate_shift_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER NOT NULL DEFAULT 0,
+                    chat_id INTEGER NOT NULL DEFAULT 0,
+                    event TEXT NOT NULL DEFAULT '',
+                    target TEXT NOT NULL DEFAULT '',
+                    target_profile_id INTEGER NOT NULL DEFAULT 0,
+                    settlement_at REAL NOT NULL DEFAULT 0,
+                    cost INTEGER NOT NULL DEFAULT 0,
+                    reply_text TEXT NOT NULL DEFAULT '',
+                    before_json TEXT NOT NULL DEFAULT '',
+                    before_at REAL NOT NULL DEFAULT 0,
+                    gained TEXT NOT NULL DEFAULT '',
+                    outcome TEXT NOT NULL DEFAULT 'pending',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+
                 -- 只记录群（config.record_only_chat_ids）的原始消息。和 bound_messages 分表：
                 -- 股市行情等查询不按群过滤，混进去会污染；保留期同 bound_messages。
                 CREATE TABLE IF NOT EXISTS recorded_messages (
@@ -737,6 +764,23 @@ class Storage:
                     UNIQUE(chat_id, message_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_recorded_messages_created ON recorded_messages(created_at);
+
+                -- 昆吾山、坠魔谷、黄龙夺灯的指令和 bot 回包（认法见 dungeon_defs.dungeon_key_for_text）；长期留存，不随 bound_messages 清理，
+                -- 日后按场复盘各副本的抉择和数值。两张消息表落库时顺手存一份，同一条只留一行。
+                CREATE TABLE IF NOT EXISTS dungeon_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dungeon TEXT NOT NULL DEFAULT '',
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    thread_id INTEGER,
+                    reply_to_msg_id INTEGER,
+                    sender_id INTEGER,
+                    sender_username TEXT NOT NULL DEFAULT '',
+                    is_bot INTEGER NOT NULL DEFAULT 0,
+                    text TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    UNIQUE(chat_id, message_id)
+                );
 
                 CREATE TABLE IF NOT EXISTS companion_heart_tribulation_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -919,6 +963,35 @@ class Storage:
                 );
                 CREATE INDEX IF NOT EXISTS idx_stock_forecast_due ON stock_price_forecasts(profile_id,status,due_at);
                 CREATE INDEX IF NOT EXISTS idx_stock_forecast_recent ON stock_price_forecasts(profile_id,forecast_at DESC,id DESC);
+
+                -- 逐跳交易每一笔来回（features/stock/biz_stock_tick_trader.py）。下单前先落一行 buying，
+                -- 回包丢了也能靠这一行和持仓对账。status：buying / open / selling / closed / buy_failed。
+                CREATE TABLE IF NOT EXISTS stock_tick_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    name TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    signal_tick_at REAL NOT NULL,
+                    signal_pct REAL NOT NULL,
+                    signal_price REAL NOT NULL,
+                    amount REAL NOT NULL,
+                    buy_at REAL NOT NULL DEFAULT 0,
+                    buy_price REAL NOT NULL DEFAULT 0,
+                    quantity REAL NOT NULL DEFAULT 0,
+                    buy_cost REAL NOT NULL DEFAULT 0,
+                    buy_json TEXT NOT NULL DEFAULT '',
+                    sell_at REAL NOT NULL DEFAULT 0,
+                    sell_quote REAL NOT NULL DEFAULT 0,
+                    sell_price REAL NOT NULL DEFAULT 0,
+                    net_revenue REAL NOT NULL DEFAULT 0,
+                    sell_json TEXT NOT NULL DEFAULT '',
+                    pnl REAL,
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_stock_tick_trades_profile ON stock_tick_trades(profile_id, id DESC);
 
                 CREATE TABLE IF NOT EXISTS stock_player_replies (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4109,6 +4182,81 @@ class Storage:
             rows = conn.execute(query + " ORDER BY created_at ASC, id ASC", params).fetchall()
         return [dict(row) for row in rows]
 
+    _FATE_SHIFT_FIELDS = (
+        "profile_id", "chat_id", "event", "target", "target_profile_id", "settlement_at",
+        "cost", "reply_text", "before_json", "before_at", "gained", "outcome",
+    )
+
+    def add_fate_shift_attempt(self, **fields) -> int:
+        """记一笔改命，返回行号。outcome：pending 待对账 / got / missed / unclear / unknown。"""
+        now = time.time()
+        row = {key: fields[key] for key in self._FATE_SHIFT_FIELDS if key in fields}
+        row.update(created_at=float(fields.get("created_at") or now), updated_at=now)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"INSERT INTO fate_shift_attempts ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})",
+                list(row.values()),
+            )
+            return int(cursor.lastrowid)
+
+    def update_fate_shift_attempt(self, attempt_id: int, **fields) -> None:
+        row = {key: fields[key] for key in self._FATE_SHIFT_FIELDS if key in fields}
+        if not row:
+            return
+        row["updated_at"] = time.time()
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE fate_shift_attempts SET {', '.join(f'{key}=?' for key in row)} WHERE id=?",
+                [*row.values(), int(attempt_id)],
+            )
+
+    def list_fate_shift_attempts(self, *, outcome: str = "") -> list[dict]:
+        """按先后列出；给 outcome 就只列这一种。"""
+        query, params = "SELECT * FROM fate_shift_attempts", []
+        if outcome:
+            query, params = query + " WHERE outcome=?", [outcome]
+        with self.connect() as conn:
+            rows = conn.execute(query + " ORDER BY id ASC", params).fetchall()
+        return [dict(row) for row in rows]
+
+    _STOCK_TICK_TRADE_FIELDS = (
+        "profile_id", "symbol", "name", "status", "signal_tick_at", "signal_pct", "signal_price", "amount",
+        "buy_at", "buy_price", "quantity", "buy_cost", "buy_json",
+        "sell_at", "sell_quote", "sell_price", "net_revenue", "sell_json", "pnl", "error",
+    )
+
+    def add_stock_tick_trade(self, **fields) -> int:
+        """记一笔逐跳交易，返回行号。"""
+        now = time.time()
+        row = {key: fields[key] for key in self._STOCK_TICK_TRADE_FIELDS if key in fields}
+        row.update(created_at=now, updated_at=now)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"INSERT INTO stock_tick_trades ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})",
+                list(row.values()),
+            )
+            return int(cursor.lastrowid)
+
+    def update_stock_tick_trade(self, trade_id: int, **fields) -> None:
+        row = {key: fields[key] for key in self._STOCK_TICK_TRADE_FIELDS if key in fields}
+        if not row:
+            return
+        row["updated_at"] = time.time()
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE stock_tick_trades SET {', '.join(f'{key}=?' for key in row)} WHERE id=?",
+                [*row.values(), int(trade_id)],
+            )
+
+    def list_stock_tick_trades(self, profile_id: int, *, limit: int = 50) -> list[dict]:
+        """最近的在前。"""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM stock_tick_trades WHERE profile_id=? ORDER BY id DESC LIMIT ?",
+                (int(profile_id), int(limit)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def add_fishing_casts(self, profile_id: int, rounds: object, *, pond: str = "", bait: str = "") -> int:
         """逐竿记一行（rounds 取自 run_dwelling_fishing_loop_flow 的 data.rounds），返回写了几行。"""
         rows = []
@@ -4300,6 +4448,62 @@ class Storage:
             rows = conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
 
+    def _archive_dungeon_message(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        chat_id: int,
+        message_id: int,
+        thread_id: Optional[int],
+        reply_to_msg_id: Optional[int],
+        sender_id: Optional[int],
+        sender_username: str,
+        is_bot: bool,
+        text: str,
+        now: float,
+    ) -> None:
+        """ARCHIVED_DUNGEON_KEYS 里那几个副本的指令和 bot 回包另存一份到 dungeon_messages，不跟着 48 小时清理走。
+
+        bot 对副本指令的直接回复（催动碎片、加入失败这类）标题不带副本名，认不出来，
+        所以回复的是一条已存的副本指令时跟着存；自己是别的指令（回复副本指令发 .双修）的不跟，
+        否则它的回包也会顺着回复链进来。存不进去只记日志，不能连累正常落库。
+        """
+        try:
+            key = dungeon_key_for_text(text)
+            if not key and reply_to_msg_id and not (text or "").lstrip().startswith("."):
+                parent = conn.execute(
+                    "SELECT dungeon FROM dungeon_messages WHERE chat_id=? AND message_id=? AND text LIKE '.%'",
+                    (int(chat_id), int(reply_to_msg_id)),
+                ).fetchone()
+                key = parent["dungeon"] if parent else ""
+            if key not in ARCHIVED_DUNGEON_KEYS:
+                return
+            conn.execute(
+                """
+                INSERT INTO dungeon_messages (
+                    dungeon, chat_id, message_id, thread_id, reply_to_msg_id,
+                    sender_id, sender_username, is_bot, text, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                    text=excluded.text,
+                    is_bot=MAX(dungeon_messages.is_bot, excluded.is_bot)
+                """,
+                (
+                    key,
+                    int(chat_id),
+                    int(message_id),
+                    thread_id,
+                    reply_to_msg_id,
+                    sender_id,
+                    sender_username or "",
+                    1 if is_bot else 0,
+                    text or "",
+                    now,
+                ),
+            )
+        except sqlite3.Error:
+            logger.exception("Dungeon message archive failed chat=%s message=%s", chat_id, message_id)
+
     def upsert_recorded_message(
         self,
         *,
@@ -4340,6 +4544,18 @@ class Storage:
                     now,
                     now,
                 ),
+            )
+            self._archive_dungeon_message(
+                conn,
+                chat_id=chat_id,
+                message_id=message_id,
+                thread_id=thread_id,
+                reply_to_msg_id=reply_to_msg_id,
+                sender_id=sender_id,
+                sender_username=sender_username,
+                is_bot=is_bot,
+                text=text,
+                now=now,
             )
 
     def upsert_bound_message(
@@ -4389,6 +4605,18 @@ class Storage:
                     now,
                     now,
                 ),
+            )
+            self._archive_dungeon_message(
+                conn,
+                chat_id=chat_id,
+                message_id=message_id,
+                thread_id=thread_id,
+                reply_to_msg_id=reply_to_msg_id,
+                sender_id=sender_id,
+                sender_username=sender_username,
+                is_bot=is_bot,
+                text=text,
+                now=now,
             )
 
     def enqueue_outgoing_command(

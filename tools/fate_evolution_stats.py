@@ -53,11 +53,42 @@ def summarize(logs: list[dict], own_usernames: set[str]) -> dict[int, dict]:
     return slots
 
 
+OUTCOMES = {"got": "拿到", "missed": "没拿到", "unclear": "判不了", "unknown": "对不了账", "pending": "待对账"}
+
+
+def summarize_attempts(attempts: list[dict]) -> list[str]:
+    """自己每一次改命一行，最后一行是合计：值不值看「拿到」的次数对比烧掉的修为。"""
+    fmt = lambda ts: time.strftime("%m-%d %H:%M", time.gmtime(ts + _BEIJING))
+    lines = []
+    for a in attempts:
+        # 「之前」的背包快照离结算越久，目标号自己别的收入混进来的可能越大，标出来给人打折看
+        age = (float(a["settlement_at"]) - float(a.get("before_at") or 0)) / 60 if a.get("before_at") else None
+        note = f"（快照早 {age:.0f} 分钟）" if age is not None and age >= 5 else ""
+        lines.append(
+            f"{fmt(a['settlement_at'])} {a['event']} → @{a['target']}  烧修为 {a['cost'] or '?'}  "
+            f"{OUTCOMES.get(a['outcome'], a['outcome'])}  {a['gained']}{note}".rstrip()
+        )
+    tally = collections.Counter(a["outcome"] for a in attempts)
+    # 只有「拿到 / 没拿到」是真烧了修为、又对得上账的；其余不进成功率
+    judged = tally["got"] + tally["missed"]
+    lines.append(
+        f"合计 {len(attempts)} 笔，共烧修为 {sum(int(a['cost'] or 0) for a in attempts)}："
+        + "、".join(f"{label} {tally[key]}" for key, label in OUTCOMES.items() if tally[key])
+        + (f"；对得上账的 {judged} 次里拿到 {tally['got']} 次" if judged else "")
+    )
+    return lines
+
+
 def main() -> None:
     from tg_game.config import get_settings
     from tg_game.storage import Storage
 
     storage = Storage(get_settings().database_path)
+    attempts = storage.list_fate_shift_attempts()
+    print("== 自己的改命记录" + ("" if attempts else "：还没有"))
+    if attempts:
+        print("\n".join(summarize_attempts(attempts)))
+    print("== 各档统计")
     logs = storage.list_fate_evolution_logs()
     if not logs:
         print("fate_evolution_logs 还是空的")
@@ -91,6 +122,16 @@ def self_check() -> None:
     assert dict(slots[12]) == {"别人观星": 1, "别人改命": 1, "结算": 1, "Good": 1, "天雷竹": 1, "最晚一次离结算秒数": 120}, dict(slots[12])
     assert dict(slots[15]) == {"结算": 1, "Bad": 1, "天雷竹": 0}, dict(slots[15])
     assert not slots[3], dict(slots[3])
+    lines = summarize_attempts([
+        {"settlement_at": at(21), "event": "天雷竹现世", "target": "main_acct", "cost": 82878, "outcome": "missed", "gained": "灵石 +71"},
+        {"settlement_at": at(12), "event": "星辰异象", "target": "main_acct", "cost": 0, "outcome": "got", "gained": "元磁山核·乙 +1"},
+        {"settlement_at": at(15), "event": "星辰异象", "target": "main_acct", "cost": 0, "outcome": "unknown",
+         "gained": "没见到烧修为的回包：没有回包", "before_at": at(14, 40)},
+    ])
+    assert lines[0] == "10-11 21:00 天雷竹现世 → @main_acct  烧修为 82878  没拿到  灵石 +71", lines[0]
+    assert "烧修为 ?  拿到" in lines[1], lines[1]
+    assert lines[2].endswith("对不了账  没见到烧修为的回包：没有回包（快照早 20 分钟）"), lines[2]
+    assert lines[3] == "合计 3 笔，共烧修为 82878：拿到 1、没拿到 1、对不了账 1；对得上账的 2 次里拿到 1 次", lines[3]
     print("ok")
 
 

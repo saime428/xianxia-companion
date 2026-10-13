@@ -45,6 +45,7 @@ telegram_oauth_cookies.txt
 AGENTS.md
 progress.md
 tmp/
+data/hb-browser/
 
 # Runtime captures and private deployment records
 /data/*
