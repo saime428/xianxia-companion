@@ -232,7 +232,7 @@ PYTHONPATH=app/src .venv/bin/python -B -m tg_game.features.world_boss.world_boss
   .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('wild_experience_report:<id>','{\"enabled\": true}',time.time()));c.commit()"
   ```
 
-- **钓满后自动开鱼**（当天的竿钓满后把鱼篓里的鱼都 `.开鱼`，每种鱼一条指令，一天一次；垂钓固定时间定在 `00:01` 时就是零点钓完即开）：网页「其他」页有开关，也可以直接写库：
+- **钓满后自动开鱼**（当天的竿钓满后把鱼篓里的鱼都 `.开鱼`，每种鱼一条指令，一天一次；另外开钓那一刻先开一条银须灵鲢，钓完开鱼时留一条给第二天；垂钓固定时间定在 `00:00` 时就是零点开、钓完即开。垂钓开始前 10 分钟会先 `.制饵`，开钓时不用等制饵回包）：网页「其他」页有开关，也可以直接写库：
 
   ```bash
   .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('fishing_auto_open:<id>','{\"enabled\": true}',time.time()));c.commit()"

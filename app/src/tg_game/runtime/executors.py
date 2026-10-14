@@ -6593,6 +6593,16 @@ async def _run_companion_auto_scheduler(
                         )
                         continue
                     next_run_at = float(task.get("next_run_at") or 0)
+                    # 离开钓不到 90 秒（重启、恢复保护错峰）就不预制：制饵回包来不及落地，开钓时会把能制的也买了；
+                    # 留给开钓时现制，等回包再买差额
+                    if FISHING_BAIT_CRAFT_WAIT_SECONDS <= next_run_at - now <= FISHING_PRECRAFT_LEAD_SECONDS:
+                        await _precraft_fishing_bait(
+                            storage,
+                            task=task,
+                            profile_id=int(profile_id),
+                            chat_id=chat_id,
+                            fishing_at=next_run_at,
+                        )
                     if next_run_at > now:
                         continue
                     run_time = biz_fishing_daily_auto.normalize_run_time(
@@ -6669,6 +6679,11 @@ async def _run_companion_auto_scheduler(
                             bait=biz_fishing_game.FISHING_DEFAULT_BAIT,
                             daily_limit=fishing_miniapp.FISHING_MINIAPP_DAILY_LIMIT_FALLBACK,
                             **session_fields,
+                        )
+                    if now - next_run_at < FISHING_MIDNIGHT_OPEN_LATE_SECONDS:
+                        # 只在准点开：到点任务被推迟（恢复保护、服务离线后补跑）就留到明天零点
+                        _queue_midnight_fish_open(
+                            storage, task=task, profile_id=int(profile_id), chat_id=chat_id
                         )
                     storage.update_companion_auto_task(
                         task_id,
@@ -9252,14 +9267,15 @@ FISHING_BAIT_CRAFT_WAIT_SECONDS = 90
 FISHING_BAIT_CRAFT_STATE_KEY = "fishing_bait_craft_at:{profile_id}:{chat_id}"
 
 
-# 一份的材料（天机阁材料 id）和产出个数，群里 .制饵 回包实测。
-# ponytail: 灵虫饵另需凝血草 x1、妖血饵另需一阶妖丹 x1，这两样的材料 id 没对上，不查；
-# 真缺了 .制饵 会失败，下一轮照旧按「缺饵时」设置退回买饵
+# 一份的材料和产出个数，群里 .制饵 回包实测（10-15 大号：灵鱼肉x4、灵鱼鳞x2、一阶妖丹x1 → 妖血饵x1）。
+# 按材料名字算：天机阁库存给的是 id，用物品目录翻成名字（_payload_stock_by_name）
 FISHING_BAIT_RECIPES = {
-    "凡饵": ({"mat_fish_meat": 1, "mat_fishing_waterweed": 1}, 2),
-    "灵虫饵": ({"mat_fish_meat": 2, "mat_fish_scale": 1}, 1),
-    "妖血饵": ({"mat_fish_meat": 4, "mat_fish_scale": 2}, 1),
+    "凡饵": ({"灵鱼肉": 1, "水草团": 1}, 2),
+    "灵虫饵": ({"灵鱼肉": 2, "灵鱼鳞": 1, "凝血草": 1}, 1),
+    "妖血饵": ({"灵鱼肉": 4, "灵鱼鳞": 2, "一阶妖丹": 1}, 1),
 }
+# 开钓前多久先制饵：.制饵 是群指令，放到开钓时才制，首竿要等 90 秒（10-15 零点实测首竿 00:03）
+FISHING_PRECRAFT_LEAD_SECONDS = 600
 
 
 def _payload_materials(payload: object) -> dict:
@@ -9274,6 +9290,16 @@ def _payload_materials(payload: object) -> dict:
     return materials if isinstance(materials, dict) else {}
 
 
+def _payload_stock_by_name(storage: Storage, payload: object) -> dict:
+    """天机阁库存（材料、鱼、鱼饵）按名字计：{名字: 数量}；目录里查不到名字的 id 原样当名字。"""
+    names = storage.get_game_items() or {}
+    stock: dict = {}
+    for item_id, count in _payload_materials(payload).items():
+        name = str((names.get(item_id) or {}).get("name") or item_id)
+        stock[name] = stock.get(name, 0) + max(_miniapp_int(count), 0)
+    return stock
+
+
 def _fishing_bait_craft_portions(bait_name: str, shortage: int, materials: object) -> int:
     """缺 shortage 个鱼饵要制几份（凡饵一份出 2 个）；鱼材不够就少制，一份都凑不出返回 0。
 
@@ -9283,9 +9309,75 @@ def _fishing_bait_craft_portions(bait_name: str, shortage: int, materials: objec
     recipe, per_portion = FISHING_BAIT_RECIPES.get(bait_name, ({}, 1))
     portions = -(-max(int(shortage), 1) // per_portion)
     if isinstance(materials, dict):
-        for item_id, need in recipe.items():
-            portions = min(portions, max(_miniapp_int(materials.get(item_id), 0), 0) // need)
+        for material, need in recipe.items():
+            portions = min(portions, max(_miniapp_int(materials.get(material), 0), 0) // need)
     return portions
+
+
+async def _precraft_fishing_bait(
+    storage: Storage, *, task: dict, profile_id: int, chat_id: int, fishing_at: float
+) -> str:
+    """开钓前先把那天要的鱼饵制好（用户 10-15：确保零点就开钓）。返回发出去的指令，没发返回空串。
+
+    缺口 = 一天的竿数 − 手里的饵；鱼材够几份制几份。制完（或者不用制）把「那天制过饵」记到开钓那天：
+    开钓时再缺饵就不再制（鱼材已经用光），按网页「缺饵时」开关直接买，不等 90 秒。
+    """
+    key = _fishing_bait_craft_state_key(profile_id, chat_id)
+    try:
+        crafted_for = float(storage.get_runtime_state(key) or 0)
+    except (TypeError, ValueError):
+        crafted_for = 0.0
+    if biz_fishing_daily_auto.is_same_local_day(crafted_for, fishing_at):
+        return ""
+    session = storage.get_fishing_session(int(profile_id), int(chat_id)) or {}
+    bait = str(session.get("bait") or "").strip()
+    if (
+        biz_fishing_game.normalize_bait_source(session.get("bait_source")) == "buy"
+        or not bait
+        or len(bait) > 20
+        or any(ch in bait for ch in " .。\n")
+    ):
+        return ""
+    payload = await asyncio.to_thread(_refresh_companion_payload, storage, int(profile_id))
+    if not isinstance(payload, dict):
+        payload = read_cached_external_payload(storage, int(profile_id))
+    stock = _payload_stock_by_name(storage, payload)
+    if not stock:
+        return ""  # 天机阁读不到：开钓时照旧现制
+    shortage = max(_miniapp_int(session.get("daily_limit"), 1), 1) - stock.get(bait, 0)
+    portions = min(_fishing_bait_craft_portions(bait, shortage, stock), 99) if shortage > 0 else 0
+    command_text = f".制饵 {bait} {portions}" if portions > 0 else ""
+    if command_text:
+        storage.enqueue_outgoing_command(
+            profile_id=int(profile_id),
+            chat_id=int(chat_id),
+            text=command_text,
+            thread_id=int(task.get("thread_id")) if task.get("thread_id") else None,
+            chat_type=str(task.get("chat_type") or "group"),
+            bot_username=str(task.get("bot_username") or ""),
+        )
+    storage.set_runtime_state(key, str(fishing_at))
+    return command_text
+
+
+FISHING_ROLLOVER_GRACE_SECONDS = 15 * 60
+FISHING_ROLLOVER_RETRY_SECONDS = 60
+
+
+def _fishing_day_not_rolled_over(result: dict, session: dict, *, now: float) -> bool:
+    """零点整开钓时服务器可能还没翻日：一竿没钓、会话今天还是 0 竿，却回「今日竿数已用完」。
+
+    这种情况当成没翻日，一分钟后再试，最多试到零点后 15 分钟——否则当天的垂钓被当成钓满关掉，要到第二天才再开。
+    """
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    local = datetime.fromtimestamp(now, tz=pagoda_auto.SHANGHAI_TZ)
+    since_midnight = now - local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    return (
+        str(result.get("status") or "") == "daily_limit"
+        and _miniapp_int(data.get("settled_count"), 0) == 0
+        and _miniapp_int(session.get("daily_count"), 0) == 0
+        and since_midnight < FISHING_ROLLOVER_GRACE_SECONDS
+    )
 
 
 def _fishing_should_buy_bait(bait_source: str, *, crafted_today: bool) -> bool:
@@ -9338,7 +9430,7 @@ def _request_fishing_bait_craft(
         remaining_rods - _miniapp_int(data.get("baitCount"), 0),
     )
     # 读不到材料（天机阁没同步）传 None：不设上限，照旧发出去试
-    materials = _payload_materials(read_cached_external_payload(storage, int(profile_id)))
+    materials = _payload_stock_by_name(storage, read_cached_external_payload(storage, int(profile_id)))
     quantity = min(_fishing_bait_craft_portions(bait_name, shortage, materials or None), 99)
     retry_state = "miniapp_batch" if batch_mode else "miniapp_canary"
     if quantity <= 0:
@@ -9381,6 +9473,36 @@ def _request_fishing_bait_craft(
 FISHING_AUTO_OPEN_KEY = "fishing_auto_open:{profile_id}"
 FISHING_OPEN_COMMAND_SPACING_SECONDS = 5
 _FISH_NON_CATCH_MATERIALS = {"mat_fish_meat", "mat_fish_scale"}
+# 用户 10-15 定：每天开钓那一刻（零点）先开一条银须灵鲢——群里 10-12、10-13 两次开出 LDC 都是它。
+# 钓完开鱼时留一条给第二天零点
+FISHING_MIDNIGHT_OPEN_FISH = "银须灵鲢"
+FISHING_MIDNIGHT_OPEN_LATE_SECONDS = 300
+
+
+def _fishing_auto_open_enabled(storage: Storage, profile_id: int) -> dict:
+    try:
+        state = json.loads(storage.get_runtime_state(FISHING_AUTO_OPEN_KEY.format(profile_id=int(profile_id))) or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return state if isinstance(state, dict) and state.get("enabled") else {}
+
+
+def _queue_midnight_fish_open(storage: Storage, *, task: dict, profile_id: int, chat_id: int) -> bool:
+    """开钓时（零点）先开一条留着的银须灵鲢；没开自动开鱼、库存里没有就不发。"""
+    if not _fishing_auto_open_enabled(storage, profile_id):
+        return False
+    stock = _payload_stock_by_name(storage, read_cached_external_payload(storage, int(profile_id)))
+    if stock.get(FISHING_MIDNIGHT_OPEN_FISH, 0) < 1:
+        return False
+    storage.enqueue_outgoing_command(
+        profile_id=int(profile_id),
+        chat_id=int(chat_id),
+        text=f".开鱼 {FISHING_MIDNIGHT_OPEN_FISH} 1",
+        thread_id=int(task.get("thread_id")) if task.get("thread_id") else None,
+        chat_type=str(task.get("chat_type") or "group"),
+        bot_username=str(task.get("bot_username") or ""),
+    )
+    return True
 
 
 async def _queue_fish_opening(
@@ -9395,15 +9517,8 @@ async def _queue_fish_opening(
     ponytail: 刚钓完天机阁刷不出来时用缓存，当天新钓的会留到明天再开。
     """
     key = FISHING_AUTO_OPEN_KEY.format(profile_id=int(profile_id))
-    try:
-        state = json.loads(storage.get_runtime_state(key) or "{}")
-    except json.JSONDecodeError:
-        return 0
-    if (
-        not isinstance(state, dict)
-        or not state.get("enabled")
-        or biz_fishing_daily_auto.is_same_local_day(float(state.get("opened_at") or 0), now)
-    ):
+    state = _fishing_auto_open_enabled(storage, profile_id)
+    if not state or biz_fishing_daily_auto.is_same_local_day(float(state.get("opened_at") or 0), now):
         return 0
     payload = await asyncio.to_thread(_refresh_companion_payload, storage, int(profile_id))
     if not isinstance(payload, dict):
@@ -9418,6 +9533,8 @@ async def _queue_fish_opening(
         if not name or len(name) > 20 or any(ch in name for ch in " .。\n"):
             continue
         quantity = min(_miniapp_int(count), 99)
+        if name == FISHING_MIDNIGHT_OPEN_FISH:
+            quantity = min(quantity, _miniapp_int(count) - 1)  # 留一条给明天零点开
         if quantity <= 0:
             continue
         storage.enqueue_outgoing_command(
@@ -9727,7 +9844,15 @@ async def _run_fishing_auto_scheduler(
                         now=time.time(),
                         bot_message_id=0,
                     )
-                    if str(result.get("error") or "") == FISHING_COMPANION_SAILING_ERROR:
+                    if _fishing_day_not_rolled_over(result, fresh_session, now=time.time()):
+                        updates.update(
+                            state="miniapp_batch" if batch_mode else "miniapp_canary",
+                            enabled=True,
+                            daily_count=0,
+                            next_action_at=time.time() + FISHING_ROLLOVER_RETRY_SECONDS,
+                            last_error="零点刚过，服务器还没翻日，稍后再钓。",
+                        )
+                    elif str(result.get("error") or "") == FISHING_COMPANION_SAILING_ERROR:
                         # 侍妾远航期间钓不了，但这不是当天的终局——排到归航之后再跑，
                         # 别像以前那样直接 enabled=0 把当天的竿全废掉
                         resume_at = _fishing_voyage_resume_at(

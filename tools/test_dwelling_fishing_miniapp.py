@@ -487,6 +487,9 @@ def test_executor_glue_crafts_once_then_falls_back_to_buying():
         def get_external_account(self, profile_id, provider):
             return {}
 
+        def get_game_items(self):
+            return {}
+
         def get_runtime_state(self, key):
             return self.state.get(key)
 
@@ -814,6 +817,9 @@ def test_bait_crafting_orders_by_yield_and_skips_when_materials_are_short():
         def get_external_account(self, profile_id, provider):
             return {"me_json": json.dumps({"inventory": json.dumps({"materials": self.materials})})}
 
+        def get_game_items(self):
+            return CATALOG
+
         def get_runtime_state(self, key):
             return self.state.get(key)
 
@@ -848,18 +854,222 @@ def test_bait_crafting_orders_by_yield_and_skips_when_materials_are_short():
     queued, updates, storage = craft({"mat_fish_meat": 125}, small)
     assert queued == [] and updates["next_action_at"] == now and updates["enabled"] is True, (queued, updates)
     assert executors._fishing_bait_crafted_today(storage, profile_id=3, chat_id=-100123, now=now) is True
-    # 大号：按会话里今天剩的 15 竿一次制齐；灵鱼肉只够 8 个就制 8 个
-    assert craft({"mat_fish_meat": 60, "mat_fish_scale": 272}, big)[0] == [".制饵 妖血饵 15"]
-    assert craft({"mat_fish_meat": 33, "mat_fish_scale": 272}, big)[0] == [".制饵 妖血饵 8"]
-    assert craft({"mat_fish_meat": 60, "mat_fish_scale": 272}, big, batch=False)[0] == [".制饵 妖血饵 1"]      # 试钓只要 1 个
+    # 大号：按会话里今天剩的 15 竿一次制齐；灵鱼肉只够 8 个就制 8 个；一阶妖丹只有 2 个就制 2 个
+    assert craft({"mat_fish_meat": 60, "mat_fish_scale": 272, "mat_core_1": 20}, big)[0] == [".制饵 妖血饵 15"]
+    assert craft({"mat_fish_meat": 33, "mat_fish_scale": 272, "mat_core_1": 20}, big)[0] == [".制饵 妖血饵 8"]
+    assert craft({"mat_fish_meat": 60, "mat_fish_scale": 272, "mat_core_1": 2}, big)[0] == [".制饵 妖血饵 2"]
+    assert craft({"mat_fish_meat": 60, "mat_fish_scale": 272}, big)[0] == []                                   # 没有一阶妖丹：一份都制不了
+    assert craft({"mat_fish_meat": 60, "mat_fish_scale": 272, "mat_core_1": 20}, big, batch=False)[0] == [".制饵 妖血饵 1"]  # 试钓只要 1 个
     # 天机阁没同步到材料：不设上限，照旧发出去试
     assert craft(None, small)[0] == [".制饵 凡饵 3"]
     # 流程报了服务器口径的今日竿数（洞府钓位、老接口钓到一半）：按它算，不看会话里过时的数
-    storage = FakeStorage({"mat_fish_meat": 600, "mat_fish_scale": 272})
+    storage = FakeStorage({"mat_fish_meat": 600, "mat_fish_scale": 272, "mat_core_1": 20})
     reported = {"status": "need_bait", "data": {"baitName": "妖血饵", "baitCount": 0, "baitQuantity": 12, "dailyUsed": 3, "dailyLimit": 15}}
     executors._request_fishing_bait_craft(storage, reported, profile_id=3, chat_id=-100123, thread_id=1000003,
                                           session={**big, "daily_limit": 5}, batch_mode=True, now=now)
     assert [q["text"] for q in storage.queued] == [".制饵 妖血饵 12"], storage.queued
+
+
+CATALOG = {"mat_fish_meat": {"name": "灵鱼肉"}, "mat_fish_scale": {"name": "灵鱼鳞"}, "mat_fishing_waterweed": {"name": "水草团"},
+           "mat_core_1": {"name": "一阶妖丹"}, "mat_fish_yinxu_lian": {"name": "银须灵鲢"}, "item_fishing_bait_demon_blood": {"name": "妖血饵"},
+           "item_fishing_bait_plain": {"name": "凡饵"}}
+
+
+class _MidnightStorage:
+    """开钓前制饵、零点开鱼用的假库：会话、开关、天机阁库存、物品目录。"""
+
+    def __init__(self, materials, *, bait="妖血饵", daily_limit=15, bait_source="craft", auto_open=True):
+        self.materials = materials
+        self.session = {"bait": bait, "daily_limit": daily_limit, "bait_source": bait_source}
+        self.state = {"fishing_auto_open:2": json.dumps({"enabled": auto_open})}
+        self.queued = []
+
+    def get_fishing_session(self, profile_id, chat_id):
+        return self.session
+
+    def get_external_account(self, profile_id, provider):
+        return {"me_json": json.dumps({"inventory": {"materials": self.materials}})}
+
+    def get_game_items(self):
+        return CATALOG
+
+    def get_runtime_state(self, key):
+        return self.state.get(key)
+
+    def set_runtime_state(self, key, value):
+        self.state[key] = value
+
+    def enqueue_outgoing_command(self, **kwargs):
+        self.queued.append(kwargs)
+        return len(self.queued)
+
+
+def test_bait_is_crafted_before_the_fishing_time():
+    """用户 10-15：确保零点就开钓——制饵放到开钓前 10 分钟，零点再缺饵就直接买（鱼材已经用光）。"""
+    try:
+        import asyncio
+
+        from tg_game.runtime import executors
+    except Exception as exc:
+        print(f"  (skipped precraft: {type(exc).__name__})")
+        return
+    task = {"thread_id": 1000003, "chat_type": "group", "bot_username": "fanrenxiuxian_bot"}
+    fishing_at = time.time() + 600
+    key = "fishing_bait_craft_at:2:-100123"
+
+    def precraft(storage):
+        real = executors._refresh_companion_payload
+        executors._refresh_companion_payload = lambda _storage, _pid: None   # 刷不出来就用缓存
+        try:
+            return asyncio.run(executors._precraft_fishing_bait(storage, task=task, profile_id=2, chat_id=-100123, fishing_at=fishing_at))
+        finally:
+            executors._refresh_companion_payload = real
+
+    # 10-15 大号：手里 1 个妖血饵，鱼材够制 6 个（一阶妖丹只有 6 个）——缺 14，制 6，剩下 8 个零点直接买
+    storage = _MidnightStorage({"item_fishing_bait_demon_blood": 1, "mat_fish_meat": 27, "mat_fish_scale": 33, "mat_core_1": 6})
+    assert precraft(storage) == ".制饵 妖血饵 6"
+    assert [(q["text"], q["thread_id"]) for q in storage.queued] == [(".制饵 妖血饵 6", 1000003)], storage.queued
+    # 记成开钓那天已制过：零点缺饵按「缺饵时」直接买，不再制一次、不等 90 秒
+    assert executors._fishing_bait_crafted_today(storage, profile_id=2, chat_id=-100123, now=fishing_at + 60) is True
+    assert precraft(storage) == "" and len(storage.queued) == 1   # 同一天不制第二次
+    # 手里的饵够一天：不制，也记成制过
+    enough = _MidnightStorage({"item_fishing_bait_demon_blood": 15, "mat_fish_meat": 99, "mat_fish_scale": 99, "mat_core_1": 99})
+    assert precraft(enough) == "" and enough.queued == [] and enough.state.get(key)
+    # 小号凡饵：5 竿缺 5 个，一份出 2 个，制 3 份
+    small = _MidnightStorage({"mat_fish_meat": 30, "mat_fishing_waterweed": 4}, bait="凡饵", daily_limit=5)
+    assert precraft(small) == ".制饵 凡饵 3"
+    # 鱼材一份都凑不出：不发，也记成制过（零点直接买）
+    poor = _MidnightStorage({"mat_fish_meat": 3}, bait="凡饵", daily_limit=5)
+    assert precraft(poor) == "" and poor.queued == [] and poor.state.get(key)
+    # 只买饵模式不制；天机阁读不到不制也不记（零点照旧现制）
+    assert precraft(_MidnightStorage({"mat_fish_meat": 99}, bait_source="buy")) == ""
+    unknown = _MidnightStorage({})
+    assert precraft(unknown) == "" and key not in unknown.state
+
+
+def test_one_yinxu_lian_is_opened_at_the_fishing_time():
+    """用户 10-15：每天零点开一条银须灵鲢（开钓时发，钓完开鱼时留着的那条）。"""
+    try:
+        from tg_game.runtime import executors
+    except Exception as exc:
+        print(f"  (skipped midnight open: {type(exc).__name__})")
+        return
+    task = {"thread_id": 1000003, "chat_type": "group", "bot_username": "fanrenxiuxian_bot"}
+    storage = _MidnightStorage({"mat_fish_yinxu_lian": 1})
+    assert executors._queue_midnight_fish_open(storage, task=task, profile_id=2, chat_id=-100123) is True
+    assert [(q["text"], q["thread_id"]) for q in storage.queued] == [(".开鱼 银须灵鲢 1", 1000003)], storage.queued
+    assert executors._queue_midnight_fish_open(_MidnightStorage({}), task=task, profile_id=2, chat_id=-100123) is False   # 没有就不发
+    off = _MidnightStorage({"mat_fish_yinxu_lian": 3}, auto_open=False)
+    assert executors._queue_midnight_fish_open(off, task=task, profile_id=2, chat_id=-100123) is False and off.queued == []
+
+
+def test_midnight_daily_limit_before_the_server_rolls_over_is_retried():
+    """零点整开钓：服务器还没翻日会回「今日竿数已用完」——一竿没钓、会话还是 0 竿时当成没翻日，别把今天的垂钓关掉。"""
+    try:
+        from datetime import datetime as _dt
+
+        from tg_game.runtime import executors
+    except Exception as exc:
+        print(f"  (skipped rollover: {type(exc).__name__})")
+        return
+    from tg_game import pagoda_auto
+
+    midnight = _dt.now(pagoda_auto.SHANGHAI_TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    rolled = {"ok": True, "status": "daily_limit", "data": {"settled_count": 0, "dailyUsed": 0}}
+    fresh = {"daily_count": 0, "daily_limit": 15}
+    assert executors._fishing_day_not_rolled_over(rolled, fresh, now=midnight + 3) is True
+    assert executors._fishing_day_not_rolled_over(rolled, fresh, now=midnight + 800) is True
+    assert executors._fishing_day_not_rolled_over(rolled, fresh, now=midnight + 1000) is False         # 过了 15 分钟就是真用完了
+    assert executors._fishing_day_not_rolled_over(rolled, {"daily_count": 4}, now=midnight + 3) is False   # 今天已经钓过
+    done = {"ok": True, "status": "daily_limit", "data": {"settled_count": 15}}
+    assert executors._fishing_day_not_rolled_over(done, fresh, now=midnight + 200) is False            # 这一轮钓满了
+
+
+def test_daily_task_precrafts_then_arms_and_opens_one_fish_at_the_fishing_time():
+    """调度器整轮：开钓前 10 分钟内排一次 .制饵（不武装）；离开钓不到 90 秒不预制；到点武装会话并开一条银须灵鲢。"""
+    try:
+        import asyncio
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from tg_game.runtime import executors
+        from tg_game.storage import ASC_EXTERNAL_PROVIDER, Storage
+    except Exception as exc:
+        print(f"  (skipped daily precraft: {type(exc).__name__})")
+        return
+    chat = -1005550000555
+    payload = {"companion": {"name": "t"}, "inventory": {"materials": {
+        "item_fishing_bait_demon_blood": 1, "mat_fish_meat": 27, "mat_fish_scale": 33, "mat_core_1": 6, "mat_fish_yinxu_lian": 1}}}
+
+    def run(offset, *, precrafted=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "t.db")
+            storage.init_schema()
+            pid = storage.create_profile("t").id
+            storage.create_chat_binding(pid, chat, bot_username="fanrenxiuxian_bot")
+            storage.upsert_game_items([{"id": k, "name": v["name"]} for k, v in CATALOG.items()])
+            storage.upsert_external_account(pid, ASC_EXTERNAL_PROVIDER, "", "", "connected", "", payload, "")
+            storage.upsert_fishing_session(profile_id=pid, chat_id=chat, enabled=False, state="finished", bait="妖血饵", pond="乱星海礁", daily_limit=15)
+            storage.set_runtime_state(f"fishing_auto_open:{pid}", json.dumps({"enabled": True}))
+            task = storage.upsert_companion_auto_task(profile_id=pid, chat_id=chat, feature_key=executors.biz_fishing_daily_auto.FEATURE_KEY,
+                                                      enabled=True, strategy="00:00", bot_username="fanrenxiuxian_bot")
+            storage.update_companion_auto_task(task["id"], next_run_at=time.time() + offset, last_run_at=time.time() - 86400 * 2)
+            client = SimpleNamespace(_tg_game_profile_id=pid, _tg_game_storage=storage)
+            with patch.object(executors, "_refresh_companion_payload", return_value=payload):
+                for _ in range(2):   # 同一窗口里跑两轮，只排一次
+                    asyncio.run(executors._run_companion_auto_scheduler(client, storage, run_once=True, include_tianxing=False, task_ids={task["id"]}))
+            with storage.connect() as conn:
+                sent = [r[0] for r in conn.execute("select text from outgoing_commands where profile_id=? order by id", (pid,))]
+            return sent, storage.get_fishing_session(pid, chat)
+
+    sent, session = run(300)
+    assert sent == [".制饵 妖血饵 6"] and session["state"] == "finished", (sent, session["state"])   # 缺 14，妖丹只够 6 份；还没到点不武装
+    assert run(700)[0] == []        # 离开钓还早
+    assert run(30)[0] == []         # 离开钓不到 90 秒：不预制，留给开钓时现制
+    sent, session = run(-1)
+    assert sent == [".开鱼 银须灵鲢 1"] and session["state"] == "miniapp_batch" and session["enabled"], (sent, session["state"])
+    sent, session = run(-900)       # 到点任务被推迟了一刻钟（恢复保护、补跑）：照常武装，但零点那条鱼留到明天
+    assert sent == [] and session["state"] == "miniapp_batch", (sent, session["state"])
+
+
+def test_rollover_retry_keeps_the_day_armed():
+    """调度器接线：没翻日的 daily_limit 不关当天垂钓、不开鱼、一分钟后再试；真钓满照常收尾。"""
+    try:
+        import asyncio
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from tg_game.runtime import executors
+        from tg_game.storage import Storage
+    except Exception as exc:
+        print(f"  (skipped rollover wiring: {type(exc).__name__})")
+        return
+
+    async def fake_flow(client, **kwargs):
+        return {"ok": True, "status": "daily_limit", "error": "", "entry": {}, "events": [],
+                "data": {"settled_count": 0, "rounds": [], "catches": [], "dailyUsed": 0, "dailyLimit": 15}}
+
+    for not_rolled in (True, False):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = Storage(Path(tmp) / "t.db")
+            storage.init_schema()
+            pid = storage.create_profile("t").id
+            storage.upsert_fishing_session(profile_id=pid, chat_id=-100123, enabled=True, state="miniapp_batch", daily_limit=15)
+            storage.set_runtime_state(f"fishing_auto_open:{pid}", json.dumps({"enabled": True}))
+            client = SimpleNamespace(_tg_game_profile_id=pid)
+            with patch.object(executors.fishing_miniapp, "run_fishing_miniapp_public_production_flow", fake_flow), \
+                 patch.object(executors, "_fishing_day_not_rolled_over", return_value=not_rolled), \
+                 patch.object(executors, "_refresh_companion_payload", return_value=None):
+                asyncio.run(executors._run_fishing_auto_scheduler(client, storage, run_once=True))
+            session = storage.get_fishing_session(pid, -100123)
+            if not_rolled:
+                assert session["enabled"] and session["state"] == "miniapp_batch" and session["daily_count"] == 0, dict(session)
+                assert abs(session["next_action_at"] - time.time() - executors.FISHING_ROLLOVER_RETRY_SECONDS) < 10, session["next_action_at"]
+                assert "opened_at" not in json.loads(storage.get_runtime_state(f"fishing_auto_open:{pid}")), "没钓就不该开鱼"
+            else:
+                assert not session["enabled"] and session["state"] == "finished", dict(session)
 
 
 def test_scheduler_with_the_legacy_api_records_casts_prices_and_releases_companions():
@@ -974,8 +1184,8 @@ def test_fish_opening_queues_one_command_per_species_once_a_day():
     storage = FakeStorage({"enabled": True})
     assert run(storage) == 2
     assert [(q["text"], q["delay_seconds"], q["thread_id"]) for q in storage.queued] == [
-        (".开鱼 青鳞小鲫 1", 0, 1000003), (".开鱼 银须灵鲢 2", 5, 1000003)], storage.queued
-    assert json.loads(storage.state["fishing_auto_open:3"])["opened_count"] == 3
+        (".开鱼 青鳞小鲫 1", 0, 1000003), (".开鱼 银须灵鲢 1", 5, 1000003)], storage.queued   # 银须灵鲢留一条给明天零点
+    assert json.loads(storage.state["fishing_auto_open:3"])["opened_count"] == 2
     # 同一天不排第二次（指令还在路上、天机阁里鱼还没扣掉）；第二天再开
     assert run(storage) == 0 and len(storage.queued) == 2
     assert run(storage, at=now + 86400) == 2 and json.loads(storage.state["fishing_auto_open:3"])["enabled"] is True
@@ -985,7 +1195,7 @@ def test_fish_opening_queues_one_command_per_species_once_a_day():
     # 天机阁刷不出来：退回缓存里的库存
     refreshed = None
     cached = FakeStorage({"enabled": True})
-    assert run(cached) == 1 and [q["text"] for q in cached.queued] == [".开鱼 银须灵鲢 9"]
+    assert run(cached) == 1 and [q["text"] for q in cached.queued] == [".开鱼 银须灵鲢 8"]
 
 
 def test_private_fish_token_path_stays_off_dwelling_api():
