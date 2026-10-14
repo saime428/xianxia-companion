@@ -158,7 +158,7 @@ class ResourceTests(unittest.TestCase):
             settings = get_settings()
             with patch.object(settings, "database_path", storage.path), patch.object(settings, "authorized_user_id", "123"), ExitStack() as mocks:
                 web = importlib.import_module("tg_game.web.app")
-                for name in ("_sync_bootstrap_if_needed", "_sync_all_items_if_needed", "_sync_shop_items_if_needed", "_sync_marketplace_listings_if_needed", "_sync_profile_from_cultivator", "sync_cultivation_session"):
+                for name in ("_sync_bootstrap_if_needed", "_sync_all_items_if_needed", "_sync_shop_items_if_needed", "_sync_profile_from_cultivator", "sync_cultivation_session"):
                     mocks.enter_context(patch.object(web, name, return_value=None))
                 mocks.enter_context(patch.object(Storage, "get_cultivation_session", return_value=None))
                 mocks.enter_context(patch.object(Storage, "get_sect_session", return_value=None))

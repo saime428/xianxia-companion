@@ -510,7 +510,6 @@ __all__ = [
     '_sync_all_items_if_needed',
     '_sync_bootstrap_if_needed',
     '_sync_shop_items_if_needed',
-    '_sync_marketplace_listings_if_needed',
     '_sync_profile_from_cultivator',
     '_build_rift_failure_profile_state',
 ]
@@ -1804,31 +1803,6 @@ def _sync_shop_items_if_needed(storage: Storage, cookie_text: str):
         if items:
             storage.replace_shop_items(items)
             storage.set_runtime_state("last_shop_items_sync", str(now))
-    except Exception:
-        pass
-
-
-def _sync_marketplace_listings_if_needed(storage: Storage, cookie_text: str):
-    last_sync = float(storage.get_runtime_state("last_marketplace_listings_sync") or 0)
-    now = biz_fanren_game.time.time()
-    if now - last_sync <= 300:
-        return
-    from tg_game.clients.asc_client import get_all_marketplace_listings
-    try:
-        game_items_dict = storage.get_game_items()
-        items = []
-        for item in get_all_marketplace_listings(cookie_text):
-            item_id = str(item.get("item_id") or "").strip()
-            meta = game_items_dict.get(item_id) or {}
-            items.append(
-                {
-                    **item,
-                    "item_type": str(meta.get("type") or "").strip()
-                    or ("material" if item.get("is_material") else ""),
-                }
-            )
-        storage.replace_marketplace_listings(items)
-        storage.set_runtime_state("last_marketplace_listings_sync", str(now))
     except Exception:
         pass
 

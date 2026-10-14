@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory() as folder:
     web = importlib.import_module('tg_game.web.app')
     import httpx
     with ExitStack() as mocks:
-        for name in ('_sync_bootstrap_if_needed','_sync_all_items_if_needed','_sync_shop_items_if_needed','_sync_marketplace_listings_if_needed','_sync_profile_from_cultivator','sync_cultivation_session'):
+        for name in ('_sync_bootstrap_if_needed','_sync_all_items_if_needed','_sync_shop_items_if_needed','_sync_profile_from_cultivator','sync_cultivation_session'):
             mocks.enter_context(patch.object(web,name,return_value=None))
         sync = mocks.enter_context(patch.object(web,'sync_external_account',return_value=payload))
         sect = mocks.enter_context(patch.object(Storage,'request_sect_refresh'))

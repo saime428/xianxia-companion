@@ -226,6 +226,12 @@ PYTHONPATH=app/src .venv/bin/python -B -m tg_game.features.world_boss.world_boss
 
 - **自动赌石**（每天定时一次，默认没有启用任何账号）：由独立的 `xianxia-stone-gambling.service` 负责，启用、预算、停用和核对的命令见仓库根目录的 `STONE-GAMBLING.md`。
 
+- **玄骨考校自动作答**：玄骨上人每隔一个半小时左右在群里点一个活跃修士出题，300 秒内不答扣 1000 修为、答错扣 2000、答对给 5000 修为，一半多还另给养魂木、三级妖丹、天雷竹之类。开了以后，这个号被点名考校时等 8~25 秒回复题面 `.作答 <字母>`。只答考校那 6 道已经核实过答案的题；持有虚天鼎、乾蓝冰焰才会遇到的窥鼎、夺焰题，以及没见过的题都不答。群里每一场玄骨答题都会长期记在 `xuangu_quiz_logs`，`tools/xuangu_quiz_bank.py` 可以统计出完整题库：
+
+  ```bash
+  .venv/bin/python -c "import sqlite3,time;c=sqlite3.connect('data/tg_game.db');c.execute('insert or replace into app_runtime_state(key,value,updated_at) values(?,?,?)',('xuangu_quiz_auto:<id>','{\"enabled\": true}',time.time()));c.commit()"
+  ```
+
 - **野外历练日报**（发到这个号自己 TG 的收藏夹，不进游戏群）：当天的野外历练打满后发一份，逐场列出胜负、修为和掉落；天星宗的号还会列出推命命中几次、改命挡下几场败局，方便算天机值的账。一天只发一次。野外历练本身要先在诸元神巡令里开着：
 
   ```bash

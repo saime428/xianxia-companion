@@ -293,7 +293,7 @@ async def check_web_toggle():
             web = importlib.import_module("tg_game.web.app")
             # 渲染页面时别去连天机阁
             for name in ("_sync_bootstrap_if_needed", "_sync_all_items_if_needed", "_sync_shop_items_if_needed",
-                         "_sync_marketplace_listings_if_needed", "_sync_profile_from_cultivator", "sync_cultivation_session"):
+                         "_sync_profile_from_cultivator", "sync_cultivation_session"):
                 mocks.enter_context(patch.object(web, name, return_value=None))
             # 这两张表是运行时才建的，空库里没有
             mocks.enter_context(patch.object(Storage, "get_cultivation_session", return_value=None))

@@ -656,7 +656,6 @@ def create_app() -> FastAPI:
         _sync_bootstrap_if_needed(storage, cookie_text)
         _sync_all_items_if_needed(storage, cookie_text)
         _sync_shop_items_if_needed(storage, cookie_text)
-        _sync_marketplace_listings_if_needed(storage, cookie_text)
 
     def _build_command_target_context(active_profile) -> dict:
         return _shared_build_command_target_context(
