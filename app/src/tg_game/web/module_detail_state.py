@@ -630,6 +630,9 @@ def build_module_detail_default_state(
             "xinggong_divine": build_companion_auto_view(
                 None, "xinggong_divine"
             ),
+            "xutian_cauldron": build_companion_auto_view(
+                None, "xutian_cauldron"
+            ),
         },
         "vase_followup_suggestions": VASE_FOLLOWUP_SUGGESTIONS,
         "pagoda_auto_state": build_pagoda_auto_view(None),

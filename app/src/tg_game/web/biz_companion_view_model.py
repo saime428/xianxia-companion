@@ -22,6 +22,7 @@ from tg_game.features.soul import biz_soul_cultivation
 from tg_game.features.sect import biz_taiyi_yindao
 from tg_game.features.harmony import biz_dual_cultivation
 from tg_game.features.xinggong import biz_xinggong_divine
+from tg_game.features.artifact import biz_xutian_cauldron
 from tg_game.features.countdowns.biz_countdowns_view_model import (
     SHANGHAI_TZ,
     format_countdown_display,
@@ -73,6 +74,10 @@ COMPANION_AUTO_FEATURES = {
     biz_xinggong_divine.FEATURE_KEY: {
         "label": "星宫观星",
         "command": biz_xinggong_divine.DIVINE_COMMAND,
+    },
+    biz_xutian_cauldron.FEATURE_KEY: {
+        "label": "虚天鼎",
+        "command": biz_xutian_cauldron.PANEL_COMMAND,
     },
     biz_small_world_game.SMALL_WORLD_AUTO_FEATURE_KEY: {
         "label": "小世界",

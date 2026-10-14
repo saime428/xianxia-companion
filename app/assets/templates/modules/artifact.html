@@ -149,6 +149,31 @@
             {% endif %}
         </div>
     </div>
+
+    {% set xutian_auto = companion_auto_state.xutian_cauldron %}
+    <div class="detail-card">
+        <div class="section-header compact">
+            <p>炼焰 9 次 → 通宝 6 次</p>
+            <h2>自动虚天鼎</h2>
+        </div>
+        <div class="stack-list compact-stack">
+            <div class="kv-row"><span>自动状态</span><strong>{{ xutian_auto.automation_state_display }}</strong></div>
+            <div class="kv-row"><span>下次看面板</span><strong style="font-family: var(--font-mono);">{{ xutian_auto.next_run_display if xutian_auto.active else '-' }}</strong></div>
+        </div>
+        <form class="action-row top-gap" method="post" action="/runtime/commands/companion-auto">
+            <input type="hidden" name="chat_id" value="{{ bound_chat_id }}">
+            <input type="hidden" name="thread_id" value="{{ bound_thread_id or '' }}">
+            <input type="hidden" name="chat_type" value="{{ bound_chat_type or 'group' }}">
+            <input type="hidden" name="bot_username" value="{{ bound_bot_username or 'fanrenxiuxian_bot' }}">
+            <input type="hidden" name="redirect_to" value="/modules/artifact">
+            <input type="hidden" name="feature_key" value="xutian_cauldron">
+            <button type="submit" class="inline-button auto-toggle-button{% if xutian_auto.active %} active{% endif %}" {% if not command_chat_ready %}disabled{% endif %}>{{ '关闭自动虚天鼎' if xutian_auto.active else '开启自动虚天鼎' }}</button>
+        </form>
+        {% if xutian_auto.last_error %}
+        <p class="muted top-gap">{{ xutian_auto.last_error }}</p>
+        {% endif %}
+        <p class="muted top-gap">发 <code>.虚天鼎</code> 看面板：冷却中按剩余时间再看；没冷却且天机阁里修为、神识够下一次消耗，就跟发 <code>.法宝 炼焰 虚天鼎</code>（炼焰满 9 次后改 <code>.法宝 通宝 虚天鼎</code>）。每次要花几十万修为和几百神识，洞府寻宝「用完神识」会和它抢神识。</p>
+    </div>
 </section>
 
 <section class="detail-grid">

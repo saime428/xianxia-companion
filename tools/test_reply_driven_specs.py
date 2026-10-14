@@ -16,6 +16,7 @@ from tg_game.features.sect.biz_taiyi_yindao import SPEC as TAIYI_SPEC
 from tg_game.features.sword.biz_sword_formation import SPEC as SWORD_SPEC
 from tg_game.features.vase.biz_vase_condense import SPEC as VASE_SPEC
 from tg_game.features.xinggong.biz_xinggong_divine import SPEC as DIVINE_SPEC
+from tg_game.features.artifact.biz_xutian_cauldron import SPEC as XUTIAN_SPEC
 
 REQUIRED = (
     "command",
@@ -36,6 +37,7 @@ for name, spec in (
     ("dual", DUAL_SPEC),
     ("taiyi", TAIYI_SPEC),
     ("divine", DIVINE_SPEC),
+    ("xutian", XUTIAN_SPEC),
 ):
     for key in REQUIRED:
         assert key in spec, (name, key)
@@ -306,9 +308,61 @@ for name, spec in (
     ("dual", DUAL_SPEC),
     ("taiyi", TAIYI_SPEC),
     ("divine", DIVINE_SPEC),
+    ("xutian", XUTIAN_SPEC),
 ):
     key = next(k for k, v in REPLY_DRIVEN_AUTO_SPECS.items() if v is spec)
     assert COMPANION_AUTO_FEATURES.get(key, {}).get("command") == spec["command"], name
-assert len(REPLY_DRIVEN_AUTO_SPECS) == 6, sorted(REPLY_DRIVEN_AUTO_SPECS)
+assert len(REPLY_DRIVEN_AUTO_SPECS) == 7, sorted(REPLY_DRIVEN_AUTO_SPECS)
+from tg_game.web.biz_companion_view_model import COMPANION_AUTO_FEATURES as WEB_FEATURES
+assert WEB_FEATURES["xutian_cauldron"]["command"] == ".虚天鼎"
+
+# 虚天鼎：面板原文取自 10-13~10-14 群里实测（一个炼焰中的号、一个已圆满的号）
+_XT_HEAD = "【虚天鼎】\n持有: 已得 | 祭炼: 已祭炼 | 本命: 否 | 祭出: 是\n鼎焰状态: 炼焰中\n"
+_XT_TAIL = "\n命令：.法宝 祭炼 虚天鼎、.法宝 炼焰 虚天鼎、.法宝 通宝 虚天鼎、.法宝 乾蓝冰焰"
+XT_COOLING = (
+    _XT_HEAD + "炼焰进度: 2/9\n通宝进度: 0/6\n玄骨诀: 未得，可于【玄骨事件】中夺取\n已解锁: 鼎身镇压\n\n"
+    "下一步：继续 .法宝 炼焰 虚天鼎，待九转圆满后，便可把【乾蓝冰焰】自鼎上完整取下。\n"
+    "下一次炼焰：修为 260000 / 神识 360\n\n冷却\n- 炼焰冷却：6小时23分钟50秒\n" + _XT_TAIL
+)
+XT_READY = XT_COOLING.replace("- 炼焰冷却：6小时23分钟50秒", "- 当前无额外冷却")
+XT_DONE = (
+    "【虚天鼎】\n持有: 已得 | 祭炼: 已祭炼 | 本命: 否 | 祭出: 是\n鼎焰状态: 通宝诀成\n"
+    "炼焰进度: 9/9\n通宝进度: 6/6\n玄骨诀: 已悟，可借魔诀分流寒焰\n"
+    "已解锁: 鼎身镇压、乾蓝冰焰已离鼎、通宝诀\n\n"
+    "下一步：若想继续提升焰路，应转去培养独立法宝【乾蓝冰焰】。\n已无后续阶段。\n\n冷却\n- 当前无额外冷却\n" + _XT_TAIL
+)
+xt = XUTIAN_SPEC["parse"]
+# 冷却只算冷却那一行，不能把面板别处的数字加进去
+assert xt(XT_COOLING) == ("cooldown", 6 * 3600 + 23 * 60 + 50), xt(XT_COOLING)
+assert xt(XT_READY) == ("success", 8 * 3600)
+assert xt(XT_DONE) == ("done", 0)
+assert XUTIAN_SPEC["labels"]["done"]
+# 「命令：」那行列着全部指令，没有虚天鼎（只有仿制品）的回包不能当面板
+assert xt("【虚天鼎仿制品】已与你神魂绑定，不可赠予他人！")[0] == "unknown"
+assert xt("你的神识不足，无法稳住【虚天鼎】鼎焰进行炼焰。")[0] == "unknown"
+
+
+class _PayloadStorage:
+    def __init__(self, payload):
+        import json as _json
+        self.me_json = _json.dumps(payload)
+
+    def get_external_account(self, profile_id, provider):
+        return {"me_json": self.me_json}
+
+
+_XT_TASK = {"profile_id": 2}
+_XT_REPLY = {"text": XT_READY, "message_id": 1}
+follow = XUTIAN_SPEC["reply_followup"]
+assert follow(_PayloadStorage({"cultivation_points": 5557012, "shenshi_points": 710}), _XT_TASK, _XT_REPLY) == (".法宝 炼焰 虚天鼎", 0)
+# 神识不够下一次的 360 就别发（洞府寻宝「用完神识」的号常年是 0）
+assert follow(_PayloadStorage({"cultivation_points": 5557012, "shenshi_points": 0}), _XT_TASK, _XT_REPLY) == ("", 0)
+assert follow(_PayloadStorage({"cultivation_points": 100, "shenshi_points": 710}), _XT_TASK, _XT_REPLY) == ("", 0)
+# 天机阁没同步到这两个字段时照发，交给 bot 判
+assert follow(_PayloadStorage({}), _XT_TASK, _XT_REPLY) == (".法宝 炼焰 虚天鼎", 0)
+# 炼焰满 9 次改通宝
+_XT_TONGBAO = {"text": XT_READY.replace("炼焰进度: 2/9", "炼焰进度: 9/9"), "message_id": 1}
+assert follow(_PayloadStorage({}), _XT_TASK, _XT_TONGBAO) == (".法宝 通宝 虚天鼎", 0)
+assert xt(_XT_TONGBAO["text"]) == ("success", 8 * 3600)
 
 print("ok")

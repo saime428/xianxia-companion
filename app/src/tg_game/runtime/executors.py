@@ -105,6 +105,7 @@ from tg_game.features.soul import biz_soul_cultivation as soul_feature
 from tg_game.features.harmony import biz_dual_cultivation as dual_feature
 from tg_game.features.sect import biz_taiyi_yindao as taiyi_feature
 from tg_game.features.xinggong import biz_xinggong_divine as divine_feature
+from tg_game.features.artifact import biz_xutian_cauldron as xutian_feature
 from tg_game.features.tianji_trial import biz_tianji_trial_daily_auto
 from tg_game.features.tianji_trial import biz_tianji_trial_miniapp as tianji_trial_miniapp
 from tg_game.features.tianji_trial import biz_tianji_trial_remnant_state
@@ -364,6 +365,7 @@ REPLY_DRIVEN_AUTO_SPECS = {
     dual_feature.FEATURE_KEY: dual_feature.SPEC,
     taiyi_feature.FEATURE_KEY: taiyi_feature.SPEC,
     divine_feature.FEATURE_KEY: divine_feature.SPEC,
+    xutian_feature.FEATURE_KEY: xutian_feature.SPEC,
 }
 COMPANION_AUTO_FEATURES = {
     pagoda_auto.FEATURE_KEY: {
@@ -401,6 +403,9 @@ COMPANION_AUTO_FEATURES = {
     },
     divine_feature.FEATURE_KEY: {
         "command": divine_feature.DIVINE_COMMAND,
+    },
+    xutian_feature.FEATURE_KEY: {
+        "command": xutian_feature.PANEL_COMMAND,
     },
     **SIMPLE_COOLDOWN_AUTO_FEATURES,
     ARTIFACT_TOUCH_FEATURE_KEY: {
@@ -7826,6 +7831,15 @@ async def _run_companion_auto_scheduler(
                                 workflow_state="",
                                 next_run_at=now,
                                 last_error=labels.get("idle", labels["pending"]),
+                            )
+                            continue
+                        if reply_kind == "done":
+                            # 虚天鼎：炼焰、通宝都做满了，再看面板也没事可做
+                            storage.update_companion_auto_task(
+                                task_id,
+                                enabled=0,
+                                workflow_state="",
+                                last_error=labels["done"],
                             )
                             continue
                         if reply_kind == "success":
