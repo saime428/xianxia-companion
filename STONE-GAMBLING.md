@@ -2,7 +2,7 @@
 
 2026-10-12：三个账号北京时间每天 03:10 / 03:13 / 03:16 各一次，使用各账号现有指令群绑定的话题。
 
-每轮选择三块中售价最低的一块；同价按编号。单块石价上限 5000，按一次入场和购买核对每号 5500 灵石的预算。静默无回包无法证明服务器没有处理首条切石，因此最多补发一次；若两条切石各自返回结果，停下核对实际花费。入场已经付费后才看得到石价，全部超预算时会损失入场费，但不继续买石。大涨、小涨是游戏标签，日报只写物品和花费，不认定盈利。
+每轮按该号设定的价位选一块：三块按售价排好（同价按编号），`cheapest` 取最便宜、`middle` 取中间、`priciest` 取最贵；选中的超出单价上限或预算就往便宜的退一档。默认 `cheapest`，用 `enable --pick` 改（不带 `--pick` 重新启用时保留原设定）。三个号分开选不同价位，是为了攒「价位和结果有没有关系」的样本——只选最便宜的话永远看不到贵的那两块切出来是什么。单块石价上限 5000，按一次入场和购买核对每号 5500 灵石的预算。静默无回包无法证明服务器没有处理首条切石，因此最多补发一次；若两条切石各自返回结果，停下核对实际花费。入场已经付费后才看得到石价，全部超预算时会损失入场费，但不继续买石。大涨、小涨是游戏标签，日报只写物品和花费，不认定盈利。
 
 `xianxia-stone-gambling.service` 每两秒从现有群消息库归档，不另开 Telegram 会话。原群、现有绑定话题的赌石记录保存在 `tg_game.db` 的 `stone_messages` / `stone_rounds`，不受原消息 48 小时清理影响。每次保留三块石头的完整描述和售价，选中编号、账号、入场费是否有支付回包、切出物品和数量，以及原始消息与回复 ID。编辑回包更新同一样本，不增加次数。不明关联保留为 pending / ambiguous，不算进出货统计。
 
@@ -30,7 +30,7 @@ systemd 单元模板保存于 `tools/xianxia-stone-gambling.service`；在同一
 .venv/bin/python tools/stone_gambling.py disable
 # 核对停止原因和游戏回包后，标记已核对，再显式启用
 .venv/bin/python tools/stone_gambling.py review --run <run_id>
-.venv/bin/python tools/stone_gambling.py enable --profile <id> --chat <group_id> --thread <topic_id> --time 03:10 --max-price 5000 --budget 5500
+.venv/bin/python tools/stone_gambling.py enable --profile <id> --chat <group_id> --thread <topic_id> --time 03:10 --max-price 5000 --budget 5500 [--pick cheapest|middle|priciest]
 ```
 
 测试：`tools/test_stone_gambling.py`；同时通过原日报、发送控制的离线回归。首次自然窗口已确认账号 3 的“小涨”和账号 2 手动补发后的“垮了”回包；自动补发机制仍待后续自然静默超时验证，没有为验收额外下注。
@@ -56,4 +56,5 @@ systemd 单元模板保存于 `tools/xianxia-stone-gambling.service`；在同一
 - `rollout.py` 只重启主服务，不认识这个服务。改了 `stone_gambling.py` 或 `tools/stone_gambling.py`，要另外 `systemctl restart xianxia-stone-gambling.service`，否则记录器跑旧代码，而主服务里发送前的检查已经是新代码。
 - 单元里写的是 `Wants=xianxia-companion.service`：主服务停着的时候启动或重启记录器，会把主服务一起拉起来。
 - 主服务停了以后库并不静止，记录器至少每 30 秒还会写一次。做文件级的备份或恢复前，把它也停掉。
+- 程序不查号上实际有多少灵石。不够时入场照付 500，切石回「囊中羞涩，买不起这块石头」，这句不在失败关键词里，要等 90 秒超时才停下并关掉该号（10-14 大号就是这样）。号与号之间转灵石用万宝楼：收钱的号 `.上架 玄铁剑 换 灵石20000`，出钱的号 `.购买 <挂单ID>`，不收税；单价不能超过天道估值的 10 倍，玄铁剑估值 2000，所以一把最多换 2 万。
 - 维护窗口如果正好落在入场和切石之间，切石不会排队，60 秒后这次 run 停掉、该号的自动赌石关闭，需要核对后重新启用。

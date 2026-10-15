@@ -13,6 +13,8 @@ TZ = timezone(timedelta(hours=8))
 ENTRY_FEE = 500
 CUT_RESPONSE_SECONDS = 30
 CUT_WINDOW_SECONDS = 120
+# 每号选哪个价位：三块按售价排好后取第几块；超出单价上限或预算就往便宜的退
+PICKS = {'cheapest': 0, 'middle': 1, 'priciest': 2}
 BOT = re.compile(r"^(?:hantianzun\d+_bot|fanrenxiuxian_bot)$", re.I)
 CUT = re.compile(r"^\.切\s+([123])$")
 STONE = re.compile(r"([123])号原石\s*\(售价:\s*([\d,]+)\s*灵石\)\s*\n📝\s*\*?(.*?)(?=\n\s*[123]号原石|\n\s*请在|\Z)", re.S)
@@ -47,7 +49,7 @@ def ensure_schema(db):
         profile_id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL, thread_id INTEGER,
         local_time TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
         max_price INTEGER NOT NULL DEFAULT 5000, daily_budget INTEGER NOT NULL DEFAULT 5500,
-        start_day TEXT NOT NULL);
+        start_day TEXT NOT NULL, pick TEXT NOT NULL DEFAULT 'cheapest');
     CREATE TABLE IF NOT EXISTS stone_auto_runs(
         id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id INTEGER NOT NULL, day TEXT NOT NULL,
         chat_id INTEGER NOT NULL, thread_id INTEGER, state TEXT NOT NULL,
@@ -59,6 +61,8 @@ def ensure_schema(db):
         command_id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, deadline REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS stone_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
     ''')
+    if 'pick' not in {r[1] for r in db.execute('PRAGMA table_info(stone_auto_config)')}:
+        db.execute("ALTER TABLE stone_auto_config ADD COLUMN pick TEXT NOT NULL DEFAULT 'cheapest'")
 
 
 def parse_panel(text):
@@ -384,7 +388,9 @@ def tick_auto(db, now):
             db.execute('UPDATE stone_auto_config SET enabled=0 WHERE profile_id=?',(run['profile_id'],))
             continue
         stones=json.loads(sample['stones_json'])
-        chosen=min(stones,key=lambda s:(s['price'],s['number']))
+        ranked=sorted(stones,key=lambda s:(s['price'],s['number']))
+        affordable=[s for s in ranked[:PICKS.get(cfg['pick'],0)+1] if s['price']<=cfg['max_price'] and s['price']+sample['fee']<=cfg['daily_budget']]
+        chosen=affordable[-1] if affordable else ranked[0]
         if sample['cut_id']:
             stop_run(db,run['id'],'检测到人工切石，不再发送',now)
             db.execute('UPDATE stone_auto_config SET enabled=0 WHERE profile_id=?',(run['profile_id'],))

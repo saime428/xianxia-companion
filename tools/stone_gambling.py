@@ -29,6 +29,7 @@ def main():
     cfg.add_argument('--time',required=True)
     cfg.add_argument('--max-price',type=int,default=5000)
     cfg.add_argument('--budget',type=int,default=5500)
+    cfg.add_argument('--pick',choices=list(stone.PICKS),help='which price rank to cut (default: keep the current one, cheapest when new)')
     disable=sub.add_parser('disable'); disable.add_argument('--profile',type=int)
     review=sub.add_parser('review'); review.add_argument('--run',type=int,required=True)
     sub.add_parser('status')
@@ -46,11 +47,14 @@ def main():
         # Enable begins today, but only the scheduled 15-minute window can trigger a run.
         day=datetime.now(stone.TZ).date().isoformat()
         with db:
-            db.execute('''INSERT INTO stone_auto_config VALUES(?,?,?,?,1,?,?,?)
+            db.execute('''INSERT INTO stone_auto_config(profile_id,chat_id,thread_id,local_time,enabled,max_price,daily_budget,start_day,pick)
+                VALUES(?,?,?,?,1,?,?,?,coalesce(?,'cheapest'))
                 ON CONFLICT(profile_id) DO UPDATE SET chat_id=excluded.chat_id,thread_id=excluded.thread_id,
-                local_time=excluded.local_time,enabled=1,max_price=excluded.max_price,daily_budget=excluded.daily_budget,start_day=excluded.start_day''',
-                (args.profile,args.chat,args.thread,args.time,args.max_price,args.budget,day))
-        print(f'Enabled profile {args.profile}: {args.time} Beijing, once/day, price <= {args.max_price}, budget {args.budget}.')
+                local_time=excluded.local_time,enabled=1,max_price=excluded.max_price,daily_budget=excluded.daily_budget,start_day=excluded.start_day,
+                pick=coalesce(?,stone_auto_config.pick)''',
+                (args.profile,args.chat,args.thread,args.time,args.max_price,args.budget,day,args.pick,args.pick))
+            pick=db.execute('SELECT pick FROM stone_auto_config WHERE profile_id=?',(args.profile,)).fetchone()[0]
+        print(f'Enabled profile {args.profile}: {args.time} Beijing, once/day, pick {pick}, price <= {args.max_price}, budget {args.budget}.')
     elif args.action=='review':
         with db:
             count=db.execute("UPDATE stone_auto_runs SET state='reviewed' WHERE id=? AND state='stopped'",(args.run,)).rowcount

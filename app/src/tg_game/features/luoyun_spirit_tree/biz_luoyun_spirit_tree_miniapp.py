@@ -33,6 +33,10 @@ LUOYUN_SPIRIT_TREE_ALLOWED_API_HOSTS = {"asc.aiopenai.app"}
 LUOYUN_SPIRIT_TREE_REQUEST_TTL_SECONDS = 30 * 60
 LUOYUN_SPIRIT_TREE_PENDING_RETRY_SECONDS = 60
 LUOYUN_SPIRIT_TREE_RETRY_DELAYS_SECONDS = (60, 120, 300, 600)
+# 提交回 5xx/断线时原样重提同一局的等待（官方页面同样重提；服务器按 runToken 去重，重复提交回 run_submitted）
+LUOYUN_SPIRIT_TREE_SUBMIT_RETRY_SECONDS = (15, 30, 45)
+# 官方页面把没确认的局留 3 天、同赛季内下次打开时重提
+LUOYUN_SPIRIT_TREE_PENDING_MAX_AGE_SECONDS = 3 * 24 * 3600
 LUOYUN_SPIRIT_TREE_HISTORY_LIMIT = 14
 LUOYUN_SPIRIT_TREE_TZ = timezone(timedelta(hours=8))
 LUOYUN_SPIRIT_TREE_MODE_ORDER = ("fly", "jump")
@@ -423,6 +427,16 @@ def _mode_state(daily: object, mode: str) -> dict:
     }
 
 
+def _tie_fields(item: dict) -> dict:
+    # 官方页面同分排序：points ↓、rankFly ↓、rankJump ↓（每日封顶后的分）、tieBreak ↑；tieBreak 含义未知，原样存下来看
+    tie_break = item.get("tieBreak")
+    return {
+        "rank_jump": _int_or_zero(item.get("rankJump")),
+        "rank_fly": _int_or_zero(item.get("rankFly")),
+        "tie_break": tie_break if isinstance(tie_break, (int, float)) and not isinstance(tie_break, bool) else None,
+    }
+
+
 def _ranking_view(value: object) -> dict:
     ranking = value if isinstance(value, dict) else {}
     rows = ranking.get("branchTop") if isinstance(ranking.get("branchTop"), list) else ranking.get("rows")
@@ -437,6 +451,7 @@ def _ranking_view(value: object) -> dict:
                 "points": _int_or_zero(item.get("points")),
                 "jump": _int_or_zero(item.get("jump")),
                 "fly": _int_or_zero(item.get("fly")),
+                **_tie_fields(item),
                 "self": bool(item.get("self")),
             }
         )
@@ -451,6 +466,7 @@ def _ranking_view(value: object) -> dict:
             "points": _int_or_zero(self_row.get("points")),
             "jump": _int_or_zero(self_row.get("jump")),
             "fly": _int_or_zero(self_row.get("fly")),
+            **_tie_fields(self_row),
         },
         "self_excluded": bool(
             ranking.get("selfExcluded") or ranking.get("branchRankSelfExcluded")
@@ -547,6 +563,46 @@ def _submit_with_same_run_retry(request: dict, transport, acquire_token=None) ->
     )
 
 
+def _submit_run(request: dict, transport, acquire_token, sleeper) -> dict:
+    """提交成绩：5xx/断线隔一会原样重提同一局；回 run_submitted 说明之前那次已受理。只用于 run/submit，开局不重发。"""
+    result = _submit_with_same_run_retry(request, transport, acquire_token)
+    for delay in LUOYUN_SPIRIT_TREE_SUBMIT_RETRY_SECONDS:
+        status = _int_or_zero(result.get("status_code"))
+        if result.get("ok") or 0 < status < 500:
+            break
+        sleeper(delay)
+        payload = request.get("payload")
+        if isinstance(payload, dict):  # Turnstile token 一次性，别带着用过的重发
+            payload.pop("turnstileToken", None)
+            payload.pop("turnstileIdempotencyKey", None)
+        result = _submit_with_same_run_retry(request, transport, acquire_token)
+    if not result.get("ok") and result.get("error") == "run_submitted":
+        return {**result, "ok": True, "already_submitted": True}
+    return result
+
+
+def _refreshed_snapshot(start_request: dict, transport, acquire_token, snapshot: dict) -> dict:
+    # run_submitted 的回包不带赛况，重读一次 start，免得次数、最好成绩停在旧值
+    fresh = execute_luoyun_spirit_tree_miniapp_request_with_turnstile(start_request, transport, acquire_token)
+    return _snapshot_from_data(fresh.get("data") or {}, snapshot) if fresh.get("ok") else snapshot
+
+
+def _submit_failure(result: dict) -> tuple[str, str, bool]:
+    failure_status, failure_kind, keep_pending = classify_luoyun_submission_failure(result)
+    if failure_kind == "submit_network_error":
+        # 同一局能原样重提（服务器按 runToken 去重），交给调度器几分钟后再提，不再整天停下待核对
+        failure_status = "retry_pending"
+    return failure_status, failure_kind, keep_pending
+
+
+def _recovery_in_season(recovery: dict, snapshot: dict) -> bool:
+    season = snapshot.get("season") if isinstance(snapshot.get("season"), dict) else {}
+    if recovery.get("season_id"):
+        return recovery["season_id"] == season.get("season_id")
+    start = str(season.get("start_date") or "")
+    return bool(start) and _today_key(recovery.get("created_at")) >= start
+
+
 def resolve_luoyun_spirit_tree_retry_delay(retry_count: object) -> int:
     count = max(_int_or_zero(retry_count), 1)
     index = min(count - 1, len(LUOYUN_SPIRIT_TREE_RETRY_DELAYS_SECONDS) - 1)
@@ -618,8 +674,14 @@ def run_luoyun_spirit_tree_flow(
     mode = "canary" if str(run_mode or "").strip() == "canary" else "daily"
     max_attempts_per_mode = 1 if mode == "canary" else 3
     recovery = pending_submission if isinstance(pending_submission, dict) else {}
-    if recovery and _today_key(recovery.get("created_at")) != _today_key():
-        recovery = {}
+    recovered_today = bool(recovery) and _today_key(recovery.get("created_at")) == _today_key()
+    dropped_recovery: dict = {}
+    # 没拿到 runToken 的（开局结果不明）只管当天；有 runToken 的照官方页面留 3 天，同赛季内重提
+    if recovery and not recovered_today and (
+        not recovery.get("runToken")
+        or time.time() - float(recovery.get("created_at") or 0) > LUOYUN_SPIRIT_TREE_PENDING_MAX_AGE_SECONDS
+    ):
+        dropped_recovery, recovery = recovery, {}
     dwelling_request = estate_miniapp.build_estate_miniapp_request(
         "start",
         token=estate_token,
@@ -691,13 +753,21 @@ def run_luoyun_spirit_tree_flow(
         )
     snapshot = _snapshot_from_data(start_data)
     events: list[dict] = []
-    if recovery and recovery.get("stage") not in {"prepared"}:
+    if recovery and not recovered_today and (
+        not _recovery_in_season(recovery, snapshot) or str(recovery.get("accountId") or "") != str(account_id)
+    ):
+        dropped_recovery, recovery = recovery, {}
+    if dropped_recovery.get("runToken"):
+        # 别天的局过期、换了赛季或账号对不上：不重提，留个记录好核对
+        events.append({"mode": str(dropped_recovery.get("mode") or ""), "status": "recovery_expired", "score": 0})
+    if recovery and not recovery.get("runToken") and recovery.get("stage") not in {"prepared"}:
+        # 开局请求结果不明、手里没有 runToken：不重发开局，等人核对
         return _flow_result(False, "settlement_unknown", run_mode=mode, snapshot=snapshot,
             entry=launch.get("entry"), pending_submission=recovery,
             error="上一局是否受理尚未确认；已读取最新成绩，未重发开局或提交", failure_kind="settlement_unconfirmed")
     accepted_modes: list[str] = [
         str(item)
-        for item in (recovery.get("accepted_modes") or [])
+        for item in ((recovery.get("accepted_modes") or []) if recovered_today else [])
         if item in LUOYUN_SPIRIT_TREE_MODE_ORDER
     ]
     if recovery.get("runToken") and recovery.get("mode") in LUOYUN_SPIRIT_TREE_MODE_ORDER:
@@ -719,33 +789,44 @@ def run_luoyun_spirit_tree_flow(
         recovery = {**recovery, "stage": "submitting"}
         if checkpoint_callback:
             checkpoint_callback(recovery)
-        submit_result = _submit_with_same_run_retry(
-            submit_request, transport, acquire_turnstile_token
-        )
+        submit_result = _submit_run(submit_request, transport, acquire_turnstile_token, sleeper)
         if not submit_result.get("ok"):
-            failure_status, failure_kind, keep_pending = classify_luoyun_submission_failure(submit_result)
-            if failure_status == "retry_pending":
+            failure_status, failure_kind, keep_pending = _submit_failure(submit_result)
+            if failure_status == "retry_pending" and recovered_today:
                 recovery["stage"] = "prepared"
-            return _flow_result(
-                False,
-                failure_status,
-                run_mode=mode,
-                snapshot=snapshot,
-                entry=launch.get("entry"),
-                error=submit_result.get("error") or "断线局重提失败。",
-                failure_kind=failure_kind,
-                pending_submission=recovery if keep_pending else {},
-            )
-        submit_data = submit_result.get("data") or {}
-        snapshot = _snapshot_from_data(submit_data, snapshot)
-        accepted_modes.append(str(recovery["mode"]))
-        events.append(
-            {
+                return _flow_result(
+                    False,
+                    failure_status,
+                    run_mode=mode,
+                    snapshot=snapshot,
+                    entry=launch.get("entry"),
+                    error=submit_result.get("error") or "断线局重提失败。",
+                    failure_kind=failure_kind,
+                    pending_submission=recovery if keep_pending else {},
+                )
+            # 服务器明确不收（局已失效、校验不过等），或别天的局这一轮重提不通：丢掉这一局，接着打今天的，
+            # 不能让昨天最多 30 分的一局拦住今天的 6 局
+            events.append({
                 "mode": str(recovery["mode"]),
-                "status": "recovered",
-                "score": _int_or_zero(submit_data.get("score")),
-            }
-        )
+                "status": "recovery_dropped" if failure_status == "retry_pending" else "recovery_rejected",
+                "score": 0,
+                "error": sanitize_luoyun_spirit_tree_secret_text(submit_result.get("error"), limit=60),
+            })
+        else:
+            submit_data = submit_result.get("data") or {}
+            snapshot = (
+                _refreshed_snapshot(tree_start_request, transport, acquire_turnstile_token, snapshot)
+                if submit_result.get("already_submitted")
+                else _snapshot_from_data(submit_data, snapshot)
+            )
+            accepted_modes.append(str(recovery["mode"]))
+            events.append(
+                {
+                    "mode": str(recovery["mode"]),
+                    "status": "already_submitted" if submit_result.get("already_submitted") else "recovered",
+                    "score": _int_or_zero(submit_data.get("score")),
+                }
+            )
         recovery = {}
         if checkpoint_callback:
             checkpoint_callback({})
@@ -850,6 +931,7 @@ def run_luoyun_spirit_tree_flow(
                 "proof": proof,
                 "accepted_modes": list(accepted_modes),
                 "created_at": started_at,
+                "season_id": (snapshot.get("season") or {}).get("season_id") or "",
             }
             if checkpoint_callback:
                 checkpoint_callback(pending)
@@ -868,11 +950,9 @@ def run_luoyun_spirit_tree_flow(
             pending["stage"] = "submitting"
             if checkpoint_callback:
                 checkpoint_callback(pending)
-            submit_result = _submit_with_same_run_retry(
-                submit_request, transport, acquire_turnstile_token
-            )
+            submit_result = _submit_run(submit_request, transport, acquire_turnstile_token, sleeper)
             if not submit_result.get("ok"):
-                failure_status, failure_kind, keep_pending = classify_luoyun_submission_failure(submit_result)
+                failure_status, failure_kind, keep_pending = _submit_failure(submit_result)
                 if failure_status == "retry_pending":
                     pending["stage"] = "prepared"
                 return _flow_result(
@@ -888,12 +968,17 @@ def run_luoyun_spirit_tree_flow(
                     pending_submission=pending if keep_pending else {},
                 )
             submit_data = submit_result.get("data") or {}
-            snapshot = _snapshot_from_data(submit_data, snapshot)
+            duplicate = bool(submit_result.get("already_submitted"))
+            snapshot = (
+                _refreshed_snapshot(tree_start_request, transport, acquire_turnstile_token, snapshot)
+                if duplicate
+                else _snapshot_from_data(submit_data, snapshot)
+            )
             score = _int_or_zero(submit_data.get("score"))
             accepted_modes.append(game_mode)
             if checkpoint_callback:
                 checkpoint_callback({})
-            events.append({"mode": game_mode, "status": "accepted", "score": score})
+            events.append({"mode": game_mode, "status": "already_submitted" if duplicate else "accepted", "score": score})
             current = _mode_state(snapshot.get("daily") or {}, game_mode)
 
     completed = _targets_reached(snapshot)
@@ -1020,8 +1105,10 @@ def queue_luoyun_spirit_tree_request(
     if board.get("needs_review") and pending_created_at and _today_key(pending_created_at) == request["day_key"]:
         return updated
     if not pending_created_at or _today_key(pending_created_at) != request["day_key"]:
-        board.pop("pending_submission", None)
+        # 别天的待核对不拦今天；带 runToken 的局留 3 天，开跑时同赛季内重提（官方页面同样做法）
         board.pop("needs_review", None)
+        if not pending.get("runToken") or time.time() - pending_created_at > LUOYUN_SPIRIT_TREE_PENDING_MAX_AGE_SECONDS:
+            board.pop("pending_submission", None)
     board["miniapp_request"] = request
     board["miniapp_run"] = {
         "status": "queued",

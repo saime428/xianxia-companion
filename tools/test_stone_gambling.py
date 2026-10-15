@@ -29,7 +29,7 @@ class Tests(unittest.TestCase):
         s.ensure_schema(self.db)
         self.storage.set_runtime_state(f'telegram_worker_heartbeat:{self.pid}',str(self.now))
         with self.db:
-            self.db.execute('INSERT INTO stone_auto_config VALUES(?,?,NULL,?,1,5000,5500,?)',(self.pid,CHAT,'03:10','2026-10-13'))
+            self.db.execute('INSERT INTO stone_auto_config(profile_id,chat_id,thread_id,local_time,enabled,max_price,daily_budget,start_day) VALUES(?,?,NULL,?,1,5000,5500,?)',(self.pid,CHAT,'03:10','2026-10-13'))
     def tearDown(self):self.db.close();self.tmp.cleanup()
     def msg(self,mid,text,uid=100,user='player',reply=None,at=None,thread=None):
         at=self.now if at is None else at
@@ -84,6 +84,22 @@ class Tests(unittest.TestCase):
         self.entry_panel();self.assertEqual(len(self.commands()),1)
         row=self.db.execute('SELECT state,reserved FROM stone_auto_runs').fetchone()
         self.assertEqual(row[:],('stopped',500))
+    def test_pick_price_rank_and_fall_back_within_limits(self):
+        # 面板售价：1号 4500、2号 3500、3号 4000
+        for pick,limit,cut,reserved in (('middle',5000,'.切 3',4500),('priciest',5000,'.切 1',5000),('priciest',4200,'.切 3',4500),('cheapest',5000,'.切 2',4000)):
+            self.tearDown();self.setUp()
+            with self.db:self.db.execute('UPDATE stone_auto_config SET pick=?,max_price=?',(pick,limit))
+            self.entry_panel()
+            self.assertEqual([c['text'] for c in self.commands()],['.赌石',cut],pick)
+            self.assertEqual(self.db.execute('SELECT reserved FROM stone_auto_runs').fetchone()[0],reserved,pick)
+            s.guard_command(self.storage,self.commands()[1]['id'],self.now+5)   # 发送前核对认得非最便宜的那块
+    def test_old_config_table_gets_pick_column(self):
+        import sqlite3
+        db=sqlite3.connect(':memory:');db.row_factory=sqlite3.Row
+        db.execute('CREATE TABLE stone_auto_config(profile_id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL, thread_id INTEGER, local_time TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, max_price INTEGER NOT NULL DEFAULT 5000, daily_budget INTEGER NOT NULL DEFAULT 5500, start_day TEXT NOT NULL)')
+        db.execute("INSERT INTO stone_auto_config VALUES(2,1,NULL,'03:10',1,5000,5500,'2026-10-12')")
+        s.ensure_schema(db);s.ensure_schema(db)
+        self.assertEqual(db.execute('SELECT pick FROM stone_auto_config').fetchone()[0],'cheapest')
     def test_timeout_disables_and_never_retries(self):
         self.tick();self.tick(self.now+61)
         self.assertEqual(self.commands()[0]['status'],'failed')
