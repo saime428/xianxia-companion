@@ -227,6 +227,14 @@ PYTHONPATH=app/src .venv/bin/python -B -m tg_game.features.world_boss.world_boss
 
 - **自动赌石**（每天定时一次，默认没有启用任何账号）：由独立的 `xianxia-stone-gambling.service` 负责，启用、预算、停用和核对的命令见仓库根目录的 `STONE-GAMBLING.md`。
 
+- **小天尊查询 bot**（独立服务，只读，不发任何游戏指令）：在你们自己人的小群里发 `.查灵根 A`、`.查储物袋 A`、`.查状态 A`（A 是用户名或道号；回复某人的消息可以不写 A）、`.查观星`，按天机阁数据回和韩天尊一样的面板；有人观星看到下一次天道演化是星辰异象、整点结算出了元磁山核·乙时，也会主动往群里报。借的是第 6 步那份天机阁登录，所以要先连上天机阁。步骤：
+  1. 私聊 @BotFather 建一个 bot。名字别叫「韩天尊」，用户名别起成 `hantianzun数字_bot` 这种，否则主程序会把它当成游戏 bot。再在 BotFather 里 `/setprivacy` 选 Disable（不关的话群里收不到 `.查` 开头的消息；关之前已经拉进群的，要踢出去重新拉）。
+  2. 把 bot 拉进小群，在群里随便发一句，浏览器打开 `https://api.telegram.org/bot<token>/getUpdates` 找到群的 `chat.id`（负数）。
+  3. `.env` 加两行：`TIANZUN_BOT_TOKEN=<token>`、`TIANZUN_BOT_CHAT_IDS=<群 ID>`。bot 只在这些群里回，私聊和别的群一概不理。
+  4. 把 `tools/xianxia-tianzun-bot.service` 复制到 `/etc/systemd/system/`（仓库不在 `/opt/xianxia-companion` 的话先改里面的路径），然后 `systemctl daemon-reload` 和 `systemctl enable --now xianxia-tianzun-bot`。更新代码后要另外 `systemctl restart xianxia-tianzun-bot`。
+
+  各条指令能查到什么、和韩天尊的差别，见 `tools/tianzun_bot.py` 文件头。
+
 - **玄骨考校自动作答**：玄骨上人每隔一个半小时左右在群里点一个活跃修士出题，300 秒内不答扣 1000 修为、答错扣 2000、答对给 5000 修为，一半多还另给养魂木、三级妖丹、天雷竹之类。开了以后，这个号被点名考校时等 8~25 秒回复题面 `.作答 <字母>`。只答考校那 6 道已经核实过答案的题；持有虚天鼎、乾蓝冰焰才会遇到的窥鼎、夺焰题，以及没见过的题都不答。群里每一场玄骨答题都会长期记在 `xuangu_quiz_logs`，`tools/xuangu_quiz_bank.py` 可以统计出完整题库：
 
   ```bash

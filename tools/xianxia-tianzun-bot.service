@@ -1,0 +1,25 @@
+[Unit]
+Description=Xianxia 小天尊 bot: .查灵根 via 天机阁
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xianxia
+Group=xianxia
+WorkingDirectory=/opt/xianxia-companion
+Environment=TZ=Asia/Shanghai
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/xianxia-companion/.venv/bin/python tools/tianzun_bot.py
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+# 只读库，但 WAL 模式下读也要写 -shm
+ReadWritePaths=/opt/xianxia-companion/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
