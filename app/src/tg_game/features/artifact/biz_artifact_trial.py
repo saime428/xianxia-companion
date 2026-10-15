@@ -1,5 +1,10 @@
 import re
 
+from tg_game.features.artifact.biz_artifact_targets import (
+    join_artifact_targets,
+    split_artifact_schedule,
+    split_artifact_targets,
+)
 
 ARTIFACT_TRIAL_FEATURE_KEY = "artifact_trial"
 ARTIFACT_TRIAL_AWAIT_REPLY_STATE = "artifact_trial_await_reply"
@@ -43,23 +48,25 @@ def build_artifact_trial_command(artifact_name: object, route: object) -> str:
     )
 
 
+def normalize_artifact_names(value: object, default: str) -> list[str]:
+    """一个或多个法宝名（「、」或换行隔开），试炼和温养共用。"""
+    names = dict.fromkeys(name[:60] for name in split_artifact_targets(value))
+    return list(names) or [default]
+
+
 def pack_artifact_trial_strategy(artifact_name: object, route: object) -> str:
-    artifact = normalize_artifact_trial_artifact_name(artifact_name)
-    normalized_route = normalize_artifact_trial_route(route)
-    return f"{normalized_route}|{artifact}"[:100]
+    return join_artifact_targets(
+        f"{normalize_artifact_trial_route(route)}|",
+        normalize_artifact_names(artifact_name, ARTIFACT_TRIAL_DEFAULT_ARTIFACT_NAME),
+    )
 
 
-def unpack_artifact_trial_strategy(value: object) -> tuple[str, str]:
-    raw = str(value or "").strip()
-    if "|" in raw:
-        route_text, artifact_text = raw.split("|", 1)
-        return (
-            normalize_artifact_trial_artifact_name(artifact_text),
-            normalize_artifact_trial_route(route_text),
-        )
+def unpack_artifact_trial_strategy(value: object) -> tuple[list[str], str]:
+    raw, _schedule = split_artifact_schedule(value)
+    route_text, artifact_text = raw.split("|", 1) if "|" in raw else ("", raw)
     return (
-        normalize_artifact_trial_artifact_name(raw),
-        ARTIFACT_TRIAL_ROUTES[0],
+        normalize_artifact_names(artifact_text, ARTIFACT_TRIAL_DEFAULT_ARTIFACT_NAME),
+        normalize_artifact_trial_route(route_text),
     )
 
 

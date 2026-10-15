@@ -5475,6 +5475,59 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse(url="/modules/other", status_code=303)
 
+    def _stop_artifact_auto_task(
+        profile_id: int,
+        chat_id: int,
+        thread_id: Optional[int],
+        feature_key: str,
+        commands: list[str],
+        last_error: str,
+    ) -> None:
+        storage.disable_companion_auto_task(
+            profile_id, chat_id, feature_key, last_error=last_error
+        )
+        for command in commands:
+            storage.cancel_pending_outgoing_commands(
+                profile_id,
+                chat_id,
+                text=command,
+                thread_id=thread_id,
+                require_exact_thread=True,
+            )
+
+    def _save_artifact_auto_task(
+        profile_id: int,
+        chat_id: int,
+        feature_key: str,
+        existing_task: Optional[dict],
+        *,
+        enabled: bool,
+        strategy: str,
+        thread_id: Optional[int],
+        chat_type: str,
+        bot_username: str,
+        workflow_state: str = "",
+        last_error: str = "已开启：到点后逐件发送（上次回包的冷却没过就等它过），每件法宝按各自回包排冷却。",
+    ) -> None:
+        # 开启时不在这里发：到期时间设成现在、排期清空，调度每 5 秒一轮、每轮发一件
+        task = storage.upsert_companion_auto_task(
+            profile_id=profile_id,
+            chat_id=chat_id,
+            feature_key=feature_key,
+            enabled=enabled,
+            strategy=strategy,
+            thread_id=thread_id,
+            chat_type=chat_type,
+            bot_username=bot_username,
+            next_run_at=biz_fanren_game.time.time() if enabled else 0,
+            last_run_at=float((existing_task or {}).get("last_run_at") or 0),
+            last_error=last_error,
+        )
+        if task.get("id"):
+            storage.update_companion_auto_task(
+                int(task["id"]), workflow_state=workflow_state
+            )
+
     @application.post("/runtime/artifact/touch-auto")
     async def runtime_toggle_artifact_touch_auto(
         request: Request,
@@ -5498,7 +5551,6 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Chat ID not configured")
         resolved_chat_id = int(normalized_chat_id)
         resolved_thread_id = int(thread_id) if thread_id and thread_id.isdigit() else None
-        normalized_command = _normalize_artifact_touch_command(command_text)
         interval_seconds = _normalize_artifact_touch_interval(
             int(interval_minutes or 0) * 60
         )
@@ -5507,54 +5559,30 @@ def create_app() -> FastAPI:
             profile.id, resolved_chat_id, ARTIFACT_TOUCH_FEATURE_KEY
         )
         if existing_task and bool(existing_task.get("enabled")):
-            existing_command, _existing_interval = _unpack_artifact_touch_strategy(
+            existing_commands, _existing_interval = _unpack_artifact_touch_strategy(
                 existing_task.get("strategy") or ""
             )
-            storage.disable_companion_auto_task(
+            _stop_artifact_auto_task(
                 profile.id,
                 resolved_chat_id,
+                resolved_thread_id,
                 ARTIFACT_TOUCH_FEATURE_KEY,
-                last_error="用户手动关闭自动抚摸法宝。",
-            )
-            storage.cancel_pending_outgoing_commands(
-                profile.id,
-                resolved_chat_id,
-                text=existing_command,
-                thread_id=resolved_thread_id,
-                require_exact_thread=True,
+                existing_commands,
+                "用户手动关闭自动抚摸法宝。",
             )
             return RedirectResponse(url=redirect_to, status_code=303)
 
-        now_ts = biz_fanren_game.time.time()
-        task = storage.upsert_companion_auto_task(
-            profile_id=profile.id,
-            chat_id=resolved_chat_id,
-            feature_key=ARTIFACT_TOUCH_FEATURE_KEY,
+        _save_artifact_auto_task(
+            profile.id,
+            resolved_chat_id,
+            ARTIFACT_TOUCH_FEATURE_KEY,
+            existing_task,
             enabled=True,
-            strategy=_pack_artifact_touch_strategy(
-                normalized_command, interval_seconds
-            ),
-            thread_id=resolved_thread_id,
-            chat_type=chat_type,
-            bot_username=bot_username,
-            next_run_at=now_ts + ARTIFACT_TOUCH_REPLY_WAIT_SECONDS,
-            last_run_at=now_ts,
-            last_error="已发送抚摸法宝，等待bot回包。",
-        )
-        storage.enqueue_outgoing_command(
-            profile_id=profile.id,
-            chat_id=resolved_chat_id,
-            text=normalized_command,
+            strategy=_pack_artifact_touch_strategy(command_text, interval_seconds),
             thread_id=resolved_thread_id,
             chat_type=chat_type,
             bot_username=bot_username,
         )
-        if task.get("id"):
-            storage.update_companion_auto_task(
-                int(task["id"]),
-                workflow_state=ARTIFACT_TOUCH_AWAIT_REPLY_STATE,
-                last_error="已发送抚摸法宝，等待bot回包。",
-            )
         return RedirectResponse(url=redirect_to, status_code=303)
 
     @application.post("/runtime/artifact/trial-auto")
@@ -5580,32 +5608,21 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Chat ID not configured")
         resolved_chat_id = int(normalized_chat_id)
         resolved_thread_id = int(thread_id) if thread_id and thread_id.isdigit() else None
-        normalized_artifact_name = _normalize_artifact_trial_artifact_name(artifact_name)
-        normalized_route = _normalize_artifact_trial_route(trial_route)
-        command_text = _build_artifact_trial_command(
-            normalized_artifact_name,
-            normalized_route,
-        )
 
         existing_task = storage.get_companion_auto_task(
             profile.id, resolved_chat_id, ARTIFACT_TRIAL_FEATURE_KEY
         )
         if existing_task and bool(existing_task.get("enabled")):
-            existing_artifact_name, existing_route = _unpack_artifact_trial_strategy(
+            existing_names, existing_route = _unpack_artifact_trial_strategy(
                 existing_task.get("strategy") or ""
             )
-            storage.disable_companion_auto_task(
+            _stop_artifact_auto_task(
                 profile.id,
                 resolved_chat_id,
+                resolved_thread_id,
                 ARTIFACT_TRIAL_FEATURE_KEY,
-                last_error="用户手动关闭自动器灵试炼。",
-            )
-            storage.cancel_pending_outgoing_commands(
-                profile.id,
-                resolved_chat_id,
-                text=_build_artifact_trial_command(existing_artifact_name, existing_route),
-                thread_id=resolved_thread_id,
-                require_exact_thread=True,
+                [_build_artifact_trial_command(name, existing_route) for name in existing_names],
+                "用户手动关闭自动器灵试炼。",
             )
             return RedirectResponse(url=redirect_to, status_code=303)
 
@@ -5614,58 +5631,26 @@ def create_app() -> FastAPI:
             payload if isinstance(payload, dict) else {},
             storage.get_game_items(),
         )
-        strategy = _pack_artifact_trial_strategy(
-            normalized_artifact_name,
-            normalized_route,
-        )
-        if not resources.get("ok"):
-            task = storage.upsert_companion_auto_task(
-                profile_id=profile.id,
-                chat_id=resolved_chat_id,
-                feature_key=ARTIFACT_TRIAL_FEATURE_KEY,
-                enabled=False,
-                strategy=strategy,
-                thread_id=resolved_thread_id,
-                chat_type=chat_type,
-                bot_username=bot_username,
-                next_run_at=0,
-                last_error=str(resources.get("error_text") or "资源不足。"),
-            )
-            if task.get("id"):
-                storage.update_companion_auto_task(
-                    int(task["id"]),
-                    workflow_state=ARTIFACT_TRIAL_STOPPED_RESOURCES_STATE,
-                )
-            return RedirectResponse(url=redirect_to, status_code=303)
-
-        now_ts = biz_fanren_game.time.time()
-        task = storage.upsert_companion_auto_task(
-            profile_id=profile.id,
-            chat_id=resolved_chat_id,
-            feature_key=ARTIFACT_TRIAL_FEATURE_KEY,
-            enabled=True,
-            strategy=strategy,
+        enough = bool(resources.get("ok"))
+        _save_artifact_auto_task(
+            profile.id,
+            resolved_chat_id,
+            ARTIFACT_TRIAL_FEATURE_KEY,
+            existing_task,
+            enabled=enough,
+            strategy=_pack_artifact_trial_strategy(artifact_name, trial_route),
             thread_id=resolved_thread_id,
             chat_type=chat_type,
             bot_username=bot_username,
-            next_run_at=now_ts + ARTIFACT_TRIAL_REPLY_WAIT_SECONDS,
-            last_run_at=now_ts,
-            last_error="已发送器灵试炼，等待bot回包。",
+            **(
+                {}
+                if enough
+                else {
+                    "workflow_state": ARTIFACT_TRIAL_STOPPED_RESOURCES_STATE,
+                    "last_error": str(resources.get("error_text") or "资源不足。"),
+                }
+            ),
         )
-        storage.enqueue_outgoing_command(
-            profile_id=profile.id,
-            chat_id=resolved_chat_id,
-            text=command_text,
-            thread_id=resolved_thread_id,
-            chat_type=chat_type,
-            bot_username=bot_username,
-        )
-        if task.get("id"):
-            storage.update_companion_auto_task(
-                int(task["id"]),
-                workflow_state=ARTIFACT_TRIAL_AWAIT_REPLY_STATE,
-                last_error="已发送器灵试炼，等待bot回包。",
-            )
         return RedirectResponse(url=redirect_to, status_code=303)
 
     @application.post("/runtime/artifact/nurture-auto")
@@ -5690,28 +5675,23 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="Chat ID not configured")
         resolved_chat_id = int(normalized_chat_id)
         resolved_thread_id = int(thread_id) if thread_id and thread_id.isdigit() else None
-        normalized_target_name = _normalize_artifact_nurture_target_name(target_name)
-        command_text = _build_artifact_nurture_command(normalized_target_name)
 
         existing_task = storage.get_companion_auto_task(
             profile.id, resolved_chat_id, ARTIFACT_NURTURE_FEATURE_KEY
         )
         if existing_task and bool(existing_task.get("enabled")):
-            existing_target_name = _unpack_artifact_nurture_strategy(
-                existing_task.get("strategy") or ""
-            )
-            storage.disable_companion_auto_task(
+            _stop_artifact_auto_task(
                 profile.id,
                 resolved_chat_id,
+                resolved_thread_id,
                 ARTIFACT_NURTURE_FEATURE_KEY,
-                last_error="用户手动关闭自动温养器灵。",
-            )
-            storage.cancel_pending_outgoing_commands(
-                profile.id,
-                resolved_chat_id,
-                text=_build_artifact_nurture_command(existing_target_name),
-                thread_id=resolved_thread_id,
-                require_exact_thread=True,
+                [
+                    _build_artifact_nurture_command(name)
+                    for name in _unpack_artifact_nurture_strategy(
+                        existing_task.get("strategy") or ""
+                    )
+                ],
+                "用户手动关闭自动温养器灵。",
             )
             return RedirectResponse(url=redirect_to, status_code=303)
 
@@ -5720,55 +5700,26 @@ def create_app() -> FastAPI:
             payload if isinstance(payload, dict) else {},
             storage.get_game_items(),
         )
-        strategy = _pack_artifact_nurture_strategy(normalized_target_name)
-        if not resources.get("ok"):
-            task = storage.upsert_companion_auto_task(
-                profile_id=profile.id,
-                chat_id=resolved_chat_id,
-                feature_key=ARTIFACT_NURTURE_FEATURE_KEY,
-                enabled=False,
-                strategy=strategy,
-                thread_id=resolved_thread_id,
-                chat_type=chat_type,
-                bot_username=bot_username,
-                next_run_at=0,
-                last_error=str(resources.get("error_text") or "资源不足。"),
-            )
-            if task.get("id"):
-                storage.update_companion_auto_task(
-                    int(task["id"]),
-                    workflow_state=ARTIFACT_NURTURE_STOPPED_RESOURCES_STATE,
-                )
-            return RedirectResponse(url=redirect_to, status_code=303)
-
-        now_ts = biz_fanren_game.time.time()
-        task = storage.upsert_companion_auto_task(
-            profile_id=profile.id,
-            chat_id=resolved_chat_id,
-            feature_key=ARTIFACT_NURTURE_FEATURE_KEY,
-            enabled=True,
-            strategy=strategy,
+        enough = bool(resources.get("ok"))
+        _save_artifact_auto_task(
+            profile.id,
+            resolved_chat_id,
+            ARTIFACT_NURTURE_FEATURE_KEY,
+            existing_task,
+            enabled=enough,
+            strategy=_pack_artifact_nurture_strategy(target_name),
             thread_id=resolved_thread_id,
             chat_type=chat_type,
             bot_username=bot_username,
-            next_run_at=now_ts + ARTIFACT_NURTURE_REPLY_WAIT_SECONDS,
-            last_run_at=now_ts,
-            last_error="已发送温养器灵，等待bot回包。",
+            **(
+                {}
+                if enough
+                else {
+                    "workflow_state": ARTIFACT_NURTURE_STOPPED_RESOURCES_STATE,
+                    "last_error": str(resources.get("error_text") or "资源不足。"),
+                }
+            ),
         )
-        storage.enqueue_outgoing_command(
-            profile_id=profile.id,
-            chat_id=resolved_chat_id,
-            text=command_text,
-            thread_id=resolved_thread_id,
-            chat_type=chat_type,
-            bot_username=bot_username,
-        )
-        if task.get("id"):
-            storage.update_companion_auto_task(
-                int(task["id"]),
-                workflow_state=ARTIFACT_NURTURE_AWAIT_REPLY_STATE,
-                last_error="已发送温养器灵，等待bot回包。",
-            )
         return RedirectResponse(url=redirect_to, status_code=303)
 
     @application.post("/runtime/world-boss/auto")

@@ -5,11 +5,6 @@ import uuid
 from datetime import datetime, timezone, timedelta
 
 from tg_game import pagoda_auto
-from tg_game.features.companion.biz_companion_cooldown import (
-    SIMPLE_COOLDOWN_AUTO_FEATURES,
-    WILD_EXPERIENCE_FEATURE_KEY,
-    resolve_simple_cooldown_next_run_at,
-)
 from tg_game.features.beast_merge import biz_beast_merge_daily_auto
 from tg_game.features.beast_merge import biz_beast_merge_state
 from tg_game.features.estate import biz_estate_hunt_daily_auto
@@ -38,13 +33,9 @@ PAGODA_COMMAND = pagoda_auto.COMMAND
 BATCH_TIMEOUT_SECONDS = 15 * 60
 BEAST_MERGE_BATCH_TIMEOUT_SECONDS = 30 * 60
 WILD_EXPERIENCE_BATCH_TIMEOUT_SECONDS = 30 * 60
-# 野外历练 2026-09-16 起是 3 小时冷却制：按天机阁的上次历练时间开跑，
-# 但一轮跑空（还没到点、入口失败）时至少隔这么久再试，别 15 秒一轮空转。
+# 野外历练 2026-09-21 起是每天 8 次、北京零点重置、场间不冷却：有号今天没打满就开一轮，
+# 一轮打不完（入口失败、中途断）至少隔这么久再试，别 15 秒一轮空转。
 WILD_EXPERIENCE_RETRY_GAP_SECONDS = 30 * 60
-WILD_EXPERIENCE_COOLDOWN_SECONDS = (
-    int(SIMPLE_COOLDOWN_AUTO_FEATURES[WILD_EXPERIENCE_FEATURE_KEY]["cooldown_hours"])
-    * 3600
-)
 TERMINAL_STATUSES = {"success", "failed", "skipped"}
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 SCHEDULE_POLL_SECONDS = 15
@@ -418,9 +409,12 @@ def _start_beast_merge_item(storage: Storage, profile, item: dict) -> None:
         item["reward"] = _beast_merge_reward(updated_payload)
 
 
-def wild_experience_ready_at(payload: dict) -> float | None:
-    """按天机阁的 last_wild_experience_time + 3 小时算下次可历练时间；没这个字段返回 None。"""
-    return resolve_simple_cooldown_next_run_at(payload, WILD_EXPERIENCE_FEATURE_KEY)
+def wild_experience_pending(payload: dict, *, disabled: bool = False) -> bool:
+    """这个号今天还有野外历练没打（天机阁的当日计数 / 本地 run 记录都没到 8）。
+
+    ponytail: 没有天机阁档案的号按「没数据不开跑」处理，免得每 30 分钟开一轮空的。
+    """
+    return bool(payload) and not disabled and not wild_experience_miniapp.is_completed_today(payload)
 
 
 # 23:30~01:00 不开新一轮（用户 10-14 定：野外历练挪到 01:00 以后）。零点前后留给要定点的——天星宗观命定命、
@@ -435,16 +429,14 @@ def wild_experience_quiet(current_time: str) -> bool:
 
 
 def wild_experience_batch_due(
-    ready_times: list,
+    pending: list,
     last_started_at: object,
     now: float,
 ) -> bool:
-    """任一元神冷却到期就再开一轮，但两轮之间至少隔 WILD_EXPERIENCE_RETRY_GAP_SECONDS。"""
+    """有元神今天还没打满就再开一轮，但两轮之间至少隔 WILD_EXPERIENCE_RETRY_GAP_SECONDS。"""
     if float(now) < float(last_started_at or 0) + WILD_EXPERIENCE_RETRY_GAP_SECONDS:
         return False
-    # ponytail: ready 是 None 表示天机阁没这个字段，按「没数据不开跑」处理；
-    # 真要支持全新档案，改成 None 当 0 即可。
-    return any(ready is not None and float(ready) <= float(now) for ready in ready_times)
+    return any(pending)
 
 
 def wild_experience_strategy(storage: Storage, profile_id: int, default: str) -> str:
@@ -472,11 +464,6 @@ def _start_wild_experience_item(
     account, payload = _load_external(storage, profile.id)
     if not _profile_ready(profile, account, item):
         item["status"] = "failed"
-        return
-    ready_at = wild_experience_ready_at(payload)
-    if ready_at is not None and float(ready_at) > time.time():
-        item["status"] = "skipped"
-        item["reward"] = wild_experience_miniapp.build_reward_summary(payload)
         return
     if wild_experience_miniapp.is_completed_today(payload):
         item["status"] = "skipped"
@@ -699,11 +686,14 @@ def run_due_schedule(
             continue
         disable_profile_automations(storage, kind, profiles)
         if kind == "wild_experience":
-            # 3 小时冷却制，不再是每天 run_time 跑一次
+            # 每日 8 次制：有号今天没打满就开一轮，不看 run_time
             if wild_experience_quiet(current_time) or not wild_experience_batch_due(
                 [
-                    wild_experience_ready_at(
-                        _load_external(storage, int(profile.id))[1]
+                    wild_experience_pending(
+                        _load_external(storage, int(profile.id))[1],
+                        disabled=storage.get_runtime_state(
+                            f"wild_experience_disabled:{int(profile.id)}"
+                        ) == "1",
                     )
                     for profile in profiles
                 ],
@@ -1034,15 +1024,15 @@ def _schedule_view(
     next_run_at = 0.0
     next_run_display = "未开启"
     if enabled and kind == "wild_experience":
-        # 3 小时冷却制：按上一轮开跑时间推，不看 run_time
+        # 每日 8 次制：上一轮开跑后至少隔 30 分钟，之后有号没打满就开，不看 run_time
         next_run_at = (
             float(schedule.get("last_started_at") or 0)
-            + WILD_EXPERIENCE_COOLDOWN_SECONDS
+            + WILD_EXPERIENCE_RETRY_GAP_SECONDS
         )
         next_run_display = (
             _local_now(next_run_at).strftime("%Y-%m-%d %H:%M")
             if next_run_at > float(now or time.time())
-            else "等待冷却结束"
+            else "有号今天没打满就开"
         )
     elif enabled:
         today = current.date().isoformat()

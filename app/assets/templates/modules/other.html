@@ -205,7 +205,7 @@
         <div data-artifact-tab-panel="touch">
             <div class="stack-list compact-stack">
                 <div class="kv-row"><span>状态</span><strong style="color: {% if artifact_touch_auto_state.active %}var(--accent-gold){% else %}var(--text-muted){% endif %};">{{ '运行中' if artifact_touch_auto_state.active else '未启动' }}</strong></div>
-                <div class="kv-row"><span>下次执行</span><strong {% if artifact_touch_auto_state.next_run_target %}class="countdown-text" data-countdown-target="{{ artifact_touch_auto_state.next_run_target }}"{% endif %}>{{ artifact_touch_auto_state.next_run_display }}</strong></div>
+                {% for row in artifact_touch_auto_state.targets %}<div class="kv-row"><span>{{ '下次执行' if artifact_touch_auto_state.targets|length == 1 else '下次 · ' ~ row.label }}</span><strong {% if row.next_run_target %}class="countdown-text" data-countdown-target="{{ row.next_run_target }}"{% endif %}>{{ row.next_run_display }}</strong></div>{% endfor %}
             </div>
             <form class="form-grid top-gap" method="post" action="/runtime/artifact/touch-auto">
                 <input type="hidden" name="chat_id" value="{{ bound_chat_id or '' }}">
@@ -214,8 +214,8 @@
                 <input type="hidden" name="bot_username" value="{{ bound_bot_username or 'fanrenxiuxian_bot' }}">
                 <input type="hidden" name="redirect_to" value="/modules/other">
                 <label class="full-span">
-                    抚摸指令
-                    <input name="command_text" value="{{ artifact_touch_auto_state.command_text }}" placeholder=".抚摸法宝 青竹蜂云剑（神雷版）" {% if artifact_touch_auto_state.active %}readonly{% endif %} required>
+                    抚摸法宝（多件用、隔开，各记各的冷却）
+                    <input name="command_text" value="{{ artifact_touch_auto_state.command_text }}" placeholder="青竹蜂云剑（神雷版）、玄天斩灵剑" {% if artifact_touch_auto_state.active %}readonly{% endif %} required>
                 </label>
                 <label>
                     间隔分钟
@@ -232,7 +232,7 @@
         <div data-artifact-tab-panel="trial" hidden>
             <div class="stack-list compact-stack">
                 <div class="kv-row"><span>状态</span><strong style="color: {% if artifact_trial_auto_state.active %}var(--accent-gold){% else %}var(--text-muted){% endif %};">{{ '运行中' if artifact_trial_auto_state.active else '未启动' }}</strong></div>
-                <div class="kv-row"><span>下次执行</span><strong {% if artifact_trial_auto_state.next_run_target %}class="countdown-text" data-countdown-target="{{ artifact_trial_auto_state.next_run_target }}"{% endif %}>{{ artifact_trial_auto_state.next_run_display }}</strong></div>
+                {% for row in artifact_trial_auto_state.targets %}<div class="kv-row"><span>{{ '下次执行' if artifact_trial_auto_state.targets|length == 1 else '下次 · ' ~ row.label }}</span><strong {% if row.next_run_target %}class="countdown-text" data-countdown-target="{{ row.next_run_target }}"{% endif %}>{{ row.next_run_display }}</strong></div>{% endfor %}
                 <div class="kv-row"><span>灵石</span><strong>{{ artifact_trial_auto_state.resources.spirit_stones }} / {{ artifact_trial_auto_state.resources.spirit_stone_cost }}</strong></div>
                 <div class="kv-row"><span>养魂木</span><strong>{{ artifact_trial_auto_state.resources.soul_wood }} / {{ artifact_trial_auto_state.resources.soul_wood_cost }}</strong></div>
             </div>
@@ -243,7 +243,7 @@
                 <input type="hidden" name="bot_username" value="{{ bound_bot_username or 'fanrenxiuxian_bot' }}">
                 <input type="hidden" name="redirect_to" value="/modules/other">
                 <label class="full-span">
-                    法宝名
+                    法宝名（多件用、隔开，各记各的冷却）
                     <input name="artifact_name" value="{{ artifact_trial_auto_state.artifact_name or artifact_trial_default }}" placeholder="玄天斩灵剑" {% if artifact_trial_auto_state.active %}readonly{% endif %} required>
                 </label>
                 <label>
@@ -269,7 +269,7 @@
         <div data-artifact-tab-panel="nurture" hidden>
             <div class="stack-list compact-stack">
                 <div class="kv-row"><span>状态</span><strong style="color: {% if artifact_nurture_auto_state.active %}var(--accent-gold){% else %}var(--text-muted){% endif %};">{{ '运行中' if artifact_nurture_auto_state.active else '未启动' }}</strong></div>
-                <div class="kv-row"><span>下次执行</span><strong {% if artifact_nurture_auto_state.next_run_target %}class="countdown-text" data-countdown-target="{{ artifact_nurture_auto_state.next_run_target }}"{% endif %}>{{ artifact_nurture_auto_state.next_run_display }}</strong></div>
+                {% for row in artifact_nurture_auto_state.targets %}<div class="kv-row"><span>{{ '下次执行' if artifact_nurture_auto_state.targets|length == 1 else '下次 · ' ~ row.label }}</span><strong {% if row.next_run_target %}class="countdown-text" data-countdown-target="{{ row.next_run_target }}"{% endif %}>{{ row.next_run_display }}</strong></div>{% endfor %}
                 <div class="kv-row"><span>灵石</span><strong>{{ artifact_nurture_auto_state.resources.spirit_stones }} / {{ artifact_nurture_auto_state.resources.spirit_stone_cost }}</strong></div>
                 <div class="kv-row"><span>养魂木</span><strong>{{ artifact_nurture_auto_state.resources.soul_wood }} / {{ artifact_nurture_auto_state.resources.soul_wood_cost }}</strong></div>
             </div>
@@ -280,7 +280,7 @@
                 <input type="hidden" name="bot_username" value="{{ bound_bot_username or 'fanrenxiuxian_bot' }}">
                 <input type="hidden" name="redirect_to" value="/modules/other">
                 <label class="full-span">
-                    法宝或器灵名
+                    法宝或器灵名（多件用、隔开，各记各的冷却）
                     <input name="target_name" value="{{ artifact_nurture_default }}" placeholder="玄天斩灵剑" {% if artifact_nurture_auto_state.active %}readonly{% endif %} required>
                 </label>
                 <div class="action-row" style="align-items: end;">

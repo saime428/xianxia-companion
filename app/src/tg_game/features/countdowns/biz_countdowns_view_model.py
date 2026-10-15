@@ -389,13 +389,13 @@ def build_auto_task_countdown_items(
         elif feature_key == mulan_feature.MULAN_AUTO_SUPPORT_FEATURE_KEY:
             detail = str(task.get("last_error") or "").strip() or "每日边境军功"
         elif feature_key == ARTIFACT_TOUCH_FEATURE_KEY:
-            command_text, _interval_seconds = unpack_artifact_touch_strategy(strategy)
-            detail = command_text
+            commands, _interval_seconds = unpack_artifact_touch_strategy(strategy)
+            detail = "、".join(commands)
         elif feature_key == ARTIFACT_TRIAL_FEATURE_KEY:
-            artifact_name, route = unpack_artifact_trial_strategy(strategy)
-            detail = f"{artifact_name} · {route}"
+            artifact_names, route = unpack_artifact_trial_strategy(strategy)
+            detail = f"{'、'.join(artifact_names)} · {route}"
         elif feature_key == ARTIFACT_NURTURE_FEATURE_KEY:
-            detail = unpack_artifact_nurture_strategy(strategy)
+            detail = "、".join(unpack_artifact_nurture_strategy(strategy))
         elif feature_key == XINGGONG_STARBOARD_FEATURE_KEY:
             detail = f"目标 {normalize_starboard_target(strategy)}"
         elif feature_key == WANLING_ROAM_FEATURE_KEY:

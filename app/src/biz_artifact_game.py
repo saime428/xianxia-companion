@@ -142,6 +142,9 @@ def parse_message(text):
             or "闪烁" in text
             or "器灵升级" in text
             or "很享受" in text
+            # 10-15 线上漏认的两种：「蹭了蹭你的掌心，显得十分亲昵」「发出一声清脆的鸣叫，灵光流转」
+            or "亲昵" in text
+            or "鸣叫" in text
         )
     ):
         return _build_artifact_action_result("artifact_touch", text)

@@ -28,11 +28,14 @@ import biz_inventory_game
 
 from tg_game.runtime.context import EventContext
 from tg_game.runtime.queue_service import has_blocking_outgoing_command
+from tg_game.features.artifact.biz_artifact_targets import (
+    build_artifact_schedule,
+    dump_artifact_schedule,
+    earliest_artifact_target,
+    split_artifact_schedule,
+)
 from tg_game.features.artifact.biz_artifact_touch_auto import (
     ARTIFACT_TOUCH_DEFAULT_INTERVAL_SECONDS,
-    ARTIFACT_TOUCH_MIN_INTERVAL_SECONDS,
-    normalize_artifact_touch_command,
-    normalize_artifact_touch_interval,
     unpack_artifact_touch_strategy,
 )
 from tg_game.features.artifact.biz_artifact_nurture import (
@@ -45,14 +48,11 @@ from tg_game.features.artifact.biz_artifact_nurture import (
     ARTIFACT_NURTURE_STOPPED_RESOURCES_STATE,
     build_artifact_nurture_command,
     build_artifact_nurture_resource_state,
-    normalize_artifact_nurture_target_name,
     unpack_artifact_nurture_strategy,
 )
 from tg_game.features.artifact.biz_artifact_trial import (
     build_artifact_trial_command,
     build_artifact_trial_resource_state,
-    normalize_artifact_trial_artifact_name,
-    normalize_artifact_trial_route,
     unpack_artifact_trial_strategy,
 )
 from tg_game.features.companion.biz_companion_cooldown import (
@@ -459,19 +459,8 @@ def get_companion_auto_task_command_prefixes(task: dict) -> tuple[str, ...]:
         )
     elif feature_key == biz_estate_hunt_daily_auto.FEATURE_KEY:
         commands.append(".洞府")
-    elif feature_key == ARTIFACT_TOUCH_FEATURE_KEY:
-        command_text, _interval_seconds = _unpack_artifact_touch_strategy(
-            task.get("strategy") or ""
-        )
-        commands.append(command_text)
-    elif feature_key == ARTIFACT_TRIAL_FEATURE_KEY:
-        artifact_name, route = _unpack_artifact_trial_strategy(
-            task.get("strategy") or ""
-        )
-        commands.append(_build_artifact_trial_command(artifact_name, route))
-    elif feature_key == ARTIFACT_NURTURE_FEATURE_KEY:
-        target_name = _unpack_artifact_nurture_strategy(task.get("strategy") or "")
-        commands.append(_build_artifact_nurture_command(target_name))
+    elif feature_key in _ARTIFACT_AUTO_SPECS:
+        commands.extend(_artifact_auto_commands(feature_key, task.get("strategy") or "")[0])
     elif feature_key == WANLING_ROAM_FEATURE_KEY:
         commands.extend(build_wanling_roam_cancel_commands(task.get("strategy") or ""))
     elif feature_key == XINGGONG_STARBOARD_FEATURE_KEY:
@@ -4854,47 +4843,101 @@ def _normalize_wild_experience_strategy(value: object) -> str:
     return normalize_wild_experience_strategy(value)
 
 
-def _normalize_artifact_touch_command(value: object) -> str:
-    return normalize_artifact_touch_command(value)
+_ARTIFACT_AUTO_SPECS = {
+    ARTIFACT_TOUCH_FEATURE_KEY: {
+        "label": "抚摸法宝",
+        "event": "artifact_touch",
+        "await": ARTIFACT_TOUCH_AWAIT_REPLY_STATE,
+        "cooldown": ARTIFACT_TOUCH_BOT_COOLDOWN_STATE,
+        "wait": ARTIFACT_TOUCH_INTERNAL_WAIT_STATE,
+        "buffer": ARTIFACT_TOUCH_COOLDOWN_BUFFER_SECONDS,
+        "reply_wait": ARTIFACT_TOUCH_REPLY_WAIT_SECONDS,
+        "fallback_text": "按设置间隔",
+        # 抚摸成功的回包不带冷却，只认发出去之后等着的那一次
+        "success_needs_await": True,
+        "resources": None,
+        "stopped": "",
+        "stop_error": "",
+    },
+    ARTIFACT_TRIAL_FEATURE_KEY: {
+        "label": "器灵试炼",
+        "event": "artifact_trial",
+        "await": ARTIFACT_TRIAL_AWAIT_REPLY_STATE,
+        "cooldown": ARTIFACT_TRIAL_BOT_COOLDOWN_STATE,
+        "wait": ARTIFACT_TRIAL_INTERNAL_WAIT_STATE,
+        "buffer": ARTIFACT_TRIAL_COOLDOWN_BUFFER_SECONDS,
+        "reply_wait": ARTIFACT_TRIAL_REPLY_WAIT_SECONDS,
+        "fallback_text": "按8小时默认冷却",
+        "success_needs_await": False,
+        "resources": build_artifact_trial_resource_state,
+        "stopped": ARTIFACT_TRIAL_STOPPED_RESOURCES_STATE,
+        "stop_error": "bot提示器灵试炼资源不足，已停止自动试炼。",
+    },
+    ARTIFACT_NURTURE_FEATURE_KEY: {
+        "label": "温养器灵",
+        "event": "artifact_nurture",
+        "await": ARTIFACT_NURTURE_AWAIT_REPLY_STATE,
+        "cooldown": ARTIFACT_NURTURE_BOT_COOLDOWN_STATE,
+        "wait": ARTIFACT_NURTURE_INTERNAL_WAIT_STATE,
+        "buffer": ARTIFACT_NURTURE_COOLDOWN_BUFFER_SECONDS,
+        "reply_wait": ARTIFACT_NURTURE_REPLY_WAIT_SECONDS,
+        "fallback_text": "按6小时默认冷却",
+        "success_needs_await": False,
+        "resources": build_artifact_nurture_resource_state,
+        "stopped": ARTIFACT_NURTURE_STOPPED_RESOURCES_STATE,
+        "stop_error": "bot提示温养器灵资源不足，已停止自动温养。",
+    },
+}
+_ARTIFACT_AUTO_FEATURE_BY_EVENT = {
+    spec["event"]: feature_key for feature_key, spec in _ARTIFACT_AUTO_SPECS.items()
+}
 
 
-def _normalize_artifact_touch_interval(value: object) -> int:
-    return normalize_artifact_touch_interval(value)
+def _artifact_auto_commands(feature_key: str, strategy: object) -> tuple[list[str], int]:
+    """每件法宝一条指令，外加没解析到冷却时的兜底秒数。"""
+    if feature_key == ARTIFACT_TOUCH_FEATURE_KEY:
+        return unpack_artifact_touch_strategy(strategy)
+    if feature_key == ARTIFACT_TRIAL_FEATURE_KEY:
+        names, route = unpack_artifact_trial_strategy(strategy)
+        return (
+            [build_artifact_trial_command(name, route) for name in names],
+            ARTIFACT_TRIAL_DEFAULT_COOLDOWN_SECONDS,
+        )
+    return (
+        [build_artifact_nurture_command(name) for name in unpack_artifact_nurture_strategy(strategy)],
+        ARTIFACT_NURTURE_DEFAULT_COOLDOWN_SECONDS,
+    )
 
 
-def _unpack_artifact_touch_strategy(value: object) -> tuple[str, int]:
-    return unpack_artifact_touch_strategy(value)
+def _artifact_auto_schedule(task: dict) -> tuple[str, int, dict]:
+    config, raw_schedule = split_artifact_schedule(task.get("strategy"))
+    commands, fallback_seconds = _artifact_auto_commands(
+        str(task.get("feature_key") or "").strip(), config
+    )
+    schedule = build_artifact_schedule(
+        raw_schedule,
+        commands,
+        task_next_run_at=float(task.get("next_run_at") or 0),
+        task_state=str(task.get("workflow_state") or "").strip(),
+    )
+    return config, fallback_seconds, schedule
 
 
-def _normalize_artifact_trial_artifact_name(value: object) -> str:
-    return normalize_artifact_trial_artifact_name(value)
+def _save_artifact_auto_schedule(
+    storage: Storage, task: dict, config: str, schedule: dict, **fields
+) -> None:
+    # 任务本身的时间和状态跟着最早到期的那件，调度、倒计时都照旧只看任务
+    earliest = earliest_artifact_target(schedule)
+    storage.update_companion_auto_task(
+        int(task["id"]),
+        strategy=dump_artifact_schedule(config, schedule),
+        next_run_at=schedule[earliest][0],
+        workflow_state=schedule[earliest][1],
+        **fields,
+    )
 
 
-def _normalize_artifact_trial_route(value: object) -> str:
-    return normalize_artifact_trial_route(value)
-
-
-def _unpack_artifact_trial_strategy(value: object) -> tuple[str, str]:
-    return unpack_artifact_trial_strategy(value)
-
-
-def _build_artifact_trial_command(artifact_name: object, route: object) -> str:
-    return build_artifact_trial_command(artifact_name, route)
-
-
-def _normalize_artifact_nurture_target_name(value: object) -> str:
-    return normalize_artifact_nurture_target_name(value)
-
-
-def _unpack_artifact_nurture_strategy(value: object) -> str:
-    return unpack_artifact_nurture_strategy(value)
-
-
-def _build_artifact_nurture_command(target_name: object) -> str:
-    return build_artifact_nurture_command(target_name)
-
-
-def _artifact_touch_parent_matches_profile(
+def _artifact_parent_matches_profile(
     parent: Optional[dict], profile: object, command_text: str
 ) -> bool:
     if not parent or bool(parent.get("is_bot")):
@@ -4907,33 +4950,7 @@ def _artifact_touch_parent_matches_profile(
     return bool(expected_user_id) and str(parent.get("sender_id") or "") == expected_user_id
 
 
-def _artifact_trial_parent_matches_profile(
-    parent: Optional[dict], profile: object, command_text: str
-) -> bool:
-    if not parent or bool(parent.get("is_bot")):
-        return False
-    if str(parent.get("text") or "").strip() != command_text:
-        return False
-    if str(parent.get("direction") or "") == "outgoing":
-        return True
-    expected_user_id = str(getattr(profile, "telegram_user_id", "") or "").strip()
-    return bool(expected_user_id) and str(parent.get("sender_id") or "") == expected_user_id
-
-
-def _artifact_nurture_parent_matches_profile(
-    parent: Optional[dict], profile: object, command_text: str
-) -> bool:
-    if not parent or bool(parent.get("is_bot")):
-        return False
-    if str(parent.get("text") or "").strip() != command_text:
-        return False
-    if str(parent.get("direction") or "") == "outgoing":
-        return True
-    expected_user_id = str(getattr(profile, "telegram_user_id", "") or "").strip()
-    return bool(expected_user_id) and str(parent.get("sender_id") or "") == expected_user_id
-
-
-def _reschedule_artifact_touch_task_from_reply(
+def _reschedule_artifact_task_from_reply(
     storage: Storage,
     task: dict,
     *,
@@ -4943,37 +4960,50 @@ def _reschedule_artifact_touch_task_from_reply(
     reply_created_at: float = 0,
     now: Optional[float] = None,
 ) -> bool:
-    command_text, interval_seconds = _unpack_artifact_touch_strategy(
-        task.get("strategy") or ""
+    spec = _ARTIFACT_AUTO_SPECS[str(task.get("feature_key") or "").strip()]
+    config, fallback_seconds, schedule = _artifact_auto_schedule(task)
+    # 回包认的是它回复的那条指令，指令原文就是哪件法宝
+    command_text = next(
+        (
+            command
+            for command in schedule
+            if _artifact_parent_matches_profile(parent, profile, command)
+        ),
+        None,
     )
-    if not _artifact_touch_parent_matches_profile(parent, profile, command_text):
+    if command_text is None:
         return False
     parsed = biz_artifact_game.parse_message(reply_text)
-    if not parsed or parsed.get("event") != "artifact_touch":
+    if not parsed or parsed.get("event") != spec["event"]:
         return False
+    if parsed.get("insufficient_resources"):
+        storage.update_companion_auto_task(
+            int(task["id"]),
+            enabled=0,
+            next_run_at=0,
+            workflow_state=spec["stopped"],
+            last_error=spec["stop_error"],
+        )
+        return True
     current_ts = float(now if now is not None else time.time())
     cooldown_seconds = int(parsed.get("cooldown_seconds") or 0)
     if cooldown_seconds <= 0:
         # 成功回包不带冷却，就按设置的间隔从回包时刻算。以前这里 10 秒后补发一次想问出冷却，
         # 可游戏不理几秒内的重复指令：09-25~26 补发 7 次一次都没回，纯多发一条。
-        if str(task.get("workflow_state") or "").strip() != ARTIFACT_TOUCH_AWAIT_REPLY_STATE:
+        if spec["success_needs_await"] and schedule[command_text][1] != spec["await"]:
             return False
-        cooldown_seconds = interval_seconds
-    base_ts = float(reply_created_at or current_ts)
-    target_ts = base_ts + cooldown_seconds + ARTIFACT_TOUCH_COOLDOWN_BUFFER_SECONDS
+        cooldown_seconds = fallback_seconds
+    target_ts = float(reply_created_at or current_ts) + cooldown_seconds + spec["buffer"]
     if target_ts <= current_ts:
         return False
-    storage.update_companion_auto_task(
-        int(task["id"]),
-        next_run_at=target_ts,
-        workflow_state=ARTIFACT_TOUCH_BOT_COOLDOWN_STATE,
-        last_error="",
-    )
+    schedule[command_text] = [target_ts, spec["cooldown"]]
+    _save_artifact_auto_schedule(storage, task, config, schedule, last_error="")
     return True
 
 
-def reschedule_artifact_touch_auto_on_reply(
+def reschedule_artifact_auto_on_reply(
     storage: Storage,
+    feature_key: str,
     *,
     profile_id: int,
     chat_id: int,
@@ -4987,11 +5017,7 @@ def reschedule_artifact_touch_auto_on_reply(
     profile = storage.get_profile(int(profile_id))
     if not profile:
         return False
-    task = storage.get_companion_auto_task(
-        int(profile_id),
-        int(chat_id),
-        ARTIFACT_TOUCH_FEATURE_KEY,
-    )
+    task = storage.get_companion_auto_task(int(profile_id), int(chat_id), feature_key)
     if not task or not bool(task.get("enabled")):
         return False
     parent = storage.get_bound_message(int(chat_id), int(reply_to_msg_id), int(profile_id))
@@ -5002,7 +5028,7 @@ def reschedule_artifact_touch_auto_on_reply(
         parent_thread_id = parent.get("thread_id")
         if parent_thread_id is not None and int(parent_thread_id) != int(task_thread_id):
             return False
-    return _reschedule_artifact_touch_task_from_reply(
+    return _reschedule_artifact_task_from_reply(
         storage,
         task,
         profile=profile,
@@ -5013,19 +5039,10 @@ def reschedule_artifact_touch_auto_on_reply(
     )
 
 
-def sync_artifact_touch_auto_from_latest_reply(
-    storage: Storage, profile_id: int, task: dict, *, now: Optional[float] = None
+def _sync_artifact_target_from_latest_reply(
+    storage: Storage, profile: object, task: dict, command_text: str, *, now: float
 ) -> bool:
-    profile = storage.get_profile(int(profile_id))
-    if not profile:
-        return False
-    command_text, _interval_seconds = _unpack_artifact_touch_strategy(
-        task.get("strategy") or ""
-    )
     chat_id = int(task.get("chat_id") or 0)
-    if not chat_id:
-        return False
-    sender_id = None
     try:
         sender_id = int(str(profile.telegram_user_id or "").strip())
     except (TypeError, ValueError):
@@ -5033,16 +5050,17 @@ def sync_artifact_touch_auto_from_latest_reply(
     reply = storage.get_latest_bot_reply_for_command(
         chat_id,
         command_text,
-        profile_id=int(profile_id),
+        profile_id=int(profile.id),
         thread_id=int(task.get("thread_id")) if task.get("thread_id") else None,
         sender_id=sender_id,
         sender_username=str(profile.telegram_username or ""),
     )
     if not reply:
         return False
-    return reschedule_artifact_touch_auto_on_reply(
+    return reschedule_artifact_auto_on_reply(
         storage,
-        profile_id=int(profile_id),
+        str(task.get("feature_key") or "").strip(),
+        profile_id=int(profile.id),
         chat_id=chat_id,
         reply_to_msg_id=int(reply.get("reply_to_msg_id") or 0),
         reply_text=str(reply.get("text") or ""),
@@ -5051,246 +5069,88 @@ def sync_artifact_touch_auto_from_latest_reply(
     )
 
 
-def _reschedule_artifact_trial_task_from_reply(
-    storage: Storage,
-    task: dict,
-    *,
-    profile: object,
-    parent: dict,
-    reply_text: str,
-    reply_created_at: float = 0,
-    now: Optional[float] = None,
-) -> bool:
-    artifact_name, route = _unpack_artifact_trial_strategy(task.get("strategy") or "")
-    command_text = _build_artifact_trial_command(artifact_name, route)
-    if not _artifact_trial_parent_matches_profile(parent, profile, command_text):
-        return False
-    parsed = biz_artifact_game.parse_message(reply_text)
-    if not parsed or parsed.get("event") != "artifact_trial":
-        return False
-    if parsed.get("insufficient_resources"):
-        storage.update_companion_auto_task(
-            int(task["id"]),
-            enabled=0,
-            next_run_at=0,
-            workflow_state=ARTIFACT_TRIAL_STOPPED_RESOURCES_STATE,
-            last_error="bot提示器灵试炼资源不足，已停止自动试炼。",
+async def _tick_artifact_auto_task(
+    storage: Storage, task: dict, profile_id: int, payload: object, now: float
+) -> object:
+    """抚摸/试炼/温养：每轮最多发一件到期的法宝（调度 5 秒一轮），返回最新 payload。"""
+    spec = _ARTIFACT_AUTO_SPECS[str(task.get("feature_key") or "").strip()]
+    task_id = int(task["id"])
+    chat_id = int(task.get("chat_id") or 0)
+    if not chat_id:
+        storage.update_companion_auto_task(task_id, enabled=0, last_error="Chat ID missing")
+        return payload
+    if float(task.get("next_run_at") or 0) > now:
+        return payload
+    if spec["resources"]:
+        fresh_payload = await asyncio.to_thread(
+            _refresh_companion_payload, storage, int(profile_id)
         )
-        return True
-    current_ts = float(now if now is not None else time.time())
-    cooldown_seconds = int(parsed.get("cooldown_seconds") or 0)
-    if cooldown_seconds <= 0:
-        cooldown_seconds = ARTIFACT_TRIAL_DEFAULT_COOLDOWN_SECONDS
-    base_ts = float(reply_created_at or current_ts)
-    target_ts = base_ts + cooldown_seconds + ARTIFACT_TRIAL_COOLDOWN_BUFFER_SECONDS
-    if target_ts <= current_ts:
-        return False
-    storage.update_companion_auto_task(
-        int(task["id"]),
-        next_run_at=target_ts,
-        workflow_state=ARTIFACT_TRIAL_BOT_COOLDOWN_STATE,
-        last_error="",
-    )
-    return True
-
-
-def reschedule_artifact_trial_auto_on_reply(
-    storage: Storage,
-    *,
-    profile_id: int,
-    chat_id: int,
-    reply_to_msg_id: int,
-    reply_text: str,
-    reply_created_at: float = 0,
-    now: Optional[float] = None,
-) -> bool:
-    if not reply_to_msg_id:
-        return False
+        if fresh_payload and isinstance(fresh_payload, dict):
+            payload = fresh_payload
+        resources = spec["resources"](payload, storage.get_game_items())
+        if not resources.get("ok"):
+            storage.update_companion_auto_task(
+                task_id,
+                enabled=0,
+                next_run_at=0,
+                workflow_state=spec["stopped"],
+                last_error=str(resources.get("error_text") or "资源不足。"),
+            )
+            return payload
+    # 没在 bot 冷却里的先对一遍最新回包（实时回包漏接时补上）；之后不再 await，读一次排期改完写回
     profile = storage.get_profile(int(profile_id))
-    if not profile:
-        return False
-    task = storage.get_companion_auto_task(
-        int(profile_id),
-        int(chat_id),
-        ARTIFACT_TRIAL_FEATURE_KEY,
-    )
-    if not task or not bool(task.get("enabled")):
-        return False
-    parent = storage.get_bound_message(int(chat_id), int(reply_to_msg_id), int(profile_id))
-    if not parent:
-        return False
-    task_thread_id = task.get("thread_id")
-    if task_thread_id:
-        parent_thread_id = parent.get("thread_id")
-        if parent_thread_id is not None and int(parent_thread_id) != int(task_thread_id):
-            return False
-    return _reschedule_artifact_trial_task_from_reply(
-        storage,
-        task,
-        profile=profile,
-        parent=parent,
-        reply_text=reply_text,
-        reply_created_at=reply_created_at,
-        now=now,
-    )
-
-
-def sync_artifact_trial_auto_from_latest_reply(
-    storage: Storage, profile_id: int, task: dict, *, now: Optional[float] = None
-) -> bool:
-    profile = storage.get_profile(int(profile_id))
-    if not profile:
-        return False
-    artifact_name, route = _unpack_artifact_trial_strategy(task.get("strategy") or "")
-    command_text = _build_artifact_trial_command(artifact_name, route)
-    chat_id = int(task.get("chat_id") or 0)
-    if not chat_id:
-        return False
-    sender_id = None
-    try:
-        sender_id = int(str(profile.telegram_user_id or "").strip())
-    except (TypeError, ValueError):
-        sender_id = None
-    reply = storage.get_latest_bot_reply_for_command(
-        chat_id,
-        command_text,
-        profile_id=int(profile_id),
-        thread_id=int(task.get("thread_id")) if task.get("thread_id") else None,
-        sender_id=sender_id,
-        sender_username=str(profile.telegram_username or ""),
-    )
-    if not reply:
-        return False
-    return reschedule_artifact_trial_auto_on_reply(
+    if profile:
+        _config, _fallback, schedule = _artifact_auto_schedule(task)
+        for command_text, (_next_at, state) in schedule.items():
+            if state != spec["cooldown"]:
+                _sync_artifact_target_from_latest_reply(
+                    storage, profile, task, command_text, now=now
+                )
+    task = storage.update_companion_auto_task(task_id) or task
+    if not bool(task.get("enabled")):
+        return payload
+    config, fallback_seconds, schedule = _artifact_auto_schedule(task)
+    last_error = None
+    for command_text, (next_at, state) in schedule.items():
+        if state == spec["await"] and next_at <= now:
+            schedule[command_text] = [now + fallback_seconds, spec["wait"]]
+            last_error = (
+                f"{command_text}：未解析到bot回包冷却，{spec['fallback_text']}等待下次尝试。"
+            )
+    due = next((command for command, (at, _s) in schedule.items() if at <= now), None)
+    if due is None:
+        fields = {} if last_error is None else {"last_error": last_error}
+        _save_artifact_auto_schedule(storage, task, config, schedule, **fields)
+        return payload
+    thread_id = int(task.get("thread_id")) if task.get("thread_id") else None
+    if _has_pending_outgoing_command(
         storage,
         profile_id=int(profile_id),
         chat_id=chat_id,
-        reply_to_msg_id=int(reply.get("reply_to_msg_id") or 0),
-        reply_text=str(reply.get("text") or ""),
-        reply_created_at=float(reply.get("created_at") or 0),
-        now=now,
-    )
-
-
-def _reschedule_artifact_nurture_task_from_reply(
-    storage: Storage,
-    task: dict,
-    *,
-    profile: object,
-    parent: dict,
-    reply_text: str,
-    reply_created_at: float = 0,
-    now: Optional[float] = None,
-) -> bool:
-    target_name = _unpack_artifact_nurture_strategy(task.get("strategy") or "")
-    command_text = _build_artifact_nurture_command(target_name)
-    if not _artifact_nurture_parent_matches_profile(parent, profile, command_text):
-        return False
-    parsed = biz_artifact_game.parse_message(reply_text)
-    if not parsed or parsed.get("event") != "artifact_nurture":
-        return False
-    if parsed.get("insufficient_resources"):
-        storage.update_companion_auto_task(
-            int(task["id"]),
-            enabled=0,
-            next_run_at=0,
-            workflow_state=ARTIFACT_NURTURE_STOPPED_RESOURCES_STATE,
-            last_error="bot提示温养器灵资源不足，已停止自动温养。",
+        text=due,
+        thread_id=thread_id,
+    ):
+        schedule[due] = [now + 60, schedule[due][1]]
+        _save_artifact_auto_schedule(
+            storage, task, config, schedule,
+            last_error=f"已有{spec['label']}命令待发送，稍后复查。",
         )
-        return True
-    current_ts = float(now if now is not None else time.time())
-    cooldown_seconds = int(parsed.get("cooldown_seconds") or 0)
-    if cooldown_seconds <= 0:
-        cooldown_seconds = ARTIFACT_NURTURE_DEFAULT_COOLDOWN_SECONDS
-    base_ts = float(reply_created_at or current_ts)
-    target_ts = base_ts + cooldown_seconds + ARTIFACT_NURTURE_COOLDOWN_BUFFER_SECONDS
-    if target_ts <= current_ts:
-        return False
-    storage.update_companion_auto_task(
-        int(task["id"]),
-        next_run_at=target_ts,
-        workflow_state=ARTIFACT_NURTURE_BOT_COOLDOWN_STATE,
-        last_error="",
-    )
-    return True
-
-
-def reschedule_artifact_nurture_auto_on_reply(
-    storage: Storage,
-    *,
-    profile_id: int,
-    chat_id: int,
-    reply_to_msg_id: int,
-    reply_text: str,
-    reply_created_at: float = 0,
-    now: Optional[float] = None,
-) -> bool:
-    if not reply_to_msg_id:
-        return False
-    profile = storage.get_profile(int(profile_id))
-    if not profile:
-        return False
-    task = storage.get_companion_auto_task(
-        int(profile_id),
-        int(chat_id),
-        ARTIFACT_NURTURE_FEATURE_KEY,
-    )
-    if not task or not bool(task.get("enabled")):
-        return False
-    parent = storage.get_bound_message(int(chat_id), int(reply_to_msg_id), int(profile_id))
-    if not parent:
-        return False
-    task_thread_id = task.get("thread_id")
-    if task_thread_id:
-        parent_thread_id = parent.get("thread_id")
-        if parent_thread_id is not None and int(parent_thread_id) != int(task_thread_id):
-            return False
-    return _reschedule_artifact_nurture_task_from_reply(
-        storage,
-        task,
-        profile=profile,
-        parent=parent,
-        reply_text=reply_text,
-        reply_created_at=reply_created_at,
-        now=now,
-    )
-
-
-def sync_artifact_nurture_auto_from_latest_reply(
-    storage: Storage, profile_id: int, task: dict, *, now: Optional[float] = None
-) -> bool:
-    profile = storage.get_profile(int(profile_id))
-    if not profile:
-        return False
-    target_name = _unpack_artifact_nurture_strategy(task.get("strategy") or "")
-    command_text = _build_artifact_nurture_command(target_name)
-    chat_id = int(task.get("chat_id") or 0)
-    if not chat_id:
-        return False
-    sender_id = None
-    try:
-        sender_id = int(str(profile.telegram_user_id or "").strip())
-    except (TypeError, ValueError):
-        sender_id = None
-    reply = storage.get_latest_bot_reply_for_command(
-        chat_id,
-        command_text,
-        profile_id=int(profile_id),
-        thread_id=int(task.get("thread_id")) if task.get("thread_id") else None,
-        sender_id=sender_id,
-        sender_username=str(profile.telegram_username or ""),
-    )
-    if not reply:
-        return False
-    return reschedule_artifact_nurture_auto_on_reply(
-        storage,
+        return payload
+    storage.enqueue_outgoing_command(
         profile_id=int(profile_id),
         chat_id=chat_id,
-        reply_to_msg_id=int(reply.get("reply_to_msg_id") or 0),
-        reply_text=str(reply.get("text") or ""),
-        reply_created_at=float(reply.get("created_at") or 0),
-        now=now,
+        text=due,
+        thread_id=thread_id,
+        chat_type=str(task.get("chat_type") or "group"),
+        bot_username=str(task.get("bot_username") or ""),
     )
+    schedule[due] = [now + spec["reply_wait"], spec["await"]]
+    _save_artifact_auto_schedule(
+        storage, task, config, schedule,
+        last_run_at=now,
+        last_error=f"已发送 {due}，等待bot回包。",
+    )
+    return payload
 
 
 def _normalize_xinggong_starboard_target(value: object) -> str:
@@ -6699,234 +6559,9 @@ async def _run_companion_auto_scheduler(
                     )
                     continue
 
-                if feature_key == ARTIFACT_TOUCH_FEATURE_KEY:
-                    chat_id = int(task.get("chat_id") or 0)
-                    if not chat_id:
-                        storage.update_companion_auto_task(
-                            task_id,
-                            enabled=0,
-                            last_error="Chat ID missing",
-                        )
-                        continue
-                    command_text, interval_seconds = _unpack_artifact_touch_strategy(
-                        task.get("strategy") or ""
-                    )
-                    next_run_at = float(task.get("next_run_at") or 0)
-                    workflow_state = str(task.get("workflow_state") or "").strip()
-                    if workflow_state != ARTIFACT_TOUCH_BOT_COOLDOWN_STATE and (
-                        sync_artifact_touch_auto_from_latest_reply(
-                            storage, int(profile_id), task, now=now
-                        )
-                    ):
-                        continue
-                    if (
-                        workflow_state == ARTIFACT_TOUCH_AWAIT_REPLY_STATE
-                        and next_run_at <= now
-                    ):
-                        storage.update_companion_auto_task(
-                            task_id,
-                            next_run_at=now + interval_seconds,
-                            workflow_state=ARTIFACT_TOUCH_INTERNAL_WAIT_STATE,
-                            last_error="未解析到bot回包冷却，按设置间隔等待下次尝试。",
-                        )
-                        continue
-                    if next_run_at > now:
-                        continue
-                    thread_id = (
-                        int(task.get("thread_id")) if task.get("thread_id") else None
-                    )
-                    if _has_pending_outgoing_command(
-                        storage,
-                        profile_id=int(profile_id),
-                        chat_id=chat_id,
-                        text=command_text,
-                        thread_id=thread_id,
-                    ):
-                        continue
-                    storage.enqueue_outgoing_command(
-                        profile_id=int(profile_id),
-                        chat_id=chat_id,
-                        text=command_text,
-                        thread_id=thread_id,
-                        chat_type=str(task.get("chat_type") or "group"),
-                        bot_username=str(task.get("bot_username") or ""),
-                    )
-                    storage.update_companion_auto_task(
-                        task_id,
-                        last_run_at=now,
-                        next_run_at=now + ARTIFACT_TOUCH_REPLY_WAIT_SECONDS,
-                        workflow_state=ARTIFACT_TOUCH_AWAIT_REPLY_STATE,
-                        last_error="已发送抚摸法宝，等待bot回包。",
-                    )
-                    continue
-
-                if feature_key == ARTIFACT_TRIAL_FEATURE_KEY:
-                    chat_id = int(task.get("chat_id") or 0)
-                    if not chat_id:
-                        storage.update_companion_auto_task(
-                            task_id,
-                            enabled=0,
-                            last_error="Chat ID missing",
-                        )
-                        continue
-                    artifact_name, route = _unpack_artifact_trial_strategy(
-                        task.get("strategy") or ""
-                    )
-                    command_text = _build_artifact_trial_command(artifact_name, route)
-                    next_run_at = float(task.get("next_run_at") or 0)
-                    workflow_state = str(task.get("workflow_state") or "").strip()
-                    if workflow_state != ARTIFACT_TRIAL_BOT_COOLDOWN_STATE and (
-                        sync_artifact_trial_auto_from_latest_reply(
-                            storage, int(profile_id), task, now=now
-                        )
-                    ):
-                        continue
-                    if (
-                        workflow_state == ARTIFACT_TRIAL_AWAIT_REPLY_STATE
-                        and next_run_at <= now
-                    ):
-                        storage.update_companion_auto_task(
-                            task_id,
-                            next_run_at=now + ARTIFACT_TRIAL_DEFAULT_COOLDOWN_SECONDS,
-                            workflow_state=ARTIFACT_TRIAL_INTERNAL_WAIT_STATE,
-                            last_error="未解析到bot回包冷却，按8小时默认冷却等待下次尝试。",
-                        )
-                        continue
-                    if next_run_at > now:
-                        continue
-                    thread_id = (
-                        int(task.get("thread_id")) if task.get("thread_id") else None
-                    )
-                    fresh_payload = await asyncio.to_thread(
-                        _refresh_companion_payload, storage, int(profile_id)
-                    )
-                    if fresh_payload and isinstance(fresh_payload, dict):
-                        payload = fresh_payload
-                    resources = build_artifact_trial_resource_state(
-                        payload,
-                        storage.get_game_items(),
-                    )
-                    if not resources.get("ok"):
-                        storage.update_companion_auto_task(
-                            task_id,
-                            enabled=0,
-                            next_run_at=0,
-                            workflow_state=ARTIFACT_TRIAL_STOPPED_RESOURCES_STATE,
-                            last_error=str(resources.get("error_text") or "资源不足。"),
-                        )
-                        continue
-                    if _has_pending_outgoing_command(
-                        storage,
-                        profile_id=int(profile_id),
-                        chat_id=chat_id,
-                        text=command_text,
-                        thread_id=thread_id,
-                    ):
-                        storage.update_companion_auto_task(
-                            task_id,
-                            next_run_at=now + 60,
-                            last_error="已有器灵试炼命令待发送，稍后复查。",
-                        )
-                        continue
-                    storage.enqueue_outgoing_command(
-                        profile_id=int(profile_id),
-                        chat_id=chat_id,
-                        text=command_text,
-                        thread_id=thread_id,
-                        chat_type=str(task.get("chat_type") or "group"),
-                        bot_username=str(task.get("bot_username") or ""),
-                    )
-                    storage.update_companion_auto_task(
-                        task_id,
-                        last_run_at=now,
-                        next_run_at=now + ARTIFACT_TRIAL_REPLY_WAIT_SECONDS,
-                        workflow_state=ARTIFACT_TRIAL_AWAIT_REPLY_STATE,
-                        last_error="已发送器灵试炼，等待bot回包。",
-                    )
-                    continue
-
-                if feature_key == ARTIFACT_NURTURE_FEATURE_KEY:
-                    chat_id = int(task.get("chat_id") or 0)
-                    if not chat_id:
-                        storage.update_companion_auto_task(
-                            task_id,
-                            enabled=0,
-                            last_error="Chat ID missing",
-                        )
-                        continue
-                    target_name = _unpack_artifact_nurture_strategy(
-                        task.get("strategy") or ""
-                    )
-                    command_text = _build_artifact_nurture_command(target_name)
-                    next_run_at = float(task.get("next_run_at") or 0)
-                    workflow_state = str(task.get("workflow_state") or "").strip()
-                    if workflow_state != ARTIFACT_NURTURE_BOT_COOLDOWN_STATE and (
-                        sync_artifact_nurture_auto_from_latest_reply(
-                            storage, int(profile_id), task, now=now
-                        )
-                    ):
-                        continue
-                    if (
-                        workflow_state == ARTIFACT_NURTURE_AWAIT_REPLY_STATE
-                        and next_run_at <= now
-                    ):
-                        storage.update_companion_auto_task(
-                            task_id,
-                            next_run_at=now + ARTIFACT_NURTURE_DEFAULT_COOLDOWN_SECONDS,
-                            workflow_state=ARTIFACT_NURTURE_INTERNAL_WAIT_STATE,
-                            last_error="未解析到bot回包冷却，按6小时默认冷却等待下次尝试。",
-                        )
-                        continue
-                    if next_run_at > now:
-                        continue
-                    thread_id = (
-                        int(task.get("thread_id")) if task.get("thread_id") else None
-                    )
-                    fresh_payload = await asyncio.to_thread(
-                        _refresh_companion_payload, storage, int(profile_id)
-                    )
-                    if fresh_payload and isinstance(fresh_payload, dict):
-                        payload = fresh_payload
-                    resources = build_artifact_nurture_resource_state(
-                        payload,
-                        storage.get_game_items(),
-                    )
-                    if not resources.get("ok"):
-                        storage.update_companion_auto_task(
-                            task_id,
-                            enabled=0,
-                            next_run_at=0,
-                            workflow_state=ARTIFACT_NURTURE_STOPPED_RESOURCES_STATE,
-                            last_error=str(resources.get("error_text") or "资源不足。"),
-                        )
-                        continue
-                    if _has_pending_outgoing_command(
-                        storage,
-                        profile_id=int(profile_id),
-                        chat_id=chat_id,
-                        text=command_text,
-                        thread_id=thread_id,
-                    ):
-                        storage.update_companion_auto_task(
-                            task_id,
-                            next_run_at=now + 60,
-                            last_error="已有温养器灵命令待发送，稍后复查。",
-                        )
-                        continue
-                    storage.enqueue_outgoing_command(
-                        profile_id=int(profile_id),
-                        chat_id=chat_id,
-                        text=command_text,
-                        thread_id=thread_id,
-                        chat_type=str(task.get("chat_type") or "group"),
-                        bot_username=str(task.get("bot_username") or ""),
-                    )
-                    storage.update_companion_auto_task(
-                        task_id,
-                        last_run_at=now,
-                        next_run_at=now + ARTIFACT_NURTURE_REPLY_WAIT_SECONDS,
-                        workflow_state=ARTIFACT_NURTURE_AWAIT_REPLY_STATE,
-                        last_error="已发送温养器灵，等待bot回包。",
+                if feature_key in _ARTIFACT_AUTO_SPECS:
+                    payload = await _tick_artifact_auto_task(
+                        storage, task, int(profile_id), payload, now
                     )
                     continue
 
@@ -11290,34 +10925,26 @@ class GeneralGameExecutor(BaseExecutor):
                         continue
                     if (
                         module_key == "artifact"
-                        and parsed.get("event") == "artifact_touch"
+                        and parsed.get("event") in _ARTIFACT_AUTO_FEATURE_BY_EVENT
                     ):
-                        self._maybe_reschedule_artifact_touch(context, storage, parsed)
-                    if (
-                        module_key == "artifact"
-                        and parsed.get("event") == "artifact_trial"
-                    ):
-                        self._maybe_reschedule_artifact_trial(context, storage, parsed)
-                    if (
-                        module_key == "artifact"
-                        and parsed.get("event") == "artifact_nurture"
-                    ):
-                        self._maybe_reschedule_artifact_nurture(context, storage, parsed)
+                        self._maybe_reschedule_artifact_auto(
+                            context, storage, _ARTIFACT_AUTO_FEATURE_BY_EVENT[parsed["event"]]
+                        )
                     if module_key == "estate":
                         _record_estate_miniapp_payload(context, storage)
                     return True
         return False
 
 
-    def _maybe_reschedule_artifact_touch(
-        self, context: EventContext, storage: Storage, parsed: dict
+    def _maybe_reschedule_artifact_auto(
+        self, context: EventContext, storage: Storage, feature_key: str
     ) -> None:
         if not context.profile or context.chat_id is None:
             return
         task = storage.get_companion_auto_task(
             context.profile.id,
             context.chat_id,
-            ARTIFACT_TOUCH_FEATURE_KEY,
+            feature_key,
         )
         if not task or not bool(task.get("enabled")):
             return
@@ -11326,62 +10953,9 @@ class GeneralGameExecutor(BaseExecutor):
             not context.thread_id or int(task_thread_id) != int(context.thread_id)
         ):
             return
-        reschedule_artifact_touch_auto_on_reply(
+        reschedule_artifact_auto_on_reply(
             storage,
-            profile_id=context.profile.id,
-            chat_id=context.chat_id,
-            reply_to_msg_id=int(context.reply_to_msg_id or 0),
-            reply_text=context.text,
-            now=time.time(),
-        )
-
-
-    def _maybe_reschedule_artifact_trial(
-        self, context: EventContext, storage: Storage, parsed: dict
-    ) -> None:
-        if not context.profile or context.chat_id is None:
-            return
-        task = storage.get_companion_auto_task(
-            context.profile.id,
-            context.chat_id,
-            ARTIFACT_TRIAL_FEATURE_KEY,
-        )
-        if not task or not bool(task.get("enabled")):
-            return
-        task_thread_id = task.get("thread_id")
-        if task_thread_id and (
-            not context.thread_id or int(task_thread_id) != int(context.thread_id)
-        ):
-            return
-        reschedule_artifact_trial_auto_on_reply(
-            storage,
-            profile_id=context.profile.id,
-            chat_id=context.chat_id,
-            reply_to_msg_id=int(context.reply_to_msg_id or 0),
-            reply_text=context.text,
-            now=time.time(),
-        )
-
-
-    def _maybe_reschedule_artifact_nurture(
-        self, context: EventContext, storage: Storage, parsed: dict
-    ) -> None:
-        if not context.profile or context.chat_id is None:
-            return
-        task = storage.get_companion_auto_task(
-            context.profile.id,
-            context.chat_id,
-            ARTIFACT_NURTURE_FEATURE_KEY,
-        )
-        if not task or not bool(task.get("enabled")):
-            return
-        task_thread_id = task.get("thread_id")
-        if task_thread_id and (
-            not context.thread_id or int(task_thread_id) != int(context.thread_id)
-        ):
-            return
-        reschedule_artifact_nurture_auto_on_reply(
-            storage,
+            feature_key,
             profile_id=context.profile.id,
             chat_id=context.chat_id,
             reply_to_msg_id=int(context.reply_to_msg_id or 0),

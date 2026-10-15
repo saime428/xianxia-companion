@@ -5,6 +5,10 @@
   `.查状态 A`   → 身上没到期的负面状态（带说明）、九转还魂丹几颗、增益，深度闭关和侍妾远航还剩多久；
                  每条状态附来源：斗法挂上的（神魂动荡、道心破碎）从战报找「几点输给谁」，其余按 STATUS_SOURCES。
   `.查观星`     → 最近几次观星（下一次天道演化、天命归谁）和最近 8 次整点结算。
+  `.查冷却 A`   → 副本、闭关（含搜寻节点）、斗法、侍妾、宗门、小世界、日常的冷却还剩多久；只列 10-15 对过回包或结算时间的项目。
+                 黄龙夺灯天机阁不记，按主服务存的副本记录（dungeon_messages）看今天出过手没有；
+                 玄骨遗府的每日通关奖励天机阁也不记，只列门票古府寻踪珠几颗。
+  `.帮助`       → 上面这些指令的说明，指令点一下就能复制。
   另外主动往群里报元磁山核·乙：有人观星看到下一次是星辰异象就预告，整点结算出了乙再报一条。
 
 A 是 TG 用户名（带不带 @、大小写随意）或完整道号；道号重名就列出候选让人用用户名再查。
@@ -40,7 +44,7 @@ from tg_game.clients import asc_client  # noqa: E402
 
 ASC_PROVIDER = "asc_aiopenai"  # 同 external_sync.ASC_PROVIDER；不为一个常量拖进主服务整条依赖链
 DB = ROOT / "data" / "tg_game.db"
-COMMAND = re.compile(r"^[.。]查(灵根|储物袋|状态)(?:\s+@?(\S{1,64}))?\s*$")
+COMMAND = re.compile(r"^[.。]查(灵根|储物袋|状态|冷却)(?:\s+@?(\S{1,64}))?\s*$")
 BEIJING = timezone(timedelta(hours=8))
 MESSAGE_LIMIT = 4096  # Telegram 单条上限
 SEPARATOR = "─" * 16
@@ -50,6 +54,25 @@ STALE_SECONDS = 120  # 停机期间攒下的旧指令不补答
 DUEL_DEBUFFS = {"heavy_injury": (600, "神魂重创"), "broken_dao_heart": (86400, "道心已碎")}
 # 九转还魂丹：神魂动荡（败后 10 分钟虚弱）期间再输一场，碎一颗免陨落，换 24 小时道心破碎
 REVIVE_PILL = "elixir_901_revive"
+# .查冷却 只列 10-15 对过游戏回包或结算时间的（没对上的不列，免得报错时间）：
+# 这几个副本天机阁存的直接是冷却结束时刻（小极宫 72h、秘圃 48h、苍坤 2.5h、其余 2h）
+DUNGEON_UNTIL_FIELDS = (
+    ("last_xiaoji_time", "北冥小极宫"),
+    ("last_luoyun_mipu_time", "落云秘圃"),
+    ("last_zhuimo_time", "坠魔谷"),
+    ("last_cangkun_time", "苍坤洞府"),
+    ("last_dungeon_time", "虚天殿"),
+    ("last_huanglong_time", "黄龙山大战"),
+)
+# 侍妾：上次时间 + 时长（面板剩余分钟反推）
+COMPANION_COOLDOWNS = (
+    ("last_dream_map_seek_time", "入梦寻图", 8),
+    ("last_companion_heart_tribulation_time", "共历心劫", 10),
+    ("last_divination_chain_time", "天机代卜", 12),
+)
+WIND_WINGS = "treasure_203"  # 祭出风雷翅：探寻裂缝冷却 12h → 9h
+# 玄骨遗府（10-15 新副本）的门票。每日通关奖励、每日掉票上限天机阁都不记，暂时只能看身上有几颗
+XUANGU_PEARL = "item_xuangu_seeking_pearl"
 # 其余状态的来路：10-15 在群里找到发放这些状态的原消息才写，没见过的不猜（风之祝福、南陇侯的注视等）
 STATUS_SOURCES = {
     "sect_hunt": "叛出元婴宗，7 日内被元婴宗长老追杀",
@@ -70,6 +93,22 @@ STATUS_DETAILS = {
     "companion_zhuimo_trial": "魔染护持 +{taint_shield}，封印起始 +{seal_bonus}，士气起始 +{morale_bonus}",
 }
 OBSERVE = re.compile(r"^[.。]查观星\s*$")
+HELP_COMMAND = re.compile(r"^[.。]帮助\s*$")
+# 指令包在 <code> 里，TG 上点一下就复制；新加指令记得写进来（自检会核对这里的每条指令都认得）
+# 排版照韩天尊的「.苍坤洞府帮助」：指令那段是 code，参数不包进去
+HELP = """<b>【小天尊查询指令】</b>
+- <code>.查灵根</code> 名字：天命玉牒
+- <code>.查储物袋</code> 名字：储物袋
+- <code>.查状态</code> 名字：负面状态（带说明和来源）、九转还魂丹、增益、闭关和远航剩余
+- <code>.查冷却</code> 名字：副本、闭关、斗法、侍妾、宗门、小世界、日常的冷却
+- <code>.查观星</code>：最近几次观星和整点天道演化结算
+- <code>.帮助</code>：这条说明
+
+<b>【说明】</b>
+- 点一下指令就复制，后面接名字发出去
+- 名字 = TG 用户名（带不带 @、大小写都行）或完整道号；道号重名会列出候选
+- 不写名字、回复某人的消息发指令 = 查被回复的那个人
+- 有人观星看到星辰异象、或整点结算出了元磁山核·乙，小天尊会主动在群里报"""
 READING = re.compile(r"@(\w+) 闭目凝神.*?下一次天道演化将是: 【([^】]+)】.*?当前天命所归: @?(\S+)", re.S)
 SETTLEMENT = re.compile(r"天机阁快报 - ([^】]+)】")
 JADE = "元磁山核·乙"  # 只有「星辰异象」结算出它；观星能提前看到下一个整点是不是星辰异象
@@ -307,7 +346,103 @@ def format_status(d: dict, boot: dict, now: datetime | None = None, find_source=
     return "\n".join(lines)
 
 
-FORMATTERS = {"灵根": format_panel, "储物袋": format_bag, "状态": format_status}
+def duodeng_today(username: str, now: datetime) -> bool:
+    """黄龙夺灯每天一次、北京零点重置，天机阁档案里没有字段；按主服务存的副本记录看这个人今天出过手没有。"""
+    if not username:
+        return False  # 没设用户名的人记录里发送人是空的，对不上
+    start = now.astimezone(BEIJING).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    return bool(_rows(
+        "SELECT 1 FROM dungeon_messages WHERE dungeon = 'duodeng' AND created_at >= ? AND is_bot = 0"
+        " AND lower(sender_username) = lower(?) AND (text LIKE '.夺灯行动%' OR text LIKE '.进入夺灯%') LIMIT 1",
+        (start, username),
+    ))
+
+
+def format_cooldowns(d: dict, boot: dict, now: datetime | None = None, ran_duodeng=duodeng_today) -> str:
+    now = now or datetime.now(timezone.utc)
+    today = now.astimezone(BEIJING).date().isoformat()
+
+    def after(value, hours: float) -> datetime | None:
+        start = _until(value)
+        return start + timedelta(hours=hours) if start else None
+
+    def cd(label: str, until: datetime | None, idle: str = "无冷却") -> str:
+        return f"- {label}：{_left(until, now)}" if until and until > now else f"- {label}：{idle}"
+
+    lines = [f"@{d.get('username')} 的冷却", SEPARATOR, "副本:"]
+    lines += [cd(name, _until(d.get(field))) for field, name in DUNGEON_UNTIL_FIELDS]
+    ran = ran_duodeng(d.get("username") or "", now)
+    lines.append("- 黄龙夺灯：今日已出征" if ran else "- 黄龙夺灯：今日还没出征（按群里副本记录）")
+    pearls = sum(
+        it.get("quantity") or 0
+        for it in (d.get("inventory") or {}).get("items") or []
+        if it.get("item_id") == XUANGU_PEARL
+    )
+    lines.append(f"- 玄骨遗府：古府寻踪珠 {pearls} 颗")
+
+    lines += ["闭关:", cd("闭关修炼", _until(d.get("cultivation_cooldown_until")))]
+    seclusion = _until(d.get("deep_seclusion_end_time"))
+    if seclusion and seclusion > now:
+        lines.append(cd("深度闭关", seclusion))
+    rift_hours = 9 if WIND_WINGS in _ids(d.get("equipped_treasure_id")) else 12
+    lines.append(cd("探寻裂缝", after(d.get("last_rift_explore_time"), rift_hours)))
+    # 搜寻节点：上次 + 12 小时。10-15 大号 21:23 搜过，21:36 再发回「11小时46分钟29秒后再行搜寻」，正好对上；
+    # 被冷却挡回的那次不刷新 last_node_search_time。ponytail: 只有这一个样本，神识/大衍诀会不会缩短没见过
+    lines.append(cd("搜寻节点", after(d.get("last_node_search_time"), 12)))
+    lines.append(cd("双修", after(d.get("last_dual_cultivation_time"), 1)))
+    if d.get("last_wen_dao_time"):
+        lines.append(cd("元婴宗问道", after(d.get("last_wen_dao_time"), 12)))
+
+    stamina = d.get("daily_battle_stamina") if d.get("last_battle_date") == today else 10
+    lines += ["斗法:", f"- 今日神念：剩 {stamina if stamina is not None else 10}/10"]
+
+    residence = _json((d.get("dongfu") or {}).get("companion_residence")) or []
+    companions = [(c, "随行") for c in [d.get("companion")] if isinstance(c, dict) and c.get("name")]
+    companions += [(c, "藏娇阁") for c in residence if isinstance(c, dict) and c.get("name")]
+    if companions:
+        lines.append("侍妾:")
+    for c, where in companions:
+        parts = []
+        for field, name, hours in COMPANION_COOLDOWNS:
+            until = after(c.get(field), hours)
+            parts.append(f"{name} {_left(until, now)}" if until and until > now else f"{name} 可用")
+        voyage = c.get("voyage") or {}
+        back = _until(voyage.get("end_time"))
+        if voyage.get("status") == "sailing" and back and back > now:
+            parts.append(f"远航 {_left(back, now)}")
+        lines.append(f"- {c['name']}（{where}）：" + "；".join(parts))
+
+    sect = d.get("sect_name") or ""
+    sect_lines = []
+    if sect == "星宫":
+        observed = str(d.get("last_divination_time") or "")[:10] == today
+        sect_lines.append(f"- 观星：{'今日已观' if observed else '今日未观'}")
+        sect_lines.append(cd("周天星斗大阵", after(d.get("last_star_formation_time"), 12)))
+    leave = _until(d.get("sect_leave_cooldown_until"))
+    if leave and leave > now:
+        sect_lines.append(cd("退宗后不能拜入", leave))
+    if sect_lines:
+        lines += ["宗门:", *sect_lines]
+
+    world = d.get("small_world")
+    if isinstance(world, dict) and world:
+        lines += [
+            "小世界:",
+            cd("祈愿", after(world.get("last_prayer_time"), 6)),
+            cd("神谕", after(world.get("last_edict_time"), 3)),
+        ]
+
+    wild = d.get("wild_experience_daily_count") if d.get("wild_experience_last_date") == today else 0
+    pagoda = _json(d.get("pagoda_progress")) or {}
+    lines += [
+        "日常:",
+        f"- 野外历练：今日 {wild or 0}/8",
+        f"- 闯塔：{'今日已闯' if isinstance(pagoda, dict) and pagoda.get('last_attempt_date') == today else '今日未闯'}",
+    ]
+    return "\n".join(lines)
+
+
+FORMATTERS = {"灵根": format_panel, "储物袋": format_bag, "状态": format_status, "冷却": format_cooldowns}
 
 
 def find(name: str) -> dict | list[dict]:
@@ -423,6 +558,8 @@ def jade_alerts(after_id: int, predicted: dict) -> tuple[int, list[str]]:
 
 def answer(text: str, replied: str | None = None) -> str | None:
     """replied：这条指令回复的那个人的 TG 用户名（"" = 对方没设用户名，None = 不是回复）。"""
+    if HELP_COMMAND.match(text):
+        return HELP
     if OBSERVE.match(text):
         return format_observations()
     match = COMMAND.match(text)
@@ -449,7 +586,7 @@ def _bot(token: str, method: str, **params):
 
 def handle(token: str, message: dict, chat_ids: set[int]) -> None:
     asked = message.get("text") or ""
-    if not (OBSERVE.match(asked) or COMMAND.match(asked)) or message["chat"]["id"] not in chat_ids:
+    if not (HELP_COMMAND.match(asked) or OBSERVE.match(asked) or COMMAND.match(asked)) or message["chat"]["id"] not in chat_ids:
         return
     if time.time() - message.get("date", 0) > STALE_SECONDS:
         return
@@ -473,6 +610,8 @@ def handle(token: str, message: dict, chat_ids: set[int]) -> None:
             "allow_sending_without_reply": True,
         },
     }
+    if text == HELP:  # 只有帮助走 HTML，面板里的 < & 照原样发
+        params["parse_mode"] = "HTML"
     if message.get("is_topic_message"):
         params["message_thread_id"] = message["message_thread_id"]
     _bot(token, "sendMessage", **params)
@@ -685,8 +824,17 @@ def self_check() -> None:
             (4, "read_cmd", ".观星", bj(11, 59, 3)),
             (5, "reading", star("guan_xing", "Good - 地心火脉现世", "ming_a"), bj(11, 59, 7)),
         ])
+        con.execute("CREATE TABLE dungeon_messages (dungeon TEXT, sender_username TEXT, is_bot INTEGER, text TEXT, created_at REAL)")
+        con.executemany("INSERT INTO dungeon_messages VALUES (?, ?, ?, ?, ?)", [
+            ("duodeng", "Lamp_Mate", 0, ".夺灯行动 1 潜行", bj(11, 20)),       # 今天出手
+            ("duodeng", "", 0, ".夺灯行动 2 破阵 北", bj(11, 21)),             # 没用户名的人
+            ("duodeng", "old_mate", 0, ".夺灯行动 1 防守", bj(11, 20) - 86400),  # 昨天
+            ("duodeng", "bot_echo", 1, ".夺灯行动 1 防守", bj(11, 22)),
+        ])
         con.commit()
         con.close()
+        lamp = [duodeng_today(u, datetime.fromtimestamp(bj(15, 0), timezone.utc))
+                for u in ("lamp_mate", "old_mate", "", "bot_echo", "nobody")]
         found = duel_source("xu_a", at, "神魂重创")
         missing = duel_source("xu_a", at - 3600, "神魂重创")
         observed = format_observations(datetime.fromtimestamp(bj(11, 59, 30), timezone.utc))
@@ -697,6 +845,8 @@ def self_check() -> None:
         DB = real_db
     assert found == f"{datetime.fromtimestamp(at - 60, BEIJING):%m-%d %H:%M} 斗法输给 @shou_xia（雷火叟）", found
     assert missing is None
+    # 夺灯：用户名不分大小写；昨天的、机器人的、没用户名的都不算
+    assert lamp == [True, False, False, False, False], lamp
     assert observed == """天道演化（每 3 小时整点结算，观星能提前看到下一次）
 ────────────────
 最近观星:
@@ -717,6 +867,72 @@ def self_check() -> None:
     assert _slot(bj(23, 8)) == datetime(2026, 10, 16, 0, 0, tzinfo=BEIJING)
     assert _slot(bj(4, 59, 43)).hour == 6 and _slot(bj(12, 0, 30)).hour == 15
 
+    busy = {
+        "username": "daoyou_test",
+        "last_xiaoji_time": "2026-10-16T08:28:54+00:00",  # 副本字段存的是冷却结束时刻
+        "last_zhuimo_time": "2026-10-15T01:40:50+00:00",
+        "cultivation_cooldown_until": "2026-10-15T06:20:00+00:00",
+        "equipped_treasure_id": json.dumps([WIND_WINGS]),  # 祭出风雷翅：裂缝 9 小时
+        "last_rift_explore_time": "2026-10-15T00:00:00+00:00",
+        "last_node_search_time": "2026-10-15T00:00:00+00:00",
+        "last_dual_cultivation_time": "2026-10-15T05:30:00+00:00",
+        "last_battle_date": "2026-10-15",
+        "daily_battle_stamina": 6,
+        "companion": {
+            "name": "莎儿",
+            "last_dream_map_seek_time": "2026-10-15T04:26:16+00:00",
+            "last_companion_heart_tribulation_time": "2026-10-14T19:02:46+00:00",
+            "voyage": {"status": "sailing", "end_time": "2026-10-15T12:29:10+00:00"},
+        },
+        "dongfu": {"companion_residence": json.dumps(
+            [{"name": "南宫婉·月影", "last_divination_chain_time": "2026-10-14T21:38:26+00:00"}])},
+        "sect_name": "星宫",
+        "last_divination_time": "2026-10-15",
+        "last_star_formation_time": "2026-10-15T03:01:21+00:00",
+        "sect_leave_cooldown_until": "2026-10-11T02:48:42+00:00",
+        "small_world": {"last_prayer_time": "2026-10-14T20:47:06+00:00", "last_edict_time": "2026-10-15T05:00:00+00:00"},
+        "wild_experience_last_date": "2026-10-15",
+        "wild_experience_daily_count": 8,
+        "pagoda_progress": json.dumps({"last_attempt_date": "2026-10-14"}),
+        "inventory": {"items": [{"item_id": XUANGU_PEARL, "quantity": 2}]},
+    }
+    assert format_cooldowns(busy, boot, now, lambda username, at: username == "daoyou_test") == """@daoyou_test 的冷却
+────────────────
+副本:
+- 北冥小极宫：剩 1 天 2 小时，至 10-16 16:28
+- 落云秘圃：无冷却
+- 坠魔谷：无冷却
+- 苍坤洞府：无冷却
+- 虚天殿：无冷却
+- 黄龙山大战：无冷却
+- 黄龙夺灯：今日已出征
+- 玄骨遗府：古府寻踪珠 2 颗
+闭关:
+- 闭关修炼：剩 3 分钟，至 14:20
+- 探寻裂缝：剩 2 小时 43 分钟，至 17:00
+- 搜寻节点：剩 5 小时 43 分钟，至 20:00
+- 双修：剩 13 分钟，至 14:30
+斗法:
+- 今日神念：剩 6/10
+侍妾:
+- 莎儿（随行）：入梦寻图 剩 6 小时 9 分钟，至 20:26；共历心劫 可用；天机代卜 可用；远航 剩 6 小时 12 分钟，至 20:29
+- 南宫婉·月影（藏娇阁）：入梦寻图 可用；共历心劫 可用；天机代卜 剩 3 小时 21 分钟，至 17:38
+宗门:
+- 观星：今日已观
+- 周天星斗大阵：剩 8 小时 44 分钟，至 23:01
+小世界:
+- 祈愿：无冷却
+- 神谕：剩 1 小时 43 分钟，至 16:00
+日常:
+- 野外历练：今日 8/8
+- 闯塔：今日未闯""", format_cooldowns(busy, boot, now, lambda username, at: True)
+    # 什么都没做过的号：昨天的神念不算今天，侍妾/宗门/小世界整段不出
+    kong = format_cooldowns({"username": "kong", "last_battle_date": "2026-10-14", "daily_battle_stamina": 2},
+                            boot, now, lambda username, at: False).splitlines()
+    assert kong[9:11] == ["- 黄龙夺灯：今日还没出征（按群里副本记录）", "- 玄骨遗府：古府寻踪珠 0 颗"], kong
+    assert kong[16:] == ["斗法:", "- 今日神念：剩 10/10", "日常:", "- 野外历练：今日 0/8", "- 闯塔：今日未闯"], kong
+
+    assert COMMAND.match(".查冷却 @daoyou_test").groups() == ("冷却", "daoyou_test")
     assert COMMAND.match(".查灵根 @daoyou_test").groups() == ("灵根", "daoyou_test")
     assert COMMAND.match(".查状态 daoyou_test").groups() == ("状态", "daoyou_test")
     assert COMMAND.match("。查储物袋 云游子 ").groups() == ("储物袋", "云游子")
@@ -756,6 +972,12 @@ def self_check() -> None:
         globals().update(_cultivator=real[0], _cached=real[1])
     assert not COMMAND.match(".查宗门 a")
     assert OBSERVE.match(".查观星") and OBSERVE.match("。查观星 ") and not OBSERVE.match(".查观星 a")
+    # 帮助：每条可复制的指令都真认得、每种查询都写进去了；去掉 <code> 后不能再有 HTML 特殊字符
+    assert answer(".帮助") == HELP and answer("。帮助 ") == HELP and answer(".帮助 a") is None
+    listed = re.findall(r"<code>(.*?)</code>", HELP)
+    assert all(HELP_COMMAND.match(c) or OBSERVE.match(c) or COMMAND.match(c) for c in listed), listed
+    assert {f".查{kind}" for kind in FORMATTERS} <= set(listed), listed
+    assert not re.search(r"[<>&]", re.sub(r"</?(code|b)>", "", HELP))
     print("self-check ok")
 
 

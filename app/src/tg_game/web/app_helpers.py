@@ -704,7 +704,7 @@ def _pack_artifact_touch_strategy(command_text: str, interval_seconds: int) -> s
     return _artifact_pack_artifact_touch_strategy(command_text, interval_seconds)
 
 
-def _unpack_artifact_touch_strategy(value: object) -> tuple[str, int]:
+def _unpack_artifact_touch_strategy(value: object) -> tuple[list[str], int]:
     return _artifact_unpack_artifact_touch_strategy(value)
 
 
@@ -720,7 +720,7 @@ def _pack_artifact_trial_strategy(artifact_name: str, route: str) -> str:
     return _artifact_pack_artifact_trial_strategy(artifact_name, route)
 
 
-def _unpack_artifact_trial_strategy(value: object) -> tuple[str, str]:
+def _unpack_artifact_trial_strategy(value: object) -> tuple[list[str], str]:
     return _artifact_unpack_artifact_trial_strategy(value)
 
 
@@ -752,7 +752,7 @@ def _pack_artifact_nurture_strategy(target_name: object) -> str:
     return _artifact_pack_artifact_nurture_strategy(target_name)
 
 
-def _unpack_artifact_nurture_strategy(value: object) -> str:
+def _unpack_artifact_nurture_strategy(value: object) -> list[str]:
     return _artifact_unpack_artifact_nurture_strategy(value)
 
 

@@ -1,7 +1,12 @@
 import re
 
+from tg_game.features.artifact.biz_artifact_targets import (
+    join_artifact_targets,
+    split_artifact_schedule,
+)
 from tg_game.features.artifact.biz_artifact_trial import (
     build_artifact_trial_resource_state,
+    normalize_artifact_names,
 )
 
 
@@ -27,11 +32,14 @@ def build_artifact_nurture_command(target_name: object) -> str:
 
 
 def pack_artifact_nurture_strategy(target_name: object) -> str:
-    return normalize_artifact_nurture_target_name(target_name)[:100]
+    return join_artifact_targets(
+        "", normalize_artifact_names(target_name, ARTIFACT_NURTURE_DEFAULT_TARGET_NAME)
+    )
 
 
-def unpack_artifact_nurture_strategy(value: object) -> str:
-    return normalize_artifact_nurture_target_name(value)
+def unpack_artifact_nurture_strategy(value: object) -> list[str]:
+    raw, _schedule = split_artifact_schedule(value)
+    return normalize_artifact_names(raw, ARTIFACT_NURTURE_DEFAULT_TARGET_NAME)
 
 
 def build_artifact_nurture_resource_state(

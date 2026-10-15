@@ -14,7 +14,8 @@ from tg_game.runtime.executors import (
     observe_fate_evolution,
     notify_dual_cultivation_bonus,
     observe_companion_heart_tribulation_event,
-    reschedule_artifact_touch_auto_on_reply,
+    ARTIFACT_TOUCH_FEATURE_KEY,
+    reschedule_artifact_auto_on_reply,
 )
 from tg_game.features.xinggong.biz_xinggong_star_board import (
     XINGGONG_STARBOARD_FEATURE_KEY,
@@ -541,8 +542,9 @@ class Router:
                             context.profile.id,
                             context.chat_id,
                         )
-                    if reschedule_artifact_touch_auto_on_reply(
+                    if reschedule_artifact_auto_on_reply(
                         self.storage,
+                        ARTIFACT_TOUCH_FEATURE_KEY,
                         profile_id=context.profile.id,
                         chat_id=context.chat_id,
                         reply_to_msg_id=int(context.reply_to_msg_id or 0),

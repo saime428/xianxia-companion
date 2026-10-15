@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""野外历练自检：09-16 的 3 小时冷却制，09-21 起每天 8 次；天星宗号每场前先推命/改命 探索。
+"""野外历练自检：09-21 起每天 8 次（托管批量按当日次数开跑）；天星宗号每场前先推命/改命 探索。
 
 跑法：PYTHONPATH=app/src python tools/test_wild_experience_cooldown.py
 """
@@ -115,17 +115,26 @@ def test_run_flow_skips_while_cooling():
     assert result["attempts"] == [], result
 
 
-def test_batch_due_follows_cooldown_not_clock():
+def test_batch_due_follows_daily_count_not_cooldown():
     now = time.time()
     started = now - age.WILD_EXPERIENCE_RETRY_GAP_SECONDS - 60
-    # 任一元神冷却到期就开跑
-    assert age.wild_experience_batch_due([now + 600, now - 1], started, now)
-    # 全都还在冷却里不跑
-    assert not age.wild_experience_batch_due([now + 600, now + 1], started, now)
+    today = wild._day_key()
+    done = {"wild_experience_last_date": today, "wild_experience_daily_count": 8,
+            "last_wild_experience_time": datetime.now(timezone.utc).isoformat()}
+    # 刚打完 3 场就断了：上一场才过几分钟也要续（修前按「上一场 + 3 小时」等到 3 小时后）
+    half = dict(done, wild_experience_daily_count=3)
+    assert age.wild_experience_pending(half)
+    assert age.wild_experience_batch_due([age.wild_experience_pending(half), age.wild_experience_pending(done)], started, now)
+    # 都打满了不再开（修前打满后每 30 分钟开一轮空的）
+    assert not age.wild_experience_pending(done)
+    assert not age.wild_experience_batch_due([False, False], started, now)
+    # 昨天打满的算今天没打
+    assert age.wild_experience_pending(dict(done, wild_experience_last_date="2000-01-01"))
+    # 关掉的号、没有天机阁档案的号不算
+    assert not age.wild_experience_pending(half, disabled=True)
+    assert not age.wild_experience_pending({})
     # 刚跑过一轮，先隔 30 分钟再说，别 15 秒一轮空转
-    assert not age.wild_experience_batch_due([now - 1], now - 60, now)
-    # 天机阁没这个字段时不开跑
-    assert not age.wild_experience_batch_due([None], started, now)
+    assert not age.wild_experience_batch_due([True], now - 60, now)
     # 零点前后不开新一轮：留给要定点的（观命定命、零点垂钓和开鱼），01:00 以后照常
     assert [age.wild_experience_quiet(t) for t in ("23:29", "23:30", "23:59", "00:00", "00:59", "01:00", "12:00")] == [
         False, True, True, True, True, False, False]
