@@ -32,7 +32,6 @@ from tg_game.features.soul.biz_soul_trial import maybe_answer_soul_trial
 from tg_game.features.tianxing import handle_bot_reply as handle_tianxing_bot_reply
 from tg_game.services import module_registry
 from tg_game.services.external_sync import is_authorized_profile
-from tg_game.services.stock_sync import sync_stock_market_message
 from tg_game.storage import OUTGOING_CONFIRM_TIMEOUT_SECONDS, Storage
 from tg_game.dungeon_defs import is_dungeon_command_text, is_dungeon_reply_text
 from tg_game.services.stock_sync import sync_stock_market_message, is_stock_related

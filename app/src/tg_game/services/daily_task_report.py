@@ -189,6 +189,9 @@ def build_report(storage, start, end):
             tree = (payload.get("luoyun_spirit_tree") or {}).get("miniapp_run") or {}
             daily = (payload.get("luoyun_spirit_tree") or {}).get("daily") or {}
             add("灵树", tree, f" 跃{(daily.get('jump') or {}).get('best', '?')}／飞{(daily.get('fly') or {}).get('best', '?')}")
+            if ((payload.get("dongfu_resources") or {}).get("request") or {}).get("status") == "needs_review":
+                # 洞府请求结果不明时自动小世界、神迹布道一直停着，只有网页按钮能放开；不提就没人知道
+                errors.append("洞府资源：上次请求结果待核对，自动小世界和神迹布道暂停中（洞府资源页点「我已核对」恢复）")
             fish = db.execute("SELECT count(*),coalesce(sum(caught),0) FROM fishing_casts WHERE profile_id=? AND created_at>=? AND created_at<?", (pid, since, until)).fetchone()
             if fish[0]:
                 results.append(f"垂钓 {fish[0]}竿／钓获{fish[1]}")

@@ -51,7 +51,7 @@ python3 tools/setup_environment.py --install
 它会建 `data/`，把 `.env.example` 复制成 `.env`，建 `.venv` 并装依赖。
 
 - **确认**：目录里出现 `.venv` 和 `.env`，最后打印 `Next commands`。
-- 可选自检：`PYTHONPATH=app/src .venv/bin/python tools/test_dwelling_fishing_miniapp.py` 输出 `ok (31 tests)`（Windows 先 `$env:PYTHONPATH="app\src"` 再用 `.venv\Scripts\python.exe`）。
+- 可选自检：`PYTHONPATH=app/src .venv/bin/python tools/test_dwelling_fishing_miniapp.py` 输出最后一行是 `test_dwelling_fishing_miniapp: ok (… tests)`（Windows 先 `$env:PYTHONPATH="app\src"` 再用 `.venv\Scripts\python.exe`）。
 - 仓库里的文本文件是 CRLF 换行，`.py` 不受影响。macOS/Linux 上要用 `tools/*.sh`、`*.service` 的话，先 `dos2unix` 一遍。
 
 ## 2. 填 `.env`
@@ -152,7 +152,7 @@ TZ=Asia/Shanghai .venv/bin/python run_services.py all
 
 **游戏里先满足这些**（程序替你做不了）：
 
-- 背包里有名字带「钓竿」的物品：青竹钓竿每天 5 竿，金竹钓竿每天 15 竿。买完在 `/login` 点「重新验证天机阁会话」，导航才会出现「灵溪垂钓」。
+- 背包里有名字带「钓竿」的物品：青竹钓竿每天 5 竿，银竹 10 竿，金竹 15 竿，金雷竹 20 竿（`.升级鱼竿` 逐级升，要法则碎片·雷和对应的竹子）。买完在 `/login` 点「重新验证天机阁会话」，导航才会出现「灵溪垂钓」。
 - 洞府灵脉至少 2 级（1 级会报 `fishing_site_unavailable`）。
 - 至少有一位侍妾，而且两位不能同时在远航。只是一位在远航的话，程序会等她归航后再钓。
 - 没有鱼材做饵的话，把页面上「缺饵时」改成「只买饵」（花灵石）。
@@ -227,7 +227,7 @@ PYTHONPATH=app/src .venv/bin/python -B -m tg_game.features.world_boss.world_boss
 
 - **自动赌石**（每天定时一次，默认没有启用任何账号）：由独立的 `xianxia-stone-gambling.service` 负责，启用、预算、停用和核对的命令见仓库根目录的 `STONE-GAMBLING.md`。
 
-- **小天尊查询 bot**（独立服务，只读，不发任何游戏指令）：在你们自己人的小群里发 `.查灵根 A`、`.查储物袋 A`、`.查状态 A`（A 是用户名或道号；回复某人的消息可以不写 A）、`.查观星`，按天机阁数据回和韩天尊一样的面板；有人观星看到下一次天道演化是星辰异象、整点结算出了元磁山核·乙时，也会主动往群里报。借的是第 6 步那份天机阁登录，所以要先连上天机阁。步骤：
+- **小天尊查询 bot**（独立服务，只读，不发任何游戏指令）：在你们自己人的小群里发 `.查灵根 A`、`.查储物袋 A`、`.查状态 A`、`.查冷却 A`（A 是用户名或道号；回复某人的消息可以不写 A）、`.查观星`，发 `.帮助` 列出全部指令（点一下就复制），按天机阁数据回和韩天尊一样的面板；有人观星看到下一次天道演化是星辰异象、整点结算出了元磁山核·乙时，也会主动往群里报。借的是第 6 步那份天机阁登录，所以要先连上天机阁。步骤：
   1. 私聊 @BotFather 建一个 bot。名字别叫「韩天尊」，用户名别起成 `hantianzun数字_bot` 这种，否则主程序会把它当成游戏 bot。再在 BotFather 里 `/setprivacy` 选 Disable（不关的话群里收不到 `.查` 开头的消息；关之前已经拉进群的，要踢出去重新拉）。
   2. 把 bot 拉进小群，在群里随便发一句，浏览器打开 `https://api.telegram.org/bot<token>/getUpdates` 找到群的 `chat.id`（负数）。
   3. `.env` 加两行：`TIANZUN_BOT_TOKEN=<token>`、`TIANZUN_BOT_CHAT_IDS=<群 ID>`。bot 只在这些群里回，私聊和别的群一概不理。

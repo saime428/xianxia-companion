@@ -10,7 +10,6 @@ XINGGONG_STARBOARD_READY_CHECK_SECONDS = 10
 XINGGONG_STARBOARD_PENDING_CHECK_SECONDS = 60
 XINGGONG_STARBOARD_COOLDOWN_BUFFER_SECONDS = 60
 XINGGONG_STARBOARD_HEALTH_CHECK_SECONDS = 30 * 60
-XINGGONG_STARBOARD_COMMAND_DELAY_SECONDS = 3
 XINGGONG_STARBOARD_PULL_PREFIX = ".牵引星辰"
 XINGGONG_STARBOARD_COMFORT_COMMAND = ".安抚星辰"
 XINGGONG_STARBOARD_COLLECT_COMMAND = ".收集精华"
@@ -25,7 +24,6 @@ XINGGONG_STAR_INFOS = (
     ("天雷星", 36, "星宫长老"),
     ("帝魂星", 48, "星宫双圣"),
 )
-XINGGONG_STAR_OPTIONS = tuple(name for name, _hours, _requirement in XINGGONG_STAR_INFOS)
 XINGGONG_STAR_DURATIONS = {
     name: hours * 3600 for name, hours, _requirement in XINGGONG_STAR_INFOS
 }
@@ -193,72 +191,6 @@ def build_starboard_next_check_time(payload: dict, now: float) -> float:
             min(min(next_candidates), now + XINGGONG_STARBOARD_HEALTH_CHECK_SECONDS),
         )
     return now + XINGGONG_STARBOARD_RECHECK_SECONDS
-
-
-def build_starboard_commands(
-    payload: dict, target_star: str, now: float
-) -> tuple[list[str], Optional[float]]:
-    target = normalize_starboard_target(target_star)
-    states = iter_starboard_plot_states(payload, now=now)
-    if not states:
-        return [], None
-
-    commands: list[str] = []
-    next_candidates: list[float] = []
-    needs_comfort_command = False
-    needs_collect_command = False
-    needs_pull_command = False
-
-    for state in states:
-        if state["empty_slot"]:
-            needs_pull_command = True
-            continue
-        if state["needs_comfort"]:
-            needs_comfort_command = True
-            if state["start_ts"] > 0 and state["cooldown_remaining"] > 0:
-                next_candidates.append(now + state["cooldown_remaining"])
-                continue
-            if state["cd_expired"]:
-                needs_collect_command = True
-                needs_pull_command = True
-            continue
-        if state["collectable"]:
-            needs_collect_command = True
-            needs_pull_command = True
-            continue
-        if state["is_ready"]:
-            needs_pull_command = True
-            continue
-        if state["condensing"] and state["cooldown_remaining"] > 0:
-            next_candidates.append(now + state["cooldown_remaining"])
-
-    if needs_comfort_command:
-        commands.append(XINGGONG_STARBOARD_COMFORT_COMMAND)
-    if needs_collect_command:
-        commands.append(XINGGONG_STARBOARD_COLLECT_COMMAND)
-    if needs_pull_command:
-        commands.append(f"{XINGGONG_STARBOARD_PULL_PREFIX} {target}")
-
-    return commands, min(next_candidates) if next_candidates else None
-
-
-def build_starboard_pending_candidates(
-    payload: dict, target_star: str, commands: list[str]
-) -> list[str]:
-    target = normalize_starboard_target(target_star)
-    candidates = list(commands)
-    for plot_id in get_starboard_plots(payload).keys():
-        slot = str(plot_id).strip()
-        if not slot:
-            continue
-        candidates.extend(
-            [
-                f"{XINGGONG_STARBOARD_COMFORT_COMMAND} {slot}",
-                f"{XINGGONG_STARBOARD_COLLECT_COMMAND} {slot}",
-                f"{XINGGONG_STARBOARD_PULL_PREFIX} {slot} {target}",
-            ]
-        )
-    return list(dict.fromkeys(candidates))
 
 
 def is_starboard_insufficient_reply(text: str) -> bool:

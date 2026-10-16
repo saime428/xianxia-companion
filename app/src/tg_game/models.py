@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -10,9 +10,6 @@ class FeatureModule:
     status: str
     capabilities: list[str] = field(default_factory=list)
     next_steps: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -46,9 +43,6 @@ class PlayerProfile:
     created_at: float
     updated_at: float
 
-    def to_dict(self) -> dict:
-        return asdict(self)
-
 
 @dataclass(frozen=True)
 class ChatBinding:
@@ -65,9 +59,6 @@ class ChatBinding:
     is_active: bool = True
     created_at: float = 0.0
 
-    def to_dict(self) -> dict:
-        return asdict(self)
-
 
 @dataclass(frozen=True)
 class ModuleSetting:
@@ -80,6 +71,3 @@ class ModuleSetting:
     command_template: str
     notes: str
     updated_at: float
-
-    def to_dict(self) -> dict:
-        return asdict(self)

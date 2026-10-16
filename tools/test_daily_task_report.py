@@ -232,6 +232,14 @@ class DailyReportTests(unittest.TestCase):
         self.assertTrue(asyncio.run(report.send_due_report(client,self.storage,self.pid,now=now+86401)))
         self.assertNotEqual(requests[1].random_id,requests[2].random_id)
 
+    def test_dongfu_needs_review_is_reported_until_cleared(self):
+        # 洞府请求待核对会让自动小世界、神迹布道一直停着，只有网页按钮能放开（审查 10-16）
+        payload = {"dongfu_resources": {"request": {"status": "needs_review"}}}
+        self.storage.update_external_account_payload(self.pid, ASC_EXTERNAL_PROVIDER, lambda _: payload)
+        self.assertIn("洞府资源：上次请求结果待核对", report.build_report(self.storage, self.start, self.end))
+        self.storage.update_external_account_payload(self.pid, ASC_EXTERNAL_PROVIDER, lambda _: {"dongfu_resources": {"last_result": {"status": "reviewed"}}})
+        self.assertNotIn("洞府资源", report.build_report(self.storage, self.start, self.end))
+
     def test_skipped_and_cancelled_results_are_not_running(self):
         payload = {"pagoda_miniapp": {"run": {"status": "skipped", "updated_at": self.end.timestamp()-1}},
                    "beast_merge": {"run": {"status": "cancelled", "updated_at": self.end.timestamp()-1}}}

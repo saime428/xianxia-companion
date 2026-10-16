@@ -5,7 +5,6 @@ from typing import Optional
 
 DREAM_SEEK_FEATURE_KEY = "dream_seek"
 DIVINATION_CHAIN_FEATURE_KEY = "divination_chain"
-WILD_EXPERIENCE_FEATURE_KEY = "wild_experience"
 
 SIMPLE_COOLDOWN_AUTO_FEATURES = {
     DREAM_SEEK_FEATURE_KEY: {
@@ -22,23 +21,7 @@ SIMPLE_COOLDOWN_AUTO_FEATURES = {
         "cooldown_hours": 12,
         "payload_scope": "companion",
     },
-    WILD_EXPERIENCE_FEATURE_KEY: {
-        "label": "野外历练",
-        "command": ".野外历练",
-        "payload_field": "last_wild_experience_time",
-        # 2026-09-16 会长在群里宣布野外历练「恢复到 3 小时一次」，洞府 MiniApp 也改口写
-        # 「每 3 小时一次」，原来的每日两次没了。
-        "cooldown_hours": 3,
-        "payload_scope": "root",
-    },
 }
-
-WILD_EXPERIENCE_STRATEGY_OPTIONS = ("谨慎", "均衡", "深入")
-
-
-def normalize_wild_experience_strategy(value: object) -> str:
-    normalized = str(value or "").strip()
-    return normalized if normalized in WILD_EXPERIENCE_STRATEGY_OPTIONS else "均衡"
 
 
 def parse_iso_to_ts(raw_value: object) -> float:

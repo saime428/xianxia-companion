@@ -1,6 +1,5 @@
 import json
 import re
-import time
 from typing import Optional
 
 FISHING_DEFAULT_POND = "青溪浅滩"
@@ -61,12 +60,10 @@ FISHING_NEST_OPTIONS = [
 FISHING_DAILY_LIMIT = 20
 FISHING_POLL_SECONDS = 5
 FISHING_RESULT_RECOVERY_SECONDS = 3
-FISHING_DAILY_REFRESH_BUFFER_SECONDS = 5 * 60
 FISHING_STATUS_COMMAND = ".钓鱼状态"
 FISHING_BASKET_COMMAND = ".鱼篓"
 FISHING_PROBE_COMMAND = ".试探咬饵"
 FISHING_HOOK_COMMAND = ".提竿"
-FISHING_STOP_COMMAND = ".收竿"
 
 FISHING_COMMAND_PREFIXES = (
     ".渔具铺",
@@ -357,45 +354,3 @@ def format_current_nest(nest: str, remaining: int) -> str:
 def build_next_auto_command(session: Optional[dict], now: Optional[float] = None) -> Optional[dict]:
     from tg_game.features.fishing.biz_fishing_auto import build_next_auto_command as _build_next
     return _build_next(session, now=now)
-
-
-def next_daily_refresh_at(now: Optional[float] = None) -> float:
-    current_time = time.time() if now is None else float(now)
-    local_time = time.localtime(current_time)
-    next_day_tuple = (
-        local_time.tm_year,
-        local_time.tm_mon,
-        local_time.tm_mday + 1,
-        0,
-        0,
-        FISHING_DAILY_REFRESH_BUFFER_SECONDS,
-        local_time.tm_wday,
-        local_time.tm_yday,
-        local_time.tm_isdst,
-    )
-    return time.mktime(next_day_tuple)
-
-
-def dumps_map(value: Optional[dict]) -> str:
-    return json.dumps(value or {}, ensure_ascii=False, separators=(",", ":"))
-
-
-def loads_map(value: object) -> dict[str, int]:
-    if isinstance(value, dict):
-        return {str(k): int(v or 0) for k, v in value.items()}
-    text = str(value or "").strip()
-    if not text:
-        return {}
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    result: dict[str, int] = {}
-    for key, raw_count in parsed.items():
-        try:
-            result[str(key)] = int(raw_count or 0)
-        except (TypeError, ValueError):
-            result[str(key)] = 0
-    return result

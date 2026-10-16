@@ -576,19 +576,3 @@ def default_world_boss_turnstile_broker() -> WorldBossTurnstileBroker:
             if _DEFAULT_BROKER is None:
                 _DEFAULT_BROKER = WorldBossTurnstileBroker()
     return _DEFAULT_BROKER
-
-
-def list_world_boss_turnstile_requests(*, include_finished: bool = False) -> list[dict[str, Any]]:
-    return default_world_boss_turnstile_broker().list_requests(
-        include_finished=include_finished
-    )
-
-
-def submit_world_boss_turnstile_token(request_id: Any, token: Any) -> dict[str, Any]:
-    return default_world_boss_turnstile_broker().submit_token(request_id, token)
-
-
-def record_world_boss_turnstile_browser_event(
-    request_id: Any, event: Any, error_code: Any = "",
-) -> dict[str, Any]:
-    return default_world_boss_turnstile_broker().record_browser_event(request_id, event, error_code)

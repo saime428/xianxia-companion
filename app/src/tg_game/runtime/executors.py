@@ -57,7 +57,6 @@ from tg_game.features.artifact.biz_artifact_trial import (
 )
 from tg_game.features.companion.biz_companion_cooldown import (
     SIMPLE_COOLDOWN_AUTO_FEATURES,
-    normalize_wild_experience_strategy,
     resolve_simple_cooldown_next_run_at,
 )
 from tg_game.features.companion.biz_companion_roster import (
@@ -68,7 +67,6 @@ from tg_game.features.companion.biz_companion_roster import (
 from tg_game.features.companion import biz_companion_replenish as companion_replenish
 from tg_game.features.companion.biz_companion_voyage import (
     COMPANION_VOYAGE_MIN_AFFECTION,
-    COMPANION_VOYAGE_STRATEGY_OPTIONS,
     ZHUIMO_GUARD_COMMAND,
     attending_companion_panel_name,
     attending_companion_panel_text,
@@ -153,9 +151,7 @@ from tg_game.features.xinggong.biz_xinggong_star_board import (
     XINGGONG_STARBOARD_READY_CHECK_SECONDS,
     XINGGONG_STARBOARD_FEATURE_KEY,
     XINGGONG_STARBOARD_RECHECK_SECONDS,
-    build_starboard_commands,
     build_starboard_next_check_time,
-    build_starboard_pending_candidates,
     get_starboard_plots,
     normalize_starboard_target,
 )
@@ -164,16 +160,12 @@ from tg_game.features.wanling.biz_wanling_roam import (
     WANLING_ROAM_AUTO_AFTER_RETURN_SECONDS,
     WANLING_ROAM_COMMAND,
     WANLING_ROAM_COMMAND_DELAY_SECONDS,
-    WANLING_ROAM_COMMAND_SEQUENCE,
-    WANLING_ROAM_DURATION_SECONDS,
     WANLING_ROAM_FEATURE_KEY,
     WANLING_ROAM_POST_SEND_GRACE_SECONDS,
     WANLING_ROAM_RECHECK_SECONDS,
-    WANLING_ROAM_RETURN_BUFFER_SECONDS,
     build_wanling_roam_cancel_commands,
     build_wanling_roam_command_sequence,
     is_wanling_profile,
-    parse_wanling_roam_timestamp,
     resolve_wanling_roam_next_finish_at,
 )
 from tg_game.services.cultivation_sync import sync_cultivation_session
@@ -224,7 +216,6 @@ COMPANION_HEART_TRIBULATION_ACTIVE_POLL_SECONDS = 2
 COMPANION_HEART_TRIBULATION_IDLE_SLEEP_MAX_SECONDS = 60
 AUTO_COMMAND_MANUAL_CONFIRM_BLOCK_SECONDS = OUTGOING_CONFIRM_TIMEOUT_SECONDS
 COMPANION_AUTO_POST_SEND_GRACE_SECONDS = 1800
-COMPANION_AUTO_RESUME_MODE_SECONDS = 30 * 60
 COMPANION_AUTO_RESUME_TASK_SPACING_SECONDS = 60
 COMPANION_AUTO_LONG_RESUME_SECONDS = 4 * 3600
 COMPANION_AUTO_LONG_RESUME_DEFER_SECONDS = 15 * 60
@@ -275,7 +266,6 @@ COMPANION_UNANSWERED_RETRY_SECONDS = 3600
 COMPANION_VOYAGE_RETURN_DELAY_SECONDS = 10
 COMPANION_VOYAGE_PREFLIGHT_RECHECK_SECONDS = 60
 COMPANION_VOYAGE_PREFLIGHT_RECENT_SEND_SECONDS = 30 * 60
-COMPANION_VOYAGE_PREFLIGHT_COMMAND_DELAY_SECONDS = 60
 SMALL_WORLD_PANEL_WAIT_SECONDS = 60
 SMALL_WORLD_PANEL_RETRY_SECONDS = 10
 SMALL_WORLD_ACTION_REPLY_WAIT_SECONDS = 180
@@ -320,7 +310,6 @@ COMPANION_AUTO_RESUME_HIGH_RISK_FEATURES = {
     mulan_feature.MULAN_AUTO_SUPPORT_FEATURE_KEY,
 }
 COMPANION_HEART_TRIBULATION_COMMAND = ".共历心劫"
-COMPANION_HEART_TRIBULATION_ALLOWED_BOT_IDS = set()
 COMPANION_HEART_TRIBULATION_STEP_TIMEOUT_SECONDS = 300
 COMPANION_HEART_TRIBULATION_EDIT_STALL_SECONDS = 600
 COMPANION_HEART_TRIBULATION_SETTLEMENT_KEYWORD = "【坠魔心劫·结算】"
@@ -507,10 +496,6 @@ def get_companion_auto_task_command_prefixes(task: dict) -> tuple[str, ...]:
             for part in _mulan_workflow_parts(task.get("workflow_state"))
             if part.startswith(".")
         )
-    elif feature_key == "wild_experience":
-        commands.append(
-            f".野外历练 {_normalize_wild_experience_strategy(task.get('strategy'))}"
-        )
 
     return tuple(dict.fromkeys(command for command in commands if command))
 def _refresh_companion_payload(storage: Storage, profile_id: int):
@@ -645,24 +630,6 @@ def _record_estate_miniapp_payload(
     return True
 
 
-def _save_estate_daily_payload(
-    storage: Storage,
-    profile_id: int,
-    payload: dict,
-) -> None:
-    external_account = storage.get_external_account(int(profile_id), ASC_PROVIDER) or {}
-    storage.upsert_external_account(
-        int(profile_id),
-        ASC_PROVIDER,
-        str(external_account.get("telegram_user_id") or ""),
-        str(external_account.get("telegram_username") or ""),
-        str(external_account.get("status") or "connected"),
-        str(external_account.get("cookie_text") or ""),
-        payload,
-        str(external_account.get("api_token") or ""),
-    )
-
-
 def _update_external_payload(
     storage: Storage,
     profile_id: int,
@@ -686,30 +653,6 @@ def _cancel_legacy_pagoda_outgoing(storage: Storage, profile_id: int) -> int:
             require_exact_thread=True,
         )
     return cancelled
-
-
-def _disable_legacy_wild_experience(storage: Storage, profile_id: int) -> int:
-    disabled = 0
-    for task in storage.list_active_companion_auto_tasks(int(profile_id)):
-        if str(task.get("feature_key") or "") != wild_experience_miniapp.FEATURE_KEY:
-            continue
-        storage.update_companion_auto_task(
-            int(task["id"]),
-            enabled=0,
-            next_run_at=0,
-            workflow_state="retired",
-            last_error="群命令野外历练已失效，功能已迁移至“诸元神巡令”。",
-        )
-        for strategy in wild_experience_miniapp.STRATEGY_OPTIONS:
-            storage.cancel_pending_outgoing_commands(
-                int(profile_id),
-                int(task.get("chat_id") or 0),
-                text=f".野外历练 {strategy}",
-                thread_id=task.get("thread_id"),
-                require_exact_thread=True,
-            )
-        disabled += 1
-    return disabled
 
 
 def _request_readiness(get_request):
@@ -1198,24 +1141,6 @@ async def _run_pending_pagoda_public(
         ),
     )
     return True
-
-
-def _save_tianji_trial_daily_payload(
-    storage: Storage,
-    profile_id: int,
-    payload: dict,
-) -> None:
-    external_account = storage.get_external_account(int(profile_id), ASC_PROVIDER) or {}
-    storage.upsert_external_account(
-        int(profile_id),
-        ASC_PROVIDER,
-        str(external_account.get("telegram_user_id") or ""),
-        str(external_account.get("telegram_username") or ""),
-        str(external_account.get("status") or "connected"),
-        str(external_account.get("cookie_text") or ""),
-        payload,
-        str(external_account.get("api_token") or ""),
-    )
 
 
 def _save_xinggong_starboard_profile_payload(
@@ -2579,32 +2504,6 @@ def _has_active_companion_voyage_command(
         str(latest_command.get("status") or "").strip()
         in COMPANION_VOYAGE_ACTIVE_COMMAND_STATUSES
     )
-
-
-def _queue_companion_command(
-    storage: Storage,
-    *,
-    profile_id: int,
-    chat_id: int,
-    text: str,
-    thread_id: Optional[int],
-    chat_type: str,
-    bot_username: str,
-    reply_to_msg_id: Optional[int] = None,
-) -> None:
-    storage.enqueue_outgoing_command(
-        profile_id=profile_id,
-        chat_id=chat_id,
-        text=text,
-        thread_id=thread_id,
-        reply_to_msg_id=reply_to_msg_id,
-        chat_type=chat_type,
-        bot_username=bot_username,
-    )
-
-
-def _is_allowed_companion_heart_tribulation_bot_id(sender_id: object) -> bool:
-    return False
 
 
 def _normalize_companion_heart_tribulation_action(value: object) -> str:
@@ -4815,10 +4714,6 @@ def _parse_iso_to_ts(raw_value: object) -> float:
     return parsed.astimezone(timezone.utc).timestamp()
 
 
-def _parse_wanling_roam_ts(raw_value: object) -> float:
-    return parse_wanling_roam_timestamp(raw_value)
-
-
 def _coerce_list_value(value: object) -> list:
     if isinstance(value, list):
         return value
@@ -4837,10 +4732,6 @@ def _resolve_wanling_roam_next_finish_at(payload: dict) -> Optional[float]:
 
 def _resolve_companion_next_run_at(payload: dict, feature_key: str) -> Optional[float]:
     return resolve_simple_cooldown_next_run_at(payload, feature_key)
-
-
-def _normalize_wild_experience_strategy(value: object) -> str:
-    return normalize_wild_experience_strategy(value)
 
 
 _ARTIFACT_AUTO_SPECS = {
@@ -5155,41 +5046,6 @@ async def _tick_artifact_auto_task(
 
 def _normalize_xinggong_starboard_target(value: object) -> str:
     return normalize_starboard_target(value)
-
-
-def _get_xinggong_starboard_plots(payload: dict) -> dict:
-    return get_starboard_plots(payload)
-
-
-def _build_xinggong_starboard_commands(
-    payload: dict, target_star: str, now: float
-) -> tuple[list[str], Optional[float]]:
-    return build_starboard_commands(payload, target_star, now)
-
-
-def _build_xinggong_starboard_pending_candidates(
-    payload: dict, target_star: str, commands: list[str]
-) -> list[str]:
-    return build_starboard_pending_candidates(payload, target_star, commands)
-
-
-def _has_pending_xinggong_starboard_command(
-    storage: Storage,
-    profile_id: int,
-    chat_id: int,
-    thread_id: Optional[int],
-    commands: list[str],
-) -> bool:
-    for command_text in commands:
-        if _has_pending_outgoing_command(
-            storage,
-            profile_id=profile_id,
-            chat_id=chat_id,
-            text=command_text,
-            thread_id=thread_id,
-        ):
-            return True
-    return False
 
 
 def _resolve_mulan_next_daily_run_at(now: float) -> float:
@@ -5977,7 +5833,6 @@ async def _run_companion_auto_scheduler(
                     return
                 await asyncio.sleep(COMPANION_AUTO_POLL_SECONDS)
                 continue
-            _disable_legacy_wild_experience(storage, int(profile_id))
             tasks = storage.list_active_companion_auto_tasks(int(profile_id))
             if task_ids is not None:
                 tasks = [
@@ -8095,8 +7950,6 @@ async def _run_companion_auto_scheduler(
                         resolved_next_run_at = panel_target
                 if resolved_next_run_at is None:
                     cancel_text = str(feature.get("command") or "")
-                    if feature_key == "wild_experience":
-                        cancel_text = f".野外历练 {_normalize_wild_experience_strategy(task.get('strategy'))}"
                     storage.cancel_pending_outgoing_commands(
                         int(profile_id),
                         int(task.get("chat_id") or 0),
@@ -8109,35 +7962,6 @@ async def _run_companion_auto_scheduler(
                         last_error=f"最新 payload 缺少{feature.get('command') or feature_key}冷却字段，已停止自动。",
                     )
                     continue
-                if feature_key == "wild_experience" and resolved_next_run_at <= now:
-                    fresh_payload = await asyncio.to_thread(
-                        _refresh_companion_payload, storage, int(profile_id)
-                    )
-                    if not fresh_payload or not isinstance(fresh_payload, dict):
-                        storage.update_companion_auto_task(
-                            task_id,
-                            next_run_at=now + 300,
-                            last_error="刷新野外历练冷却失败，5分钟后重试。",
-                        )
-                        continue
-                    payload = fresh_payload
-                    resolved_next_run_at = _resolve_companion_next_run_at(
-                        fresh_payload, feature_key
-                    )
-                    if resolved_next_run_at is None:
-                        cancel_text = f".野外历练 {_normalize_wild_experience_strategy(task.get('strategy'))}"
-                        storage.cancel_pending_outgoing_commands(
-                            int(profile_id),
-                            int(task.get("chat_id") or 0),
-                            text=cancel_text,
-                        )
-                        storage.update_companion_auto_task(
-                            task_id,
-                            enabled=0,
-                            next_run_at=0,
-                            last_error="最新 payload 缺少野外历练冷却字段，已停止自动。",
-                        )
-                        continue
                 if resolved_next_run_at > now:
                     storage.update_companion_auto_task(
                         task_id,
@@ -8159,28 +7983,6 @@ async def _run_companion_auto_scheduler(
                     int(task.get("thread_id")) if task.get("thread_id") else None
                 )
                 command_text = str(feature.get("command") or "").strip()
-                if feature_key == "wild_experience":
-                    wild_strategy = _normalize_wild_experience_strategy(task.get("strategy"))
-                    command_text = f".野外历练 {wild_strategy}"
-                    gate = build_exploration_route_gate(
-                        storage,
-                        profile_id=int(profile_id),
-                        chat_id=chat_id,
-                        thread_id=thread_id,
-                        chat_type=str(task.get("chat_type") or "group"),
-                        bot_username=str(task.get("bot_username") or ""),
-                        high_risk=wild_strategy == "深入",
-                        now=now,
-                    )
-                    if not gate.get("allowed"):
-                        storage.update_companion_auto_task(
-                            task_id,
-                            next_run_at=float(gate.get("next_time") or now + 300),
-                            last_error=(
-                                f"天星宗探索 gate 阻断：{gate.get('reason') or '等待改命 探索确认'}"
-                            ),
-                        )
-                        continue
                 if feature_key in COMPANION_VOYAGE_PREFLIGHT_SIMPLE_FEATURES:
                     voyage_target = _resolve_active_companion_voyage_target(
                         storage,
@@ -8284,6 +8086,17 @@ async def _run_companion_auto_scheduler(
             logger.exception(
                 "Companion auto scheduler error for profile=%s: %s", profile_id, exc
             )
+            # 和上面作用域拦截同理：抛异常的那个任务不往后推，下一轮又在它身上中断，排在后面的任务全轮不到
+            if current_task_id:
+                try:  # 这里再抛就会冲出 while，整个调度协程停掉
+                    storage.update_companion_auto_task(
+                        current_task_id,
+                        # 一分钟就够让后面的任务先跑；推太久会耽误零点开钓这类准点任务
+                        next_run_at=time.time() + COMPANION_AUTO_SCOPE_BLOCK_BACKOFF_SECONDS,
+                        last_error=f"执行出错：{str(exc)[:160]}；{COMPANION_AUTO_SCOPE_BLOCK_BACKOFF_SECONDS} 秒后重试。",
+                    )
+                except Exception:
+                    logger.exception("Parking failed companion task %s failed", current_task_id)
             if run_once:
                 raise
             await asyncio.sleep(10)
@@ -9668,94 +9481,11 @@ async def run_queue_backed_schedules_once(
         await _run_divination_batch_scheduler(client, storage, run_once=True)
 
 
-SECT_FEATURE_REPLY_WHITELISTS = {
-    "huangfeng": {
-        ".小药园",
-        ".播种",
-        ".采药",
-        ".除草",
-        ".除虫",
-        ".浇水",
-        ".扩建药园",
-    },
-    "xingong": {
-        ".启阵",
-        ".助阵",
-        ".观星台",
-        ".牵引星辰",
-        ".收集精华",
-        ".安抚星辰",
-        ".观星",
-        ".改换星移",
-        ".我的侍妾",
-        ".每日问安",
-    },
-    "lingxiao": {
-        ".凌霄宫",
-        ".天阶状态",
-        ".问心台",
-        ".登天阶",
-        ".引九天罡风",
-        ".借天门势",
-    },
-    "taiyi": {".引道", ".神识冲击"},
-    "wanling": {
-        ".寻觅灵兽",
-        ".我的灵兽",
-        ".喂养",
-        ".灵兽出战",
-        ".灵兽休息",
-        ".一键放养",
-        ".灵兽偷菜",
-        ".探渊",
-    },
-    "luoyun": {".灵树状态", ".灵树灌溉", ".协同守山", ".采摘灵果"},
-    "yinluo": {
-        ".我的阴罗幡",
-        ".升级阴罗幡",
-        ".每日献祭",
-        ".化功为煞",
-        ".血洗山林",
-        ".召唤魔影",
-        ".囚禁魂魄",
-        ".安抚幡灵",
-        ".收取精华",
-        ".下咒",
-        ".收割",
-    },
-    "yuanying": {
-        ".元婴状态",
-        ".元婴出窍",
-        ".元婴闭关",
-        ".元婴归窍",
-        ".问道",
-        ".参悟功法",
-    },
-    "hehuan": {
-        ".闭关双修",
-        ".缔结同参",
-        ".双修 温养",
-        ".种下心印",
-        ".双修 采补",
-        ".挣脱心印",
-        ".结印",
-    },
-}
-
-
 class BaseExecutor(ABC):
     key = "base"
 
     async def startup(self, client: object, storage: Storage) -> None:
         return None
-
-    def _expected_profile_user_id(self, context: EventContext) -> str:
-        binding_user_id = (
-            context.chat_binding.telegram_user_id if context.chat_binding else ""
-        )
-        return binding_user_id or (
-            context.profile.telegram_user_id if context.profile else ""
-        )
 
     async def _bot_message_targets_profile(
                         self, context: EventContext, storage: Storage
@@ -9921,7 +9651,7 @@ class FanrenExecutor(BaseExecutor):
                             profile_id=context.profile.id if context.profile else None,
                             thread_id=context.thread_id,
                         )
-                return await self._handle_command(context, db)
+                return await self._handle_command(context, db, storage)
 
             if (
                 context.is_bot_sender
@@ -10108,7 +9838,7 @@ class FanrenExecutor(BaseExecutor):
             raw_text=context.text,
         )
 
-    async def _handle_command(self, context: EventContext, db: SQLiteCompatDb) -> bool:
+    async def _handle_command(self, context: EventContext, db: SQLiteCompatDb, storage: Storage) -> bool:
         parts = context.text.split(maxsplit=2)
         action = parts[1].lower() if len(parts) > 1 else "status"
         payload = parts[2].strip() if len(parts) > 2 else ""
@@ -10365,15 +10095,6 @@ class SectExecutor(BaseExecutor):
 
     def __init__(self) -> None:
         self._runner_started = False
-
-    def _reply_matches_whitelist(self, reply_text: str, feature_key: str) -> bool:
-        reply_text = (reply_text or "").strip()
-        if not reply_text:
-            return False
-        for command in SECT_FEATURE_REPLY_WHITELISTS.get(feature_key, set()):
-            if reply_text == command or reply_text.startswith(f"{command} "):
-                return True
-        return False
 
     async def startup(self, client: object, storage: Storage) -> None:
         if self._runner_started:
@@ -11518,77 +11239,6 @@ class GeneralGameExecutor(BaseExecutor):
                 pending_command_msg_id=0,
             )
         return
-
-    async def _maybe_resume_idle_divination_batch(
-        self,
-        context: EventContext,
-        storage: Storage,
-        batch: dict,
-        planned_rounds: int,
-    ) -> bool:
-        if planned_rounds <= 0:
-            storage.finish_divination_batch(int(batch["id"]), status="completed")
-            return True
-
-        pending_command_msg_id = int(batch.get("pending_command_msg_id") or 0)
-        if pending_command_msg_id:
-            return False
-
-        completed_count = max(int(batch.get("completed_count") or 0), 0)
-        if completed_count >= planned_rounds:
-            storage.finish_divination_batch(int(batch["id"]), status="completed")
-            return True
-
-        thread_id = int(batch.get("thread_id")) if batch.get("thread_id") else None
-        latest_command = storage.get_latest_outgoing_command(
-            int(batch.get("chat_id") or context.chat_id),
-            profile_id=context.profile.id,
-            text=DIVINATION_COMMAND,
-            thread_id=thread_id,
-        )
-        if latest_command:
-            latest_status = str(latest_command.get("status") or "").strip()
-            latest_updated_at = float(latest_command.get("updated_at") or 0)
-            batch_updated_at = float(batch.get("updated_at") or 0)
-            if _has_pending_outgoing_command(
-                storage,
-                profile_id=context.profile.id,
-                chat_id=int(batch.get("chat_id") or context.chat_id),
-                text=DIVINATION_COMMAND,
-                thread_id=thread_id,
-            ):
-                return True
-            if (
-                latest_status in OUTGOING_CONFIRMED_STATUSES
-                and latest_updated_at >= batch_updated_at
-            ):
-                return True
-
-        storage.enqueue_outgoing_command(
-            profile_id=context.profile.id,
-            chat_id=int(batch.get("chat_id") or context.chat_id),
-            text=DIVINATION_COMMAND,
-            thread_id=thread_id,
-            chat_type=str(batch.get("chat_type") or "group"),
-            bot_username=str(batch.get("bot_username") or ""),
-        )
-        return True
-
-    async def _send(self, context: EventContext, command_text: str) -> bool:
-        await send_message_with_thread_fallback(
-            context.client,
-            context.chat_id,
-            command_text,
-            thread_id=context.thread_id,
-            storage=None,
-            profile_id=context.profile.id if context.profile else None,
-            bot_username=(
-                context.chat_binding.bot_username if context.chat_binding else ""
-            ),
-            log_prefix="Runtime executor",
-        )
-        await context.reply(f"执行结果: sent `{command_text}`")
-        return True
 
     async def _handle_huangfeng_command(
         self, context: EventContext, db: SQLiteCompatDb, payload: str

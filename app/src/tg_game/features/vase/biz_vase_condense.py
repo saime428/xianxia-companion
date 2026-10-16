@@ -12,7 +12,6 @@ from tg_game.features.companion.biz_companion_voyage import (
 
 FEATURE_KEY = "vase_condense_daily"
 CONDENSE_COMMAND = ".掌天瓶 凝液"
-NURTURE_COMMAND = ".掌天瓶 养树"
 AWAIT_REPLY_STATE = "vase_await_condense_reply"
 # 任务 strategy 存跟发项后缀（可带参数，如 "药园 3"）；"" = 只凝液，绿液自己支配。
 # 白名单取自官方指令表：养木/养树/养竹/化竹 无参数，其余需要目标或编号。

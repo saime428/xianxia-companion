@@ -104,22 +104,6 @@ async def has_authorized_session(
     return False
 
 
-async def resolve_authorized_session_name(
-    session_name: str = "", allow_fallback: bool = True
-) -> str:
-    if session_name and not allow_fallback:
-        return _session_name(session_name)
-    for candidate in _session_candidates(session_name, allow_fallback=allow_fallback):
-        client = build_client(candidate, save_entities=False)
-        await client.connect()
-        try:
-            if await client.is_user_authorized():
-                return candidate
-        finally:
-            await _graceful_disconnect(client)
-    return _session_name(session_name)
-
-
 async def send_login_code(phone: str, session_name: str = "") -> dict:
     client = build_client(session_name)
     await client.connect()

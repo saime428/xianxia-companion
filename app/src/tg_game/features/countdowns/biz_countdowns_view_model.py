@@ -23,7 +23,6 @@ from tg_game.features.artifact.biz_artifact_trial import (
 from tg_game.features.companion.biz_companion_cooldown import (
     DIVINATION_CHAIN_FEATURE_KEY,
     DREAM_SEEK_FEATURE_KEY,
-    WILD_EXPERIENCE_FEATURE_KEY,
 )
 from tg_game.features.companion.biz_companion_voyage import (
     COMPANION_VOYAGE_FEATURE_KEY,
@@ -293,7 +292,6 @@ def build_auto_task_countdown_items(
         ),
         DREAM_SEEK_FEATURE_KEY: ("自动入梦寻图", "三界游历", "/modules/other", "dream"),
         DIVINATION_CHAIN_FEATURE_KEY: ("自动天机代卜", "三界游历", "/modules/other", "divination"),
-        WILD_EXPERIENCE_FEATURE_KEY: ("自动野外历练", "三界游历", "/modules/other", "wild"),
         biz_vase_condense.FEATURE_KEY: ("自动凝液养树", "三界游历", "/modules/other", "vase"),
         biz_sword_formation.FEATURE_KEY: ("自动布剑阵", "三界游历", "/modules/other", "sword"),
         biz_soul_cultivation.FEATURE_KEY: ("自动元神修炼", "闭关洞府", "/modules/cultivation", "soul"),
@@ -382,8 +380,6 @@ def build_auto_task_countdown_items(
             detail = (
                 f"固定 {biz_luoyun_spirit_tree_daily_auto.normalize_run_time(strategy)}"
             )
-        elif feature_key == WILD_EXPERIENCE_FEATURE_KEY:
-            detail = f"策略 {strategy or '均衡'}"
         elif feature_key == COMPANION_VOYAGE_FEATURE_KEY:
             detail = f"航线 {normalize_companion_voyage_strategy(strategy)}"
         elif feature_key == mulan_feature.MULAN_AUTO_SUPPORT_FEATURE_KEY:

@@ -69,6 +69,32 @@ async def main() -> None:
         assert queued(storage, profile.id) == [TOUCH], queued(storage, profile.id)
         await run_round(client, storage)  # and it stays quiet: no more exceptions, no duplicate send
         assert queued(storage, profile.id) == [TOUCH], queued(storage, profile.id)
+
+        # 别的异常（不是作用域拦截）也一样：抛异常的任务往后推，排在后面的任务照跑（审查 10-16）
+        other = storage.create_profile("t2")
+        storage.create_chat_binding(other.id, CHAT, bot_username="fanrenxiuxian_bot")
+        for feature_key, strategy in ((executors.ARTIFACT_TOUCH_FEATURE_KEY, f"7200|{TOUCH}"), (executors.COMPANION_VOYAGE_FEATURE_KEY, "均衡")):
+            storage.upsert_companion_auto_task(profile_id=other.id, chat_id=CHAT, feature_key=feature_key, enabled=True, strategy=strategy, bot_username="fanrenxiuxian_bot")
+        original = storage.enqueue_outgoing_command
+
+        def flaky(*args, **kwargs):
+            text = kwargs.get("text", args[2] if len(args) > 2 else "")
+            if str(text).startswith(".我的侍妾"):
+                raise RuntimeError("boom")
+            return original(*args, **kwargs)
+
+        storage.enqueue_outgoing_command = flaky
+        client2 = SimpleNamespace(_tg_game_profile_id=other.id, _tg_game_storage=storage)
+        try:
+            await run_round(client2, storage)
+            raise AssertionError("expected the voyage task to raise")
+        except RuntimeError as exc:
+            assert str(exc) == "boom", exc
+        voyage = task(storage, other.id, executors.COMPANION_VOYAGE_FEATURE_KEY)
+        assert float(voyage["next_run_at"]) - time.time() > executors.COMPANION_AUTO_SCOPE_BLOCK_BACKOFF_SECONDS - 5, voyage
+        assert "执行出错" in voyage["last_error"] and voyage["enabled"], voyage["last_error"]
+        await run_round(client2, storage)
+        assert queued(storage, other.id) == [TOUCH], queued(storage, other.id)
     print("scheduler scope block: ok")
 
 

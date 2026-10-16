@@ -128,7 +128,13 @@ def _settlement_route_from_text(text: str) -> str:
 
 def _duration_until(text: str, now: float, default_seconds: int) -> float:
     duration = parse_chinese_duration_seconds(text)
-    return now + float(duration if duration > 0 else default_seconds)
+    if duration > 0:
+        return now + float(duration)
+    # 「还需等待 0分钟」是不到一分钟就到期，不是没写时长：10-16 06:09 按默认 8 小时记，
+    # 野外历练（连带排在后面的小号）白等到 14:09
+    if re.search(r"\d+\s*(?:天|小时|分钟|秒)", str(text or "")):
+        return now + 60.0
+    return now + float(default_seconds)
 
 
 def _explicit_duration_until(text: str, now: float) -> float:

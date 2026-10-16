@@ -6,7 +6,6 @@ from tg_game.game_clock import game_day, game_time_text
 
 
 PAGODA_REQUEST_LEASE_SECONDS = 5 * 60
-PAGODA_INTERRUPTED_ERROR = "闯塔执行进程已中断，未自动重试；请重新发起。"
 ACTIVE_REQUEST_STATUSES = {"queued", "resolving", "running"}
 
 

@@ -1,54 +1,16 @@
-import asyncio
-import json
-import time
 import logging
-import subprocess
-import re
-from dataclasses import replace
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote_plus
 import biz_fanren_game
-import biz_fishing_game
 import biz_small_world_game
-from tg_game import pagoda_auto
 import biz_sect_game
-from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import Request
 from fastapi.templating import Jinja2Templates
-from tg_game.clients.asc_client import AscAuthError
 from tg_game.config import get_settings
-from tg_game.module_commands import MODULE_COMMANDS
-from tg_game.features.artifact.biz_artifact_touch_auto import (
-    ARTIFACT_TOUCH_AWAIT_REPLY_STATE,
-    ARTIFACT_TOUCH_BOT_COOLDOWN_STATE,
-    ARTIFACT_TOUCH_DEFAULT_INTERVAL_SECONDS,
-    ARTIFACT_TOUCH_FEATURE_KEY,
-    ARTIFACT_TOUCH_MIN_INTERVAL_SECONDS,
-)
 from tg_game.features.artifact.biz_artifact_nurture import (
-    ARTIFACT_NURTURE_AWAIT_REPLY_STATE,
-    ARTIFACT_NURTURE_BOT_COOLDOWN_STATE,
-    ARTIFACT_NURTURE_DEFAULT_COOLDOWN_SECONDS,
-    ARTIFACT_NURTURE_DEFAULT_TARGET_NAME,
-    ARTIFACT_NURTURE_FEATURE_KEY,
     ARTIFACT_NURTURE_REPLY_WAIT_SECONDS,
-    ARTIFACT_NURTURE_STOPPED_RESOURCES_STATE,
-    build_artifact_nurture_resource_state,
 )
-from tg_game.features.artifact.biz_artifact_trial import (
-    ARTIFACT_TRIAL_AWAIT_REPLY_STATE,
-    ARTIFACT_TRIAL_BOT_COOLDOWN_STATE,
-    ARTIFACT_TRIAL_DEFAULT_ARTIFACT_NAME,
-    ARTIFACT_TRIAL_FEATURE_KEY,
-    ARTIFACT_TRIAL_STOPPED_RESOURCES_STATE,
-    build_artifact_trial_resource_state,
-)
-from tg_game.features.companion.biz_companion_cooldown import normalize_wild_experience_strategy
 from tg_game.features.companion.biz_companion_voyage import (
-    COMPANION_VOYAGE_STRATEGY_OPTIONS,
     normalize_companion_voyage_strategy,
 )
 from tg_game.features.countdowns.biz_countdowns_view_model import (
@@ -63,7 +25,6 @@ from tg_game.features.countdowns.biz_countdowns_view_model import (
     build_wanling_roam_countdown_items as _countdown_build_wanling_roam_countdown_items,
     build_xinggong_slot_countdown_items as _countdown_build_xinggong_slot_countdown_items,
     format_countdown_display_for_now as _countdown_format_display_for_now,
-    sort_countdown_items,
 )
 from tg_game.features.fishing.biz_fishing_view_model import build_fishing_view
 from tg_game.features.small_world.biz_small_world_view_model import (
@@ -75,7 +36,6 @@ from tg_game.features.sect.biz_sect_view_model import (
     NO_SECT_NAMES as _sect_NO_SECT_NAMES,
     build_sect_daily_view as _sect_build_sect_daily_view,
     build_sect_recent_reply_text as _sect_build_sect_recent_reply_text,
-    build_sect_treasury_items as _sect_build_sect_treasury_items,
     has_joined_sect as _sect_has_joined_sect,
     is_sect_related_message as _sect_is_sect_related_message,
     is_tianxing_sect_profile as _sect_is_tianxing_sect_profile,
@@ -85,7 +45,6 @@ from tg_game.features.sect.biz_sect_view_model import (
 )
 from tg_game.features import biz_mulan_feature as mulan_feature
 from tg_game.features.stock.biz_stock_view_model import (
-    STOCK_HISTORY_RANGE_OPTIONS,
     build_stock_history_response as _stock_build_stock_history_response,
     build_stock_trend_points as _stock_build_stock_trend_points,
     clean_stock_name as _stock_clean_stock_name,
@@ -97,25 +56,7 @@ from tg_game.features.stock.biz_stock_page_state import (
     build_stock_view as _stock_build_stock_view,
     latest_stock_player_reply_view as _stock_latest_stock_player_reply_view,
 )
-from tg_game.features.tianxing import (
-    get_status_snapshot as get_tianxing_status_snapshot,
-    send_command as send_tianxing_command,
-    set_profile_config as set_tianxing_profile_config,
-    start_craft_loop as start_tianxing_craft_loop,
-    start_or_advance_timeline as start_tianxing_timeline,
-    stop_craft_loop as stop_tianxing_craft_loop,
-)
-from tg_game.features.tianxing.biz_tianxing_reward_summary import (
-    build_tianxing_reward_marker_days as _build_tianxing_reward_marker_days,
-    build_tianxing_today_exploration_rewards as _build_tianxing_today_exploration_rewards,
-    escape_sql_like as _escape_sql_like,
-    normalize_tianxing_day_key as _normalize_tianxing_day_key,
-    shift_tianxing_day_key as _shift_tianxing_day_key,
-    tianxing_day_key_from_timestamp as _tianxing_day_key_from_timestamp,
-)
 from tg_game.features.xinggong.biz_xinggong_star_board import (
-    XINGGONG_STARBOARD_DEFAULT_STAR,
-    XINGGONG_STARBOARD_FEATURE_KEY,
     XINGGONG_STARBOARD_PULL_PREFIX,
     is_starboard_insufficient_reply,
     is_starboard_pull_command_for_target,
@@ -123,37 +64,11 @@ from tg_game.features.xinggong.biz_xinggong_star_board import (
     normalize_starboard_target,
 )
 from tg_game.features.xinggong import biz_xinggong_miniapp as xinggong_miniapp
-from tg_game.features.wanling.biz_wanling_roam import (
-    WANLING_ROAM_AUTO_AFTER_RETURN_SECONDS,
-    WANLING_ROAM_COMMAND,
-    WANLING_ROAM_COMMAND_SEQUENCE,
-    WANLING_ROAM_FEATURE_KEY,
-    build_wanling_roam_cancel_commands,
-    build_wanling_roam_command_sequence,
-    list_spirit_beast_names,
-    normalize_wanling_roam_beast_names,
-    pack_wanling_roam_strategy,
-)
 from tg_game.features.wanling.biz_wanling_view_model import (
     build_wanling_roam_auto_view as _wanling_build_wanling_roam_auto_view,
     build_wanling_roam_config_view as _wanling_build_wanling_roam_config_view,
     build_wanling_roam_state as _wanling_build_wanling_roam_state,
 )
-from tg_game.runtime_status import (
-    build_runtime_status,
-    compute_runtime_code_fingerprint,
-    load_runtime_status,
-)
-from tg_game.sect_command_guard import SectCommandScopeError
-from tg_game.sect_features import SECT_FEATURES
-from tg_game.features.estate.biz_estate_miniapp import (
-    is_estate_miniapp_hunt_limit_reached,
-    mark_estate_miniapp_hunt_limit_reached,
-    queue_estate_miniapp_hunt_request,
-)
-from tg_game.features.estate import biz_estate_hunt_daily_auto
-from tg_game.features.tianji_trial import queue_tianji_trial_request
-from tg_game.features.tianji_trial import biz_tianji_trial_daily_auto
 from tg_game.features.tianji_trial.biz_tianji_trial_encounter_state import (
     build_tianji_encounter_state as _tianji_build_tianji_encounter_state,
 )
@@ -166,61 +81,15 @@ from tg_game.features.tianji_trial.biz_tianji_trial_remnant_state import (
     build_tianji_remnant_state as _tianji_build_tianji_remnant_state,
     get_latest_tianji_remnant_reply as _tianji_get_latest_tianji_remnant_reply,
 )
-from tg_game.services import module_registry
-from tg_game.services.cultivation_sync import sync_cultivation_session
 from tg_game.services.external_sync import (
     ASC_PROVIDER,
-    get_cultivator_lookup_candidates,
-    get_effective_external_cookie,
     get_external_keepalive_poll_seconds,
-    is_authorized_profile,
-    is_external_account_expired,
-    mark_external_account_failure,
     read_cached_external_payload,
-    should_keep_external_session_fresh,
-    sync_external_account,
-)
-from tg_game.services.profile_schedules import (
-    stop_current_profile_schedules as _stop_current_profile_schedules,
 )
 from tg_game.storage import CompatDb, Storage
-from tg_game.telegram.account import (
-    get_authorized_account_info,
-    has_authorized_session,
-    logout_account,
-    send_login_code,
-    verify_login_code,
-    verify_login_password,
-)
 from tg_game.web.biz_web_display_formatting import (
-    FISHING_REQUIRED_ROD_NAME,
-    SCENERY_CODE_NAME_MAP,
-    SHANGHAI_TZ,
-    build_equipped_artifact_details as _build_equipped_artifact_details,
-    build_payload_stat_items as _build_payload_stat_items,
-    coerce_json_dict as _coerce_json_dict,
-    coerce_json_list as _coerce_json_list,
     cooldown_target_timestamp as _cooldown_target_timestamp,
-    equipped_artifact_names_text as _equipped_artifact_names_text,
-    extract_reply_field as _extract_reply_field,
-    first_equipped_artifact_name as _first_equipped_artifact_name,
-    format_cooldown_from_last as _format_cooldown_from_last,
-    format_datetime_display as _format_datetime_display,
-    format_datetime_display_seconds as _format_datetime_display_seconds,
     format_external_artifacts as _format_external_artifacts,
-    format_market_effects as _format_market_effects,
-    format_payload_display_text as _format_payload_display_text,
-    format_remaining_delta as _format_remaining_delta,
-    parse_chinese_duration_seconds as _parse_chinese_duration_seconds,
-    payload_name_list as _payload_name_list,
-    payload_name_summary as _payload_name_summary,
-    payload_named_entries as _payload_named_entries,
-    payload_stat_label as _payload_stat_label,
-    parse_optional_int as _parse_optional_int,
-    profile_has_fishing_rod as _profile_has_fishing_rod,
-    recipe_craft_name as _recipe_craft_name,
-    resolve_scenery_display_name as _resolve_scenery_display_name,
-    stringify_payload_stat_value as _stringify_payload_stat_value,
 )
 from tg_game.web.biz_artifact_view_model import (
     build_artifact_nurture_auto_view as _artifact_build_artifact_nurture_auto_view,
@@ -242,11 +111,6 @@ from tg_game.web.biz_artifact_view_model import (
 )
 from tg_game.web.biz_companion_view_model import (
     COMPANION_AUTO_FEATURES,
-    COMPANION_HEART_TRIBULATION_ACTIONS,
-    COMPANION_HEART_TRIBULATION_COMMAND,
-    COMPANION_PANEL_COMMAND,
-    COMPANION_VOYAGE_RETURN_COMMAND,
-    COMPANION_VOYAGE_STATUS_COMMAND,
     build_companion_auto_view as _companion_build_companion_auto_view,
     build_companion_heart_tribulation_view as _companion_build_companion_heart_tribulation_view,
     build_companion_view as _companion_build_companion_view,
@@ -254,7 +118,6 @@ from tg_game.web.biz_companion_view_model import (
     build_estate_hunt_daily_auto_view as _companion_build_estate_hunt_daily_auto_view,
     build_pagoda_auto_view as _companion_build_pagoda_auto_view,
     build_tianji_trial_daily_auto_view as _companion_build_tianji_trial_daily_auto_view,
-    build_wild_experience_view as _companion_build_wild_experience_view,
     format_companion_cooldown_display as _companion_format_companion_cooldown_display,
     resolve_active_companion_payload_and_status as _companion_resolve_active_companion_payload_and_status,
     resolve_latest_companion_cooldown_target as _companion_resolve_latest_companion_cooldown_target,
@@ -271,7 +134,6 @@ from tg_game.web.biz_cultivation_view_model import (
     get_profile_cultivation_binding as _cultivation_get_profile_cultivation_binding,
 )
 from tg_game.web.biz_dungeon_view_model import (
-    DUNGEON_DEFINITIONS,
     build_dungeon_messages as _dungeon_build_dungeon_messages,
     extract_dungeon_cleanup_targets as _dungeon_extract_dungeon_cleanup_targets,
     extract_dungeon_command_buttons as _dungeon_extract_dungeon_command_buttons,
@@ -284,24 +146,14 @@ from tg_game.web.biz_estate_view_model import (
     build_estate_miniapp_hunt_button as _estate_build_estate_miniapp_hunt_button,
 )
 from tg_game.web.biz_inventory_view_model import (
-    build_inventory_bulk_sell_command as _build_inventory_bulk_sell_command,
-    build_inventory_items_from_payload as _build_inventory_items_from_payload,
     build_profile_inventory_search as _inventory_build_profile_inventory_search,
-    format_market_price as _format_market_price,
-    inventory_item_matches_query as _inventory_item_matches_query,
-    item_type_label as _item_type_label,
-    market_price_preview as _market_price_preview,
-    market_price_sort_key as _market_price_sort_key,
     profile_display_label as _inventory_profile_display_label,
     build_profile_telegram_name_map as _inventory_build_profile_telegram_name_map,
     read_telegram_session_display_name as _inventory_read_telegram_session_display_name,
     resolve_profile_telegram_name as _inventory_resolve_profile_telegram_name,
-    reverse_market_price_sort_key as _reverse_market_price_sort_key,
     telegram_session_file_path as _inventory_telegram_session_file_path,
 )
 from tg_game.web.module_availability import (
-    MAJOR_STAGE_ORDER,
-    SMALL_WORLD_MIN_MAJOR_STAGE,
     is_small_world_module_available as _module_is_small_world_module_available,
     is_yuanying_stage as _module_is_yuanying_stage,
     major_stage_rank as _module_major_stage_rank,
@@ -325,7 +177,6 @@ from tg_game.web.biz_other_play_view_model import (
     build_pagoda_view as _other_build_pagoda_view,
     build_taiyi_view as _other_build_taiyi_view,
 )
-from tg_game.web.pagination import build_pagination_numbers as _build_pagination_numbers
 from tg_game.web.biz_tianxing_wild_deep_log import (
     WILD_DEEP_COMMAND_PREFIX as _wild_deep_WILD_DEEP_COMMAND_PREFIX,
     build_wild_deep_log_export_result as _wild_deep_build_wild_deep_log_export_result,
@@ -335,9 +186,7 @@ from tg_game.web.biz_tianxing_wild_deep_log import (
     wild_deep_time_bucket as _wild_deep_time_bucket_impl,
 )
 from tg_game.web.biz_xinggong_view_model import (
-    build_companion_gift_items as _xinggong_build_companion_gift_items,
     build_xinggong_starboard_auto_view as _xinggong_build_xinggong_starboard_auto_view,
-    build_xinggong_state as _xinggong_build_xinggong_state,
 )
 
 
@@ -375,7 +224,6 @@ __all__ = [
     '_build_tianji_trial_daily_auto_view',
     '_build_estate_hunt_daily_auto_view',
     '_normalize_companion_voyage_strategy',
-    '_normalize_wild_experience_strategy',
     '_normalize_artifact_touch_command',
     '_normalize_artifact_touch_interval',
     '_pack_artifact_touch_strategy',
@@ -415,7 +263,6 @@ __all__ = [
     '_build_tianxing_countdown_items',
     '_build_small_world_countdown_items',
     '_resolve_auto_feature_next_run_at',
-    '_build_wild_experience_view',
     '_resolve_companion_auto_next_run_at',
     'OTHER_PLAY_DEFINITIONS',
     'MULAN_AUTO_SUPPORT_FEATURE_KEY',
@@ -686,10 +533,6 @@ def _build_estate_hunt_daily_auto_view(raw_task: Optional[dict]) -> dict:
 
 def _normalize_companion_voyage_strategy(value: object) -> str:
     return normalize_companion_voyage_strategy(value)
-
-
-def _normalize_wild_experience_strategy(value: object) -> str:
-    return normalize_wild_experience_strategy(value)
 
 
 def _normalize_artifact_touch_command(value: object) -> str:
@@ -1031,14 +874,6 @@ def _resolve_auto_feature_next_run_at(payload: dict, feature_key: str) -> Option
         companion_payload,
         payload_field,
         cooldown_hours,
-    )
-
-
-def _build_wild_experience_view(payload: dict, raw_task: Optional[dict]) -> dict:
-    return _companion_build_wild_experience_view(
-        payload,
-        raw_task,
-        now_ts=biz_fanren_game.time.time(),
     )
 
 

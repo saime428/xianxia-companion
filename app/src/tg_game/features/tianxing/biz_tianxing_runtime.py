@@ -11,7 +11,6 @@ from tg_game.storage import (
 
 from .biz_tianxing_parser import (
     TIANXING_CHANGE_FATE_SECONDS,
-    TIANXING_PREDICTION_SECONDS,
     TIANXING_ROUTES,
     TIANXING_STARS,
     command_for_action,
@@ -547,6 +546,10 @@ def handle_bot_reply(
 
     parent = storage.get_bound_message(chat_id, int(reply_to_msg_id), int(profile_id))
     if not parent or int(parent.get("is_bot") or 0) or str(parent.get("direction") or "") != "outgoing":
+        if not family and not looks_like_tianxing_text(text):
+            # 路由把群里每条回复都交过来，别人指令的回包一天七千多条（10-16 占了库的一半）。只留认不上的
+            # 天星回包当诊断（10-13 改命回天没认领就是靠它查出来的）；玄骨题面另有 xuangu_quiz_logs
+            return {"handled": False, "reason": "parent_not_profile_outgoing"}
         append_audit_event(
             storage,
             profile_id=profile_id,

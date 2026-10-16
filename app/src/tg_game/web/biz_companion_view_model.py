@@ -7,9 +7,6 @@ from tg_game.features.estate import biz_estate_hunt_daily_auto
 from tg_game.features.tianji_trial import biz_tianji_trial_daily_auto
 from tg_game.features.companion.biz_companion_cooldown import (
     SIMPLE_COOLDOWN_AUTO_FEATURES,
-    WILD_EXPERIENCE_FEATURE_KEY,
-    WILD_EXPERIENCE_STRATEGY_OPTIONS,
-    normalize_wild_experience_strategy,
 )
 from tg_game.features.companion.biz_companion_roster import (
     list_companions,
@@ -31,7 +28,6 @@ from tg_game.features.countdowns.biz_countdowns_view_model import (
 )
 from tg_game.web.biz_web_display_formatting import (
     coerce_json_dict,
-    cooldown_target_timestamp,
     extract_reply_field,
     format_datetime_display,
     parse_chinese_duration_seconds,
@@ -470,64 +466,6 @@ def build_companion_auto_view(
         ),
         "strategy": strategy,
         "last_error": last_error,
-    }
-
-
-def build_wild_experience_view(
-    payload: dict,
-    raw_task: Optional[dict],
-    *,
-    now_ts: Optional[float] = None,
-) -> dict:
-    task = raw_task or {}
-    feature = COMPANION_AUTO_FEATURES.get(WILD_EXPERIENCE_FEATURE_KEY) or {}
-    cooldown_hours = int(feature.get("cooldown_hours") or 0)
-    payload_field = str(
-        feature.get("payload_field") or "last_wild_experience_time"
-    ).strip()
-    has_cooldown_field = payload_field in (payload or {})
-    last_raw_value = (payload or {}).get(payload_field)
-    cooldown_target = cooldown_target_timestamp(last_raw_value, cooldown_hours)
-    next_run_at = float(task.get("next_run_at") or 0)
-    active = bool(task) and bool(task.get("enabled"))
-    strategy = normalize_wild_experience_strategy(task.get("strategy"))
-    last_display = "-"
-    last_dt = parse_iso_datetime(last_raw_value)
-    if last_dt:
-        last_display = last_dt.astimezone(SHANGHAI_TZ).strftime("%m-%d %H:%M")
-    now = _now_ts(now_ts)
-    cooldown_ready = bool(cooldown_target) and cooldown_target <= now
-    if not cooldown_target and not has_cooldown_field:
-        status_display = "接口未提供"
-        status_prefix = "接口未提供"
-    elif cooldown_target <= now:
-        status_display = "可历练"
-        status_prefix = "可历练"
-    else:
-        status_display = (
-            f"冷却中，剩余{format_remaining_delta(cooldown_target, now_ts=now)}"
-        )
-        status_prefix = "冷却中，剩余"
-    return {
-        "active": active,
-        "enabled": active,
-        "feature_key": WILD_EXPERIENCE_FEATURE_KEY,
-        "title": str(feature.get("label") or "野外历练"),
-        "strategy": strategy,
-        "strategy_options": list(WILD_EXPERIENCE_STRATEGY_OPTIONS),
-        "command_preview": f".野外历练 {strategy}",
-        "cooldown_target": float(cooldown_target or 0),
-        "cooldown_ready": cooldown_ready,
-        "status_display": status_display,
-        "status_prefix": status_prefix,
-        "last_experience_display": last_display,
-        "next_run_at": next_run_at,
-        "next_run_display": (
-            format_remaining_delta(next_run_at, now_ts=now)
-            if next_run_at > 0
-            else "待命"
-        ),
-        "last_error": str(task.get("last_error") or "").strip(),
     }
 
 

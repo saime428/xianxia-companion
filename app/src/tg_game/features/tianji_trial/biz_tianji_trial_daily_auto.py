@@ -9,11 +9,8 @@ REMNANT_COMMAND = TIANJI_REMNANT_COMMAND
 TRIAL_COMMAND = TIANJI_TRIAL_COMMAND
 DEFAULT_RUN_TIME = pagoda_auto.DEFAULT_RUN_TIME
 AWAIT_REMNANT_STATE = "await_remnant"
-REMNANT_REPLY_RECHECK_SECONDS = 10
-REMNANT_REPLY_TIMEOUT_SECONDS = 90
 SENT_TODAY_ERROR = "已启动今日天机试炼，使用洞府公共入口执行。"
 LIMIT_REACHED_ERROR = "今日天机试炼已达上限，等待明日固定时间。"
-AWAIT_REMNANT_ERROR = "已发送天机残痕，等待刷新今日上限。"
 
 
 def normalize_run_time(value: object) -> str:
@@ -37,23 +34,6 @@ def resolve_next_run_at(
 
 def is_same_local_day(left_ts: float, right_ts: float) -> bool:
     return pagoda_auto.is_same_local_day(left_ts, right_ts)
-
-
-def pack_await_remnant_state(started_at: float) -> str:
-    return f"{AWAIT_REMNANT_STATE}:{float(started_at or 0):.3f}"
-
-
-def unpack_await_remnant_started_at(value: object) -> float:
-    text = str(value or "").strip()
-    if text == AWAIT_REMNANT_STATE:
-        return 0.0
-    prefix = f"{AWAIT_REMNANT_STATE}:"
-    if not text.startswith(prefix):
-        return 0.0
-    try:
-        return float(text[len(prefix) :])
-    except ValueError:
-        return 0.0
 
 
 def is_awaiting_remnant(value: object) -> bool:

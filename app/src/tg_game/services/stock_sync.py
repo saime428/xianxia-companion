@@ -41,28 +41,12 @@ def is_stock_related(text: str) -> bool:
     if any(ind in t for ind in _STOCK_MARKET_INDICATORS):
         return True
     return False
-    if any(kw in t for kw in _STOCK_RELATED_KEYWORDS):
-        return True
-    if any(ind in t for ind in _STOCK_REPLY_INDICATORS):
-        return True
-    return False
 
 
 def _parse_float_text(value) -> float:
     text = str(value or "").replace(",", "").replace("灵石", "").replace("股", "")
     match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
     return float(match.group(0)) if match else 0.0
-
-
-def _normalize_command_text(value: object) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip())
-
-
-def _is_stock_snapshot_command(value: object) -> bool:
-    normalized = _normalize_command_text(value)
-    if normalized in {".股市", ".大盘"}:
-        return True
-    return normalized.startswith(".个股 ")
 
 
 def should_sync_stock_market_message(storage: Storage, message: dict) -> bool:

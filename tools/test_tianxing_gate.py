@@ -137,6 +137,24 @@ def main() -> None:
         assert parsed.get("result") == "cooldown", parsed
         assert parsed.get("current_change") == "斗法", parsed
         assert abs(float(parsed.get("current_change_until") or 0) - change_until) < 1, parsed
+
+        # 9. 10-16 06:09 实况：别路推命快到期时回「还需等待 0分钟」——是不到一分钟，不是没写时长；
+        #    原来按默认 8 小时记，野外历练白等到 14:09
+        parsed = tx.parse_tianxing_text("你已有一道关于 【斗法】 的推命尚未应验，还需等待 0分钟。", now=now)
+        assert parsed.get("result") == "cooldown" and parsed.get("current_prediction") == "斗法", parsed
+        assert float(parsed.get("current_prediction_until") or 0) - now <= 60, parsed
+        parsed = tx.parse_tianxing_text("你已有一道关于 【斗法】 的推命尚未应验，还需等待 37分钟。", now=now)
+        assert abs(float(parsed.get("current_prediction_until") or 0) - (now + 37 * 60)) < 1, parsed
+
+        # 10. 群里别人指令的回包不进审计表（10-16 一天七千多条、占了库的一半）；认不上的天星回包照记，留作诊断
+        def audit_count():
+            with storage.connect() as conn:
+                return conn.execute("select count(*) from tianxing_audit_events where event_type='reply_unattributed'").fetchone()[0]
+        before = audit_count()
+        tx.handle_bot_reply(storage, profile_id=profile.id, chat_id=CHAT, text="道友 @someone 闭关成功，修为+12", reply_to_msg_id=424242, message_id=1)
+        assert audit_count() == before, "别人的回包不该记"
+        tx.handle_bot_reply(storage, profile_id=profile.id, chat_id=CHAT, text="【改命回天】你提前布下的后手被触发", reply_to_msg_id=424243, message_id=2)
+        assert audit_count() == before + 1, "认不上的天星回包要记"
     print("test_tianxing_gate: ok")
 
 

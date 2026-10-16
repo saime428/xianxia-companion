@@ -68,7 +68,6 @@ MODULE_COMMANDS = {
         ".companion place",
         ".companion recall",
     ],
-    "market": [".market board", ".market auction", ".market bounty", ".market gamble"],
     "stock": [
         ".股市",
         ".大盘",

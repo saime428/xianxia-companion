@@ -1,9 +1,6 @@
 import asyncio
 import json
 import time
-import logging
-from dataclasses import replace
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, quote_plus
@@ -16,31 +13,20 @@ import biz_sect_game
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from starlette.middleware.gzip import GZipMiddleware
 from tg_game.clients.asc_client import AscAuthError
 from tg_game.config import get_settings
 from tg_game.module_commands import MODULE_COMMANDS
 from tg_game.features.artifact.biz_artifact_touch_auto import (
-    ARTIFACT_TOUCH_AWAIT_REPLY_STATE,
-    ARTIFACT_TOUCH_BOT_COOLDOWN_STATE,
-    ARTIFACT_TOUCH_DEFAULT_INTERVAL_SECONDS,
     ARTIFACT_TOUCH_FEATURE_KEY,
-    ARTIFACT_TOUCH_MIN_INTERVAL_SECONDS,
 )
 from tg_game.features.artifact.biz_artifact_nurture import (
-    ARTIFACT_NURTURE_AWAIT_REPLY_STATE,
-    ARTIFACT_NURTURE_BOT_COOLDOWN_STATE,
-    ARTIFACT_NURTURE_DEFAULT_COOLDOWN_SECONDS,
     ARTIFACT_NURTURE_DEFAULT_TARGET_NAME,
     ARTIFACT_NURTURE_FEATURE_KEY,
-    ARTIFACT_NURTURE_REPLY_WAIT_SECONDS,
     ARTIFACT_NURTURE_STOPPED_RESOURCES_STATE,
     build_artifact_nurture_resource_state,
 )
 from tg_game.features.artifact.biz_artifact_trial import (
-    ARTIFACT_TRIAL_AWAIT_REPLY_STATE,
-    ARTIFACT_TRIAL_BOT_COOLDOWN_STATE,
     ARTIFACT_TRIAL_DEFAULT_ARTIFACT_NAME,
     ARTIFACT_TRIAL_FEATURE_KEY,
     ARTIFACT_TRIAL_STOPPED_RESOURCES_STATE,
@@ -48,7 +34,6 @@ from tg_game.features.artifact.biz_artifact_trial import (
 )
 from tg_game.features.companion.biz_companion_cooldown import (
     SIMPLE_COOLDOWN_AUTO_FEATURES,
-    normalize_wild_experience_strategy,
 )
 from tg_game.features.vase.biz_vase_condense import (
     FEATURE_KEY as VASE_CONDENSE_FEATURE_KEY,
@@ -64,65 +49,24 @@ from tg_game.features.xinggong.biz_xinggong_divine import (
 )
 # 冷却不在天机阁 payload 里的功能，以执行器的注册表为准，别再另抄一份
 from tg_game.runtime.executors import REPLY_DRIVEN_AUTO_SPECS
-from tg_game.features.companion.biz_companion_voyage import (
-    COMPANION_VOYAGE_STRATEGY_OPTIONS,
-    normalize_companion_voyage_strategy,
-)
 from tg_game.features.beast_merge import biz_beast_merge_daily_auto
 from tg_game.features.beast_merge import biz_beast_merge_state
 from tg_game.features.battle import biz_battle_schedule
 from tg_game.features.world_boss import world_boss_runtime
 from tg_game.features.pagoda import biz_pagoda_state as pagoda_state
 from tg_game.features.countdowns.biz_countdowns_view_model import (
-    build_auto_task_countdown_items as _countdown_build_auto_task_countdown_items,
-    build_companion_voyage_countdown_items as _countdown_build_companion_voyage_countdown_items,
-    build_countdown_item_for_now as _countdown_build_item_for_now,
-    build_cultivation_countdown_items as _countdown_build_cultivation_countdown_items,
-    build_sect_countdown_items as _countdown_build_sect_countdown_items,
-    build_small_world_countdown_items as _countdown_build_small_world_countdown_items,
-    build_tianxing_countdown_items as _countdown_build_tianxing_countdown_items,
-    build_wanling_roam_countdown_items as _countdown_build_wanling_roam_countdown_items,
-    build_xinggong_slot_countdown_items as _countdown_build_xinggong_slot_countdown_items,
-    format_countdown_display_for_now as _countdown_format_display_for_now,
     sort_countdown_items,
 )
-from tg_game.features.fishing.biz_fishing_view_model import build_fishing_view
 from tg_game.features.fishing import biz_fishing_daily_auto
 from tg_game.features.fishing import biz_fishing_miniapp as fishing_miniapp
-from tg_game.features.small_world.biz_small_world_view_model import (
-    build_small_world_auto_view as _small_world_build_small_world_auto_view,
-)
 from tg_game.features.small_world.biz_small_world_auto import (
     resolve_awaited_action_command as _resolve_small_world_awaited_action_command,
 )
-from tg_game.features.sect.biz_sect_metadata import SECT_METADATA as _sect_SECT_METADATA
 from tg_game.features.sect.biz_sect_view_model import (
-    NO_SECT_NAMES as _sect_NO_SECT_NAMES,
-    build_sect_daily_view as _sect_build_sect_daily_view,
-    build_sect_recent_reply_text as _sect_build_sect_recent_reply_text,
     build_sect_treasury_items as _sect_build_sect_treasury_items,
-    has_joined_sect as _sect_has_joined_sect,
-    is_sect_related_message as _sect_is_sect_related_message,
-    is_tianxing_sect_profile as _sect_is_tianxing_sect_profile,
-    merge_sect_daily_view_with_session as _sect_merge_sect_daily_view_with_session,
-    normalize_sect_name_text as _sect_normalize_sect_name_text,
-    sect_matches_current as _sect_viewmodel_sect_matches_current,
 )
 from tg_game.features import biz_mulan_feature as mulan_feature
-from tg_game.features.stock.biz_stock_view_model import (
-    STOCK_HISTORY_RANGE_OPTIONS,
-    build_stock_history_response as _stock_build_stock_history_response,
-    build_stock_trend_points as _stock_build_stock_trend_points,
-    clean_stock_name as _stock_clean_stock_name,
-    decorate_stock_history as _stock_decorate_stock_history,
-    parse_stock_market_batch as _stock_parse_stock_market_batch,
-    resolve_stock_history_range as _stock_resolve_stock_history_range,
-)
 from tg_game.features.stock import biz_stock_miniapp
-from tg_game.features.stock.biz_stock_page_state import (
-    build_stock_view as _stock_build_stock_view,
-    latest_stock_player_reply_view as _stock_latest_stock_player_reply_view,
-)
 from tg_game.features.tianxing import (
     get_status_snapshot as get_tianxing_status_snapshot,
     send_command as send_tianxing_command,
@@ -134,36 +78,19 @@ from tg_game.features.tianxing import (
 from tg_game.features.tianxing.biz_tianxing_reward_summary import (
     build_tianxing_reward_marker_days as _build_tianxing_reward_marker_days,
     build_tianxing_today_exploration_rewards as _build_tianxing_today_exploration_rewards,
-    escape_sql_like as _escape_sql_like,
     normalize_tianxing_day_key as _normalize_tianxing_day_key,
-    shift_tianxing_day_key as _shift_tianxing_day_key,
-    tianxing_day_key_from_timestamp as _tianxing_day_key_from_timestamp,
 )
 from tg_game.features.xinggong.biz_xinggong_star_board import (
     XINGGONG_STARBOARD_DEFAULT_STAR,
     XINGGONG_STARBOARD_FEATURE_KEY,
-    XINGGONG_STARBOARD_PULL_PREFIX,
-    is_starboard_insufficient_reply,
-    is_starboard_pull_command_for_target,
-    is_starboard_success_reply,
-    normalize_starboard_target,
 )
 from tg_game.features.xinggong import biz_xinggong_miniapp as xinggong_miniapp
 from tg_game.features.wanling.biz_wanling_roam import (
-    WANLING_ROAM_AUTO_AFTER_RETURN_SECONDS,
-    WANLING_ROAM_COMMAND,
-    WANLING_ROAM_COMMAND_SEQUENCE,
     WANLING_ROAM_FEATURE_KEY,
     build_wanling_roam_cancel_commands,
-    build_wanling_roam_command_sequence,
     list_spirit_beast_names,
     normalize_wanling_roam_beast_names,
     pack_wanling_roam_strategy,
-)
-from tg_game.features.wanling.biz_wanling_view_model import (
-    build_wanling_roam_auto_view as _wanling_build_wanling_roam_auto_view,
-    build_wanling_roam_config_view as _wanling_build_wanling_roam_config_view,
-    build_wanling_roam_state as _wanling_build_wanling_roam_state,
 )
 from tg_game.runtime_status import (
     build_runtime_status,
@@ -186,17 +113,6 @@ from tg_game.features.luoyun_spirit_tree import biz_luoyun_spirit_tree_daily_aut
 from tg_game.features.luoyun_spirit_tree import (
     biz_luoyun_spirit_tree_miniapp as luoyun_spirit_tree_miniapp,
 )
-from tg_game.features.tianji_trial.biz_tianji_trial_encounter_state import (
-    build_tianji_encounter_state as _tianji_build_tianji_encounter_state,
-)
-from tg_game.features.tianji_trial.biz_tianji_trial_remnant_state import (
-    TIANJI_EXCHANGE_COMMAND_TEXT as _tianji_exchange_command_text,
-    TIANJI_EXCHANGE_FALLBACK_ITEMS as _tianji_exchange_fallback_items,
-    TIANJI_REMNANT_COMMANDS as _tianji_remnant_commands,
-    TIANJI_REMNANT_COMMAND_TEXT as _tianji_remnant_command_text,
-    build_tianji_remnant_state as _tianji_build_tianji_remnant_state,
-    get_latest_tianji_remnant_reply as _tianji_get_latest_tianji_remnant_reply,
-)
 from tg_game.services import automation_switch, group_activity, module_registry, profile_rebirth
 from tg_game.features.estate import biz_estate_constants
 from tg_game.services.cultivation_sync import sync_cultivation_session
@@ -204,7 +120,6 @@ from tg_game.services.external_sync import (
     ASC_PROVIDER,
     get_cultivator_lookup_candidates,
     get_effective_external_cookie,
-    get_external_keepalive_poll_seconds,
     is_authorized_profile,
     is_external_account_expired,
     mark_external_account_failure,
@@ -225,117 +140,36 @@ from tg_game.telegram.account import (
     verify_login_password,
 )
 from tg_game.web.biz_web_display_formatting import (
-    FISHING_REQUIRED_ROD_NAME,
-    SCENERY_CODE_NAME_MAP,
-    SHANGHAI_TZ,
     build_equipped_artifact_details as _build_equipped_artifact_details,
-    build_payload_stat_items as _build_payload_stat_items,
     coerce_json_dict as _coerce_json_dict,
-    coerce_json_list as _coerce_json_list,
     cooldown_target_timestamp as _cooldown_target_timestamp,
     equipped_artifact_names_text as _equipped_artifact_names_text,
-    extract_reply_field as _extract_reply_field,
-    first_equipped_artifact_name as _first_equipped_artifact_name,
-    format_cooldown_from_last as _format_cooldown_from_last,
-    format_datetime_display as _format_datetime_display,
     format_datetime_display_seconds as _format_datetime_display_seconds,
-    format_external_artifacts as _format_external_artifacts,
-    format_market_effects as _format_market_effects,
     format_payload_display_text as _format_payload_display_text,
-    format_remaining_delta as _format_remaining_delta,
-    format_sect_position as _format_sect_position,
-    parse_chinese_duration_seconds as _parse_chinese_duration_seconds,
-    payload_name_list as _payload_name_list,
     payload_name_summary as _payload_name_summary,
     payload_named_entries as _payload_named_entries,
-    payload_stat_label as _payload_stat_label,
     parse_optional_int as _parse_optional_int,
     profile_has_fishing_rod as _profile_has_fishing_rod,
     recipe_craft_name as _recipe_craft_name,
-    resolve_scenery_display_name as _resolve_scenery_display_name,
-    stringify_payload_stat_value as _stringify_payload_stat_value,
 )
 from tg_game.web import admin_battle_schedule, admin_global_execution, daily_report_settings
 from tg_game.web import profile_automation_settings
-from tg_game.web.biz_artifact_view_model import (
-    build_artifact_nurture_auto_view as _artifact_build_artifact_nurture_auto_view,
-    build_artifact_nurture_command as _artifact_build_artifact_nurture_command,
-    build_artifact_touch_auto_view as _artifact_build_artifact_touch_auto_view,
-    build_artifact_trial_auto_view as _artifact_build_artifact_trial_auto_view,
-    build_artifact_trial_command as _artifact_build_artifact_trial_command,
-    normalize_artifact_nurture_target_name as _artifact_normalize_artifact_nurture_target_name,
-    normalize_artifact_touch_command as _artifact_normalize_artifact_touch_command,
-    normalize_artifact_touch_interval as _artifact_normalize_artifact_touch_interval,
-    normalize_artifact_trial_artifact_name as _artifact_normalize_artifact_trial_artifact_name,
-    normalize_artifact_trial_route as _artifact_normalize_artifact_trial_route,
-    pack_artifact_nurture_strategy as _artifact_pack_artifact_nurture_strategy,
-    pack_artifact_touch_strategy as _artifact_pack_artifact_touch_strategy,
-    pack_artifact_trial_strategy as _artifact_pack_artifact_trial_strategy,
-    unpack_artifact_nurture_strategy as _artifact_unpack_artifact_nurture_strategy,
-    unpack_artifact_touch_strategy as _artifact_unpack_artifact_touch_strategy,
-    unpack_artifact_trial_strategy as _artifact_unpack_artifact_trial_strategy,
-)
 from tg_game.web.biz_companion_view_model import (
     COMPANION_AUTO_FEATURES,
     COMPANION_HEART_TRIBULATION_ACTIONS,
-    COMPANION_HEART_TRIBULATION_COMMAND,
     COMPANION_PANEL_COMMAND,
     COMPANION_VOYAGE_RETURN_COMMAND,
     COMPANION_VOYAGE_STATUS_COMMAND,
-    build_companion_auto_view as _companion_build_companion_auto_view,
-    build_companion_heart_tribulation_view as _companion_build_companion_heart_tribulation_view,
-    build_companion_view as _companion_build_companion_view,
-    build_companion_voyage_state as _companion_build_companion_voyage_state,
-    build_estate_hunt_daily_auto_view as _companion_build_estate_hunt_daily_auto_view,
-    build_pagoda_auto_view as _companion_build_pagoda_auto_view,
     build_payload_voyage_states as _companion_build_payload_voyage_states,
-    build_tianji_trial_daily_auto_view as _companion_build_tianji_trial_daily_auto_view,
-    build_wild_experience_view as _companion_build_wild_experience_view,
-    format_companion_cooldown_display as _companion_format_companion_cooldown_display,
-    resolve_active_companion_payload_and_status as _companion_resolve_active_companion_payload_and_status,
-    resolve_latest_companion_cooldown_target as _companion_resolve_latest_companion_cooldown_target,
-    resolve_latest_companion_payload as _companion_resolve_latest_companion_payload,
 )
 from tg_game.web.biz_cultivation_view_model import (
-    CULTIVATION_STAGE_CAPS as _cultivation_CULTIVATION_STAGE_CAPS,
     DEFAULT_BULK_CULTIVATION_PROTECTED_PROFILE_ID,
-    build_all_profile_cultivation_state as _cultivation_build_all_profile_cultivation_state,
-    build_cultivation_result_view as _cultivation_build_cultivation_result_view,
-    extract_adventure_lines as _cultivation_extract_adventure_lines,
-    extract_item_delta_lines as _cultivation_extract_item_delta_lines,
-    format_cultivation_progress as _cultivation_format_cultivation_progress,
-    get_profile_cultivation_binding as _cultivation_get_profile_cultivation_binding,
 )
 from tg_game.web.biz_dungeon_view_model import (
     DUNGEON_DEFINITIONS,
-    build_dungeon_messages as _dungeon_build_dungeon_messages,
-    extract_dungeon_cleanup_targets as _dungeon_extract_dungeon_cleanup_targets,
-    extract_dungeon_command_buttons as _dungeon_extract_dungeon_command_buttons,
-    get_dungeon_definition as _dungeon_get_dungeon_definition,
-    list_dungeon_feed_source_messages as _dungeon_list_dungeon_feed_source_messages,
-)
-from tg_game.web.biz_estate_view_model import (
-    build_dongfu_pavilion_slots_view as _estate_build_dongfu_pavilion_slots_view,
-    build_dongfu_view as _estate_build_dongfu_view,
-    build_estate_miniapp_hunt_button as _estate_build_estate_miniapp_hunt_button,
 )
 from tg_game.web.biz_inventory_view_model import (
-    build_profile_inventory_search as _inventory_build_profile_inventory_search,
-    inventory_item_matches_query as _inventory_item_matches_query,
     item_type_label as _item_type_label,
-    profile_display_label as _inventory_profile_display_label,
-    build_profile_telegram_name_map as _inventory_build_profile_telegram_name_map,
-    read_telegram_session_display_name as _inventory_read_telegram_session_display_name,
-    resolve_profile_telegram_name as _inventory_resolve_profile_telegram_name,
-    telegram_session_file_path as _inventory_telegram_session_file_path,
-)
-from tg_game.web.module_availability import (
-    MAJOR_STAGE_ORDER,
-    SMALL_WORLD_MIN_MAJOR_STAGE,
-    is_small_world_module_available as _module_is_small_world_module_available,
-    is_yuanying_stage as _module_is_yuanying_stage,
-    major_stage_rank as _module_major_stage_rank,
-    payload_has_artifact_spirit as _module_payload_has_artifact_spirit,
 )
 from tg_game.web.module_detail_state import (
     build_artifact_module_state as _module_detail_build_artifact_module_state,
@@ -350,39 +184,10 @@ from tg_game.web.module_detail_state import (
     build_module_detail_payload_view_state as _module_detail_build_payload_view_state,
     build_sect_artifact_inventory_summary_state as _module_detail_build_sect_artifact_inventory_summary_state,
     build_inventory_module_state as _module_detail_build_inventory_module_state,
-    build_market_module_state as _module_detail_build_market_module_state,
     build_sect_module_state as _module_detail_build_sect_module_state,
 )
-from tg_game.web.biz_mulan_view_model import (
-    build_mulan_state as _mulan_build_mulan_state,
-    find_latest_mulan_message as _mulan_find_latest_mulan_message,
-    is_mulan_support_ack_text as _mulan_is_mulan_support_ack_text,
-    mulan_message_has_current_profile_parent as _mulan_message_has_current_profile_parent_impl,
-    mulan_message_matches_thread as _mulan_message_matches_thread_impl,
-    mulan_preview_lines as _mulan_preview_lines_impl,
-)
-from tg_game.web.biz_other_play_view_model import (
-    build_character_view as _other_build_character_view,
-    build_divination_batch_view as _other_build_divination_batch_view,
-    build_divination_view as _other_build_divination_view,
-    build_dice_state as _other_build_dice_state,
-    build_ghost_gambling_view as _other_build_ghost_gambling_view,
-    build_other_play_view as _other_build_other_play_view,
-    build_pagoda_view as _other_build_pagoda_view,
-    build_taiyi_view as _other_build_taiyi_view,
-)
 from tg_game.web.pagination import build_pagination_numbers as _build_pagination_numbers
-from tg_game.web.biz_tianxing_wild_deep_log import (
-    WILD_DEEP_COMMAND_PREFIX as _wild_deep_WILD_DEEP_COMMAND_PREFIX,
-    build_wild_deep_log_export_result as _wild_deep_build_wild_deep_log_export_result,
-    build_wild_deep_log_rows as _wild_deep_build_wild_deep_log_rows,
-    export_wild_deep_log_file as _wild_deep_export_wild_deep_log_file,
-    render_wild_deep_log_markdown as _wild_deep_render_wild_deep_log_markdown,
-    wild_deep_time_bucket as _wild_deep_time_bucket_impl,
-)
 from tg_game.web.biz_xinggong_view_model import (
-    build_companion_gift_items as _xinggong_build_companion_gift_items,
-    build_xinggong_starboard_auto_view as _xinggong_build_xinggong_starboard_auto_view,
     build_xinggong_state as _xinggong_build_xinggong_state,
 )
 from tg_game.web.request_results import (
@@ -423,7 +228,6 @@ from tg_game.web.shared_context import (
     build_sect_command_target_context as _shared_build_sect_command_target_context,
     build_shared_template_context as _shared_build_shared_template_context,
     ensure_chat_binding_bot_ids as _shared_ensure_chat_binding_bot_ids,
-    normalize_chat_binding_bot_ids as _shared_normalize_chat_binding_bot_ids,
 )
 
 
@@ -444,140 +248,6 @@ class VersionedStaticFiles(StaticFiles):
                 else "no-cache"
             )
         return response
-
-
-def _build_tianji_encounter_state(
-    storage: Storage,
-    profile_id: int,
-    chat_id: Optional[int],
-) -> dict:
-    return _tianji_build_tianji_encounter_state(
-        storage,
-        profile_id,
-        chat_id,
-        format_timestamp=biz_fanren_game.format_timestamp,
-    )
-
-
-def _build_tianji_remnant_state(
-    storage: Optional[Storage] = None,
-    profile=None,
-    command_chat=None,
-    payload: Optional[dict] = None,
-) -> dict:
-    return _tianji_build_tianji_remnant_state(
-        storage,
-        profile,
-        command_chat,
-        payload,
-        get_latest_reply=_get_latest_tianji_remnant_reply,
-        format_timestamp=biz_fanren_game.format_timestamp,
-    )
-
-
-def _build_sect_recent_reply_text(
-    storage: Storage,
-    profile_id: int,
-    sect_chat,
-    current_sect_feature: Optional[dict],
-    active_profile,
-    fallback_text: str = "",
-) -> str:
-    if not sect_chat or not profile_id:
-        return str(fallback_text or "").strip()
-    messages = storage.list_bound_messages(
-        profile_id=profile_id,
-        chat_id=int(sect_chat.chat_id) if sect_chat else None,
-        limit=60,
-    )
-    return _sect_build_sect_recent_reply_text(
-        messages,
-        current_sect_feature,
-        fallback_text=fallback_text,
-        is_related_message=_is_sect_related_message,
-    )
-
-
-def _has_joined_sect(active_profile) -> bool:
-    return _sect_has_joined_sect(
-        active_profile,
-        normalize_name=_normalize_sect_name_text,
-    )
-
-
-def _is_tianxing_sect_profile(active_profile) -> bool:
-    return _sect_is_tianxing_sect_profile(
-        active_profile,
-        normalize_name=_normalize_sect_name_text,
-    )
-
-
-def _sect_matches_current(item_sect_name: str, current_sect_name: str) -> bool:
-    return _sect_viewmodel_sect_matches_current(
-        item_sect_name,
-        current_sect_name,
-        normalize_name=_normalize_sect_name_text,
-    )
-
-
-def _build_cultivation_result_view(result: dict) -> dict:
-    return _cultivation_build_cultivation_result_view(
-        result,
-        extract_item_delta=_extract_item_delta_lines,
-        extract_adventure=_extract_adventure_lines,
-    )
-
-
-def _build_stock_view(
-    storage: Storage,
-    profile_id: int,
-    chat_id: Optional[int],
-    thread_id: Optional[int] = None,
-    command_sender_id: Optional[int] = None,
-    command_sender_username: str = "",
-) -> dict:
-    settings = get_settings()
-    return _stock_build_stock_view(
-        storage,
-        profile_id,
-        chat_id,
-        thread_id=thread_id,
-        command_sender_id=command_sender_id,
-        command_sender_username=command_sender_username,
-        authorized_user_id=str(settings.authorized_user_id or "").strip(),
-        format_timestamp=biz_fanren_game.format_timestamp,
-    )
-
-
-def _export_wild_deep_log_file(
-    storage: Storage,
-    *,
-    profile_id: int,
-    day_key: str,
-    chat_id: Optional[int],
-) -> dict:
-    return _wild_deep_export_wild_deep_log_file(
-        storage,
-        profile_id=profile_id,
-        day_key=day_key,
-        chat_id=chat_id,
-        log_dir=WILD_DEEP_LOG_DIR,
-    )
-
-
-def _read_telegram_session_display_name(storage: Storage, profile) -> str:
-    return _inventory_read_telegram_session_display_name(storage, profile)
-
-
-def _resolve_profile_telegram_name(
-    storage: Storage, profile, external_account: Optional[dict]
-) -> str:
-    return _inventory_resolve_profile_telegram_name(
-        storage,
-        profile,
-        external_account,
-        session_display_name_reader=_read_telegram_session_display_name,
-    )
 
 
 def create_app() -> FastAPI:
@@ -615,7 +285,6 @@ def create_app() -> FastAPI:
         "small_world",
         "other",
         "estate",
-        "market",
         "stock",
         "dungeon",
     }
@@ -690,12 +359,6 @@ def create_app() -> FastAPI:
             starboard_pull_result=starboard_pull_result,
             game_items_dict=storage.get_game_items(),
             now_ts=biz_fanren_game.time.time(),
-        )
-
-    def _build_companion_gift_items(payload: dict) -> list[dict]:
-        return _xinggong_build_companion_gift_items(
-            payload,
-            storage.get_game_items(),
         )
 
     def _build_sect_treasury_items(active_profile) -> list[dict]:
@@ -793,11 +456,6 @@ def create_app() -> FastAPI:
             day_key=day_key,
             marked_day_keys=marker_days,
         )
-
-    def _get_current_binding(active_profile, chat_id: int):
-        if not active_profile:
-            return None
-        return storage.get_chat_binding(active_profile.id, chat_id)
 
     def _build_chat_binding_bot_ids_view(
         binding,
@@ -1001,9 +659,6 @@ def create_app() -> FastAPI:
             ),
             sender_username=(getattr(profile, "telegram_username", "") or ""),
         )
-
-    def _normalize_chat_binding_bot_ids(binding) -> list[int]:
-        return _shared_normalize_chat_binding_bot_ids(binding)
 
     def _load_cached_page_state(
         request: Request,
@@ -1783,7 +1438,6 @@ def create_app() -> FastAPI:
             module
             for module in module_registry.list_modules()
             if module.key in visible_module_keys
-            and module.key != "market"
             and (
                 module.key != "small_world"
                 or _is_small_world_module_available(active_profile)
@@ -2490,9 +2144,6 @@ def create_app() -> FastAPI:
         module_key: str,
         page: int = 1,
         dungeon_key: str = "",
-        q: str = "",
-        q_exchange: str = "",
-        sort: str = "",
         inv_page: int = 1,
         inv_q: str = "",
         explore_day: str = "",
@@ -2570,7 +2221,6 @@ def create_app() -> FastAPI:
             build_artifact_touch_auto_view=_build_artifact_touch_auto_view,
             build_artifact_trial_auto_view=_build_artifact_trial_auto_view,
             build_artifact_nurture_auto_view=_build_artifact_nurture_auto_view,
-            build_wild_experience_view=_build_wild_experience_view,
             build_companion_heart_tribulation_view=(
                 _build_companion_heart_tribulation_view
             ),
@@ -2587,7 +2237,6 @@ def create_app() -> FastAPI:
         artifact_touch_auto_state = default_state["artifact_touch_auto_state"]
         artifact_trial_auto_state = default_state["artifact_trial_auto_state"]
         artifact_nurture_auto_state = default_state["artifact_nurture_auto_state"]
-        wild_experience_state = default_state["wild_experience_state"]
         companion_heart_tribulation_state = default_state[
             "companion_heart_tribulation_state"
         ]
@@ -2768,7 +2417,6 @@ def create_app() -> FastAPI:
                         build_tianji_trial_daily_auto_view=(
                             _build_tianji_trial_daily_auto_view
                         ),
-                        build_wild_experience_view=_build_wild_experience_view,
                         build_companion_heart_tribulation_view=(
                             _build_companion_heart_tribulation_view
                         ),
@@ -2851,15 +2499,6 @@ def create_app() -> FastAPI:
             query=inv_q,
             page=inv_page,
         )
-        market_state = _module_detail_build_market_module_state(
-            storage.get_marketplace_listings() if module_key == "market" else [],
-            game_items_dict,
-            enabled=module_key == "market",
-            query=q,
-            exchange_query=q_exchange,
-            sort_key=sort,
-            page=page,
-        )
 
         shared_template_context = _build_shared_template_context(active_profile)
         sect_command_context = _build_sect_command_target_context(active_profile, sect_chat)
@@ -2915,7 +2554,6 @@ def create_app() -> FastAPI:
             "artifact_touch_auto_state": artifact_touch_auto_state,
             "artifact_trial_auto_state": artifact_trial_auto_state,
             "artifact_nurture_auto_state": artifact_nurture_auto_state,
-            "wild_experience_state": wild_experience_state,
             "world_boss_state": world_boss_runtime.build_view(storage, active_profile.id if active_profile else None),
             "group_activity_task": (group_activity.get_task(storage, active_profile.id) or {}) if active_profile else {},
             "group_activity_state": group_activity.load_state(storage, active_profile.id) if active_profile else {},
@@ -2931,13 +2569,6 @@ def create_app() -> FastAPI:
                 **inventory_state,
                 "inventory_query_qs": quote_plus(inventory_state["inventory_query"])
                 if inventory_state["inventory_query"]
-                else "",
-                **market_state,
-                "market_query_qs": quote_plus(market_state["market_query"])
-                if market_state["market_query"]
-                else "",
-                "market_exchange_query_qs": quote_plus(market_state["market_exchange_query"])
-                if market_state["market_exchange_query"]
                 else "",
                 "sect_recent_reply_text": sect_recent_reply_text,
                 "format_timestamp": biz_fanren_game.format_timestamp,
@@ -3171,46 +2802,6 @@ def create_app() -> FastAPI:
         )
         return RedirectResponse(url=redirect_to, status_code=303)
 
-    @application.post("/profiles/{profile_id}/bind-current-telegram")
-    async def bind_current_telegram_account(
-        request: Request, profile_id: int
-    ) -> RedirectResponse:
-        profile = storage.get_profile(profile_id)
-        if not profile:
-            raise HTTPException(status_code=404, detail="Profile not found")
-        if not _profile_belongs_to_session(request, profile_id):
-            raise HTTPException(
-                status_code=403, detail="Profile not available in current session"
-            )
-        profile_session_name = (profile.telegram_session_name or "").strip()
-        if profile_session_name:
-            account = await get_authorized_account_info(
-                profile_session_name, allow_fallback=False
-            )
-        else:
-            account = await _discover_authorized_account(request)
-            if not account:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No authorized Telegram session available for binding",
-                )
-        telegram_user_id = str(account.get("id") or "").strip()
-        if not telegram_user_id:
-            raise HTTPException(status_code=400, detail="Telegram account unavailable")
-        telegram_username = (account.get("username") or "").strip()
-        telegram_phone = (account.get("phone") or "").strip()
-        telegram_session_name = (account.get("session_name") or "").strip()
-        storage.bind_profile_telegram_account(
-            profile_id,
-            telegram_user_id=telegram_user_id,
-            telegram_username=telegram_username,
-            telegram_phone=telegram_phone,
-            telegram_session_name=telegram_session_name,
-        )
-        _sync_env_binding(profile_id, telegram_user_id)
-        storage.request_sect_refresh(profile_id, cooldown_seconds=0)
-        return RedirectResponse(url="/profile", status_code=303)
-
     @application.post("/profiles/{profile_id}/refresh-info")
     async def refresh_profile_info(request: Request, profile_id: int) -> RedirectResponse:
         if not _profile_belongs_to_session(request, profile_id):
@@ -3255,44 +2846,6 @@ def create_app() -> FastAPI:
             ),
             status_code=303,
         )
-
-    @application.post("/profiles/{profile_id}/chat-bindings/{chat_id}/bot-ids/add")
-    async def add_chat_binding_bot_id(
-        request: Request,
-        profile_id: int,
-        chat_id: int,
-        bot_identity: str = Form(...),
-        thread_id: str = Form(""),
-        redirect_to: str = Form("/profile"),
-    ) -> RedirectResponse:
-        if not _profile_belongs_to_session(request, profile_id):
-            raise HTTPException(status_code=403, detail="Profile not available in current session")
-        profile = storage.get_profile(profile_id)
-        if not profile:
-            raise HTTPException(status_code=404, detail="Profile not found")
-        identity = str(bot_identity or "").strip()
-        if not identity:
-            return RedirectResponse(url=redirect_to or "/profile", status_code=303)
-        normalized_thread_id = _parse_optional_int(thread_id)
-        binding = storage.get_chat_binding(profile_id, chat_id, thread_id=normalized_thread_id)
-        if not binding:
-            raise HTTPException(status_code=404, detail="Chat binding not found")
-        bot_id = int(identity) if identity.lstrip("-").isdigit() else None
-        bot_username = ""
-        if bot_id is None:
-            bot_username = identity.lstrip("@").strip()
-            bot_id = storage.resolve_bot_id_from_username(identity)
-            if bot_id is None:
-                try:
-                    resolved_account = await get_authorized_account_info(identity, allow_fallback=True)
-                    bot_id = int(resolved_account.get("id") or 0) or None
-                    bot_username = str(resolved_account.get("username") or bot_username).strip().lstrip("@")
-                except Exception:
-                    bot_id = None
-            if bot_id is None:
-                raise HTTPException(status_code=400, detail="无法解析该 bot 用户名对应的 bot id")
-        storage.add_chat_binding_bot_id(profile_id, chat_id, bot_id, bot_username=bot_username, thread_id=binding.thread_id)
-        return RedirectResponse(url=redirect_to or "/profile", status_code=303)
 
     @application.post("/profiles/{profile_id}/chat-bindings/{chat_id}/bot-ids/remove")
     async def remove_chat_binding_bot_id(
@@ -4415,107 +3968,6 @@ def create_app() -> FastAPI:
                 require_exact_thread=True,
                 pending_only=True,
             )
-        return RedirectResponse(url=redirect_to, status_code=303)
-
-    @application.post("/runtime/fishing/auto")
-    async def runtime_toggle_fishing_auto(
-        request: Request,
-        chat_id: str = Form(...),
-        enabled: str = Form(...),
-        pond: str = Form(biz_fishing_game.FISHING_DEFAULT_POND),
-        bait: str = Form(biz_fishing_game.FISHING_DEFAULT_BAIT),
-        auto_probe: str = Form("1"),
-        auto_nest: str = Form("0"),
-        nest: str = Form(biz_fishing_game.FISHING_DEFAULT_NEST),
-        nest_limit: str = Form("0"),
-        auto_until_limit: str = Form("1"),
-        thread_id: Optional[str] = Form(None),
-        chat_type: str = Form("group"),
-        bot_username: str = Form("fanrenxiuxian_bot"),
-        redirect_to: str = Form("/modules/fishing"),
-    ) -> RedirectResponse:
-        profile = _get_request_profile(request)
-        if not profile:
-            raise HTTPException(status_code=401, detail="Profile not active")
-        expired_redirect = _ensure_external_session_active(profile)
-        if expired_redirect:
-            return expired_redirect
-        normalized_chat_id = str(chat_id or "").strip()
-        if not normalized_chat_id:
-            raise HTTPException(status_code=400, detail="Chat ID not configured")
-        resolved_chat_id = int(normalized_chat_id)
-        resolved_thread_id = int(thread_id) if thread_id and thread_id.isdigit() else None
-        existing = storage.get_fishing_session(profile.id, resolved_chat_id)
-        should_enable = enabled == "1"
-        clean_pond = str(pond or "").strip() or biz_fishing_game.FISHING_DEFAULT_POND
-        clean_bait = str(bait or "").strip() or biz_fishing_game.FISHING_DEFAULT_BAIT
-        clean_nest = biz_fishing_game.get_fishing_nest_option(str(nest or ""))["name"]
-        try:
-            clean_nest_limit = max(int(str(nest_limit or "0").strip() or 0), 0)
-        except ValueError:
-            clean_nest_limit = 0
-        if should_enable and auto_nest == "1" and clean_nest_limit <= 0:
-            clean_nest_limit = int(
-                biz_fishing_game.get_fishing_nest_option(clean_nest).get("daily_limit")
-                or 1
-            )
-        clean_auto_nest = should_enable and auto_nest == "1"
-        if existing:
-            storage.update_fishing_session(
-                int(existing["id"]),
-                thread_id=resolved_thread_id,
-                chat_type=chat_type,
-                bot_username=bot_username,
-                enabled=should_enable,
-                pond=clean_pond,
-                bait=clean_bait,
-                auto_probe=auto_probe == "1",
-                auto_nest=clean_auto_nest,
-                nest=clean_nest,
-                nest_limit=clean_nest_limit,
-                nest_used_count=0 if should_enable else int(existing.get("nest_used_count") or 0),
-                nest_remaining=(
-                    int(existing.get("nest_remaining") or 0) if should_enable else 0
-                ),
-                auto_until_limit=auto_until_limit == "1",
-                state="needs_basket" if should_enable else "stopped",
-                next_action_at=biz_fanren_game.time.time() if should_enable else 0,
-                last_error="",
-            )
-        else:
-            storage.upsert_fishing_session(
-                profile_id=profile.id,
-                chat_id=resolved_chat_id,
-                thread_id=resolved_thread_id,
-                chat_type=chat_type,
-                bot_username=bot_username,
-                enabled=should_enable,
-                pond=clean_pond,
-                bait=clean_bait,
-                auto_probe=auto_probe == "1",
-                auto_nest=clean_auto_nest,
-                nest=clean_nest,
-                nest_limit=clean_nest_limit,
-                auto_until_limit=auto_until_limit == "1",
-                state="needs_basket" if should_enable else "stopped",
-                next_action_at=biz_fanren_game.time.time() if should_enable else 0,
-            )
-        if not should_enable:
-            for command_text in {
-                biz_fishing_game.FISHING_STATUS_COMMAND,
-                biz_fishing_game.FISHING_BASKET_COMMAND,
-                biz_fishing_game.FISHING_PROBE_COMMAND,
-                biz_fishing_game.FISHING_HOOK_COMMAND,
-                biz_fishing_game.FISHING_STOP_COMMAND,
-                biz_fishing_game.build_nest_command(clean_nest),
-                biz_fishing_game.build_start_command(clean_pond, clean_bait),
-            }:
-                storage.cancel_pending_outgoing_commands(
-                    profile.id,
-                    resolved_chat_id,
-                    text=command_text,
-                    thread_id=resolved_thread_id,
-                )
         return RedirectResponse(url=redirect_to, status_code=303)
 
     def _queue_fishing_miniapp_start(
@@ -5737,30 +5189,6 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse(url="/modules/other", status_code=303)
 
-    @application.post("/runtime/commands/wild-experience-auto")
-    async def runtime_toggle_wild_experience_auto(
-        request: Request,
-        chat_id: str = Form(...),
-        strategy: str = Form("均衡"),
-        thread_id: Optional[str] = Form(None),
-        chat_type: str = Form("group"),
-        bot_username: str = Form("fanrenxiuxian_bot"),
-        redirect_to: str = Form("/modules/other"),
-    ) -> RedirectResponse:
-        profile = _get_request_profile(request)
-        if not profile:
-            raise HTTPException(status_code=401, detail="Profile not active")
-        expired_redirect = _ensure_external_session_active(profile)
-        if expired_redirect:
-            return expired_redirect
-        _ = (chat_id, strategy, thread_id, chat_type, bot_username)
-        admin_global_execution.disable_profile_automations(
-            storage,
-            "wild_experience",
-            [profile],
-        )
-        return RedirectResponse(url=redirect_to, status_code=303)
-
     @application.post("/runtime/sect/xinggong-starboard-auto")
     async def runtime_toggle_xinggong_starboard_auto(
         request: Request,
@@ -6896,37 +6324,6 @@ def create_app() -> FastAPI:
                     True,
                     profile_id=active_profile.id,
                 )
-            session = biz_sect_game.get_session(db, chat_id, profile_id=active_profile.id)
-        finally:
-            db.close()
-        if not session:
-            raise HTTPException(status_code=404, detail="Sect session not found")
-        return RedirectResponse(url="/modules/sect", status_code=303)
-
-    @application.post("/runtime/sect/luoyun-toggle")
-    async def toggle_luoyun_auto(
-        request: Request, chat_id: int = Form(...), enabled: str = Form(...)
-    ) -> RedirectResponse:
-        db = CompatDb(storage)
-        try:
-            biz_sect_game.ensure_tables(db)
-            active_profile = _get_request_profile(request)
-            if not active_profile:
-                raise HTTPException(status_code=401, detail="Profile not active")
-            biz_sect_game.configure_luoyun_auto(
-                db,
-                chat_id,
-                enabled == "1",
-                profile_id=active_profile.id,
-            )
-            if enabled == "1":
-                biz_sect_game.set_enabled(
-                    db,
-                    chat_id,
-                    True,
-                    profile_id=active_profile.id,
-                )
-                biz_sect_game.sync_luoyun_state(storage, db, active_profile.id, chat_id)
             session = biz_sect_game.get_session(db, chat_id, profile_id=active_profile.id)
         finally:
             db.close()

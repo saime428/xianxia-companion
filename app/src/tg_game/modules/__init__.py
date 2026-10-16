@@ -8,7 +8,6 @@ from .biz_dungeon_module import MODULE as DUNGEON_MODULE
 from .biz_estate_module import MODULE as ESTATE_MODULE
 from .biz_fishing_module import MODULE as FISHING_MODULE
 from .biz_inventory_module import MODULE as INVENTORY_MODULE
-from .biz_market_module import MODULE as MARKET_MODULE
 from .biz_other_module import MODULE as OTHER_MODULE
 from .biz_sect_module import MODULE as SECT_MODULE
 from .biz_shop_module import MODULE as SHOP_MODULE
@@ -28,7 +27,6 @@ ALL_MODULES = [
     OTHER_MODULE,
     ESTATE_MODULE,
     COMPANION_MODULE,
-    MARKET_MODULE,
     STOCK_MODULE,
     DUNGEON_MODULE,
     DIPLOMACY_MODULE,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import biz_fanren_game
 import biz_sect_game
 import biz_small_world_game
 from tg_game.storage import ASC_EXTERNAL_PROVIDER
@@ -13,12 +12,7 @@ from tg_game.web.biz_other_play_view_model import build_pagoda_today_view
 from tg_game.web.biz_inventory_view_model import (
     build_inventory_bulk_sell_command,
     build_inventory_items_from_payload,
-    format_market_price,
     inventory_item_matches_query,
-    item_type_label,
-    market_price_preview,
-    market_price_sort_key,
-    reverse_market_price_sort_key,
 )
 from tg_game.web.pagination import build_pagination_numbers
 
@@ -401,7 +395,6 @@ def build_other_module_state(
     build_companion_view,
     build_pagoda_auto_view,
     build_tianji_trial_daily_auto_view,
-    build_wild_experience_view,
     build_companion_heart_tribulation_view,
     build_artifact_touch_auto_view,
     build_artifact_trial_auto_view,
@@ -520,14 +513,6 @@ def build_other_module_state(
                     tianji_trial_daily_feature_key,
                 )
             ),
-            "wild_experience_state": build_wild_experience_view(
-                current_payload,
-                storage.get_companion_auto_task(
-                    profile_id,
-                    command_chat.chat_id if command_chat else 0,
-                    "wild_experience",
-                ),
-            ),
             "companion_heart_tribulation_state": (
                 build_companion_heart_tribulation_view(
                     storage.get_companion_heart_tribulation_task(
@@ -554,7 +539,6 @@ def build_module_detail_default_state(
     build_artifact_touch_auto_view,
     build_artifact_trial_auto_view,
     build_artifact_nurture_auto_view,
-    build_wild_experience_view,
     build_companion_heart_tribulation_view,
 ) -> dict:
     return {
@@ -642,7 +626,6 @@ def build_module_detail_default_state(
         "artifact_touch_auto_state": build_artifact_touch_auto_view(None),
         "artifact_trial_auto_state": build_artifact_trial_auto_view(None),
         "artifact_nurture_auto_state": build_artifact_nurture_auto_view(None),
-        "wild_experience_state": build_wild_experience_view({}, None),
         "companion_heart_tribulation_state": build_companion_heart_tribulation_view(
             None
         ),
@@ -799,124 +782,6 @@ def build_inventory_module_state(
             "inventory_query": inventory_query,
             "equipped_id": equipped_id,
             "spirit_stones": raw_materials.get("mat_001", 0),
-        }
-    )
-    return state
-
-
-def build_market_module_state(
-    listings: list[dict],
-    game_items_dict: dict,
-    *,
-    enabled: bool,
-    query: str = "",
-    exchange_query: str = "",
-    sort_key: str = "",
-    page: int = 1,
-    page_size: int = 20,
-) -> dict:
-    market_query = str(query or "").strip()
-    market_exchange_query = str(exchange_query or "").strip()
-    market_sort = str(sort_key or "").strip().lower()
-    market_page = max(int(page or 1), 1)
-    state = {
-        "market_listings": [],
-        "market_query": market_query,
-        "market_exchange_query": market_exchange_query,
-        "market_sort": market_sort,
-        "market_page": market_page,
-        "market_page_size": page_size,
-        "market_total": 0,
-        "market_total_pages": 1,
-        "market_page_numbers": [1],
-    }
-    if not enabled:
-        return state
-
-    market_listings = []
-    for item in listings:
-        item_id = str(item.get("item_id") or "")
-        meta = game_items_dict.get(item_id) or {}
-        display_name = str(meta.get("name") or item.get("item_name") or item_id).strip()
-        price_preview = market_price_preview(item.get("price_json"), game_items_dict)
-        listing_time_ts = biz_sect_game._parse_iso_timestamp(item.get("listing_time"))
-        market_listings.append(
-            {
-                **item,
-                "display_name": display_name or item_id,
-                "display_type": item_type_label(
-                    item.get("item_type") or meta.get("type") or "",
-                    is_material=bool(item.get("is_material")),
-                ),
-                "display_raw_type": str(item.get("item_type") or "").strip(),
-                "price_text": format_market_price(
-                    item.get("price_json"), game_items_dict
-                ),
-                "price_sort_key": market_price_sort_key(
-                    item.get("price_json"), game_items_dict
-                ),
-                "price_preview_text": price_preview["preview_text"],
-                "price_full_text": price_preview["full_text"],
-                "price_item_count": price_preview["item_count"],
-                "seller_display": str(item.get("seller_username") or "-").strip()
-                or "-",
-                "listing_time_ts": listing_time_ts,
-                "listing_time_display": biz_fanren_game.format_timestamp(
-                    listing_time_ts
-                ),
-                "is_bundle_text": "是" if item.get("is_bundle") else "否",
-                "quantity_selectable": not bool(item.get("is_bundle"))
-                and int(item.get("quantity") or 0) > 1,
-            }
-        )
-
-    normalized_market_query = market_query.lower()
-    if normalized_market_query:
-        market_listings = [
-            item
-            for item in market_listings
-            if normalized_market_query
-            in " ".join(
-                [
-                    str(item.get("id") or ""),
-                    str(item.get("display_name") or ""),
-                    str(item.get("display_type") or ""),
-                    str(item.get("seller_display") or ""),
-                ]
-            ).lower()
-        ]
-    normalized_exchange_query = market_exchange_query.lower()
-    if normalized_exchange_query:
-        market_listings = [
-            item
-            for item in market_listings
-            if normalized_exchange_query
-            in str(item.get("price_full_text") or item.get("price_text") or "").lower()
-        ]
-    if market_sort == "price_desc":
-        market_listings.sort(
-            key=lambda item: reverse_market_price_sort_key(
-                item.get("price_sort_key") or ()
-            )
-        )
-    elif market_sort == "price_asc":
-        market_listings.sort(key=lambda item: item.get("price_sort_key") or ())
-
-    market_total = len(market_listings)
-    market_total_pages = max((market_total + page_size - 1) // page_size, 1)
-    market_page = min(market_page, market_total_pages)
-    start_index = (market_page - 1) * page_size
-    end_index = start_index + page_size
-
-    state.update(
-        {
-            "market_listings": market_listings[start_index:end_index],
-            "market_page": market_page,
-            "market_total": market_total,
-            "market_total_pages": market_total_pages,
-            "market_page_numbers": build_pagination_numbers(
-                market_page, market_total_pages
-            ),
         }
     )
     return state

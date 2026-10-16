@@ -92,7 +92,6 @@
 
 <section class="card-grid module-entry-grid">
     {% for module in modules %}
-    {% if module.key != 'market' %}
     <div class="card module-entry-card">
         <div class="card-head">
             <a class="module-entry-title" href="/modules/{{ module.key }}"><strong>{{ module.name }}</strong></a>
@@ -107,7 +106,6 @@
             <a class="button module-entry-action" href="/modules/{{ module.key }}">催动阵法</a>
         </div>
     </div>
-    {% endif %}
     {% endfor %}
 </section>
 {% endblock %}

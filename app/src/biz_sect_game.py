@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 SECT_BOT_USERNAME = "fanrenxiuxian_bot"
-SECT_BOT_IDS = set()
 SECT_CHECK_COMMAND = ".我的宗门"
 SECT_DEFAULT_INTERVAL = 1800
 SECT_COMMAND_COOLDOWN = 15
@@ -60,7 +59,6 @@ HUANGFENG_PAYLOAD_REFRESH_MAX_RETRIES = 2
 COMPANION_ASSIST_REPLY_WINDOW_SECONDS = 60
 COMPANION_ASSIST_COOLDOWN_SECONDS = 12 * 3600
 YUANYING_WENDAO_SECONDS = 12 * 3600
-YUANYING_RETREAT_SECONDS = 8 * 3600
 YUANYING_COMMAND_REFRESH_SECONDS = 180
 YUANYING_RETREAT_RETRY_SECONDS = 30 * 60
 SECT_RESUME_PROTECTION_MESSAGE = (
@@ -178,7 +176,6 @@ HUANGFENG_SEED_SHORTAGE_KEYWORDS = (
     "数量不足",
     "不足以播种",
 )
-HUANGFENG_FAILURE_KEYWORDS = ("失败", "不可", "无法", "没有权限")
 
 SECT_NAME_PATTERNS = [
     re.compile(r"(?:所在宗门|宗门名称|宗门)[:：]\s*(?P<value>[^\n]+)"),
@@ -222,7 +219,6 @@ LINGXIAO_SECT_NAME = "凌霄宫"
 LUOYUN_SECT_NAME = "落云宗"
 XINGGONG_SECT_NAME = "星宫"
 YUANYING_SECT_NAME = "元婴宗"
-YUANYING_EXCLUSIVE_COMMANDS = {".问道", ".元婴闭关"}
 YUANYING_REPLY_EVENTS = {
     "yuanying_wendao_success",
     "yuanying_wendao_cooldown",
@@ -498,10 +494,6 @@ def format_timestamp(timestamp):
 
 def current_date_key(now=None):
     return time.strftime("%Y-%m-%d", time.localtime(now or time.time()))
-
-
-def _current_time_text(now=None):
-    return time.strftime("%H:%M", time.localtime(now or time.time()))
 
 
 def _time_today_timestamp(time_text, now=None):
@@ -1304,7 +1296,7 @@ def sync_huangfeng_state(storage, db, profile_id, chat_id, payload=None, now=Non
     elif (
         session.get("auto_huangfeng_enabled")
         and not has_active_huangfeng_batch(session)
-        and (force_refresh or not (view.get("plots") or []))
+        and not (view.get("plots") or [])
     ):
         refresh_retry = int(session.get("huangfeng_payload_refresh_retry") or 0)
         if refresh_retry < HUANGFENG_PAYLOAD_REFRESH_MAX_RETRIES:
@@ -1543,14 +1535,6 @@ def parse_yinluo_banner_text(text):
         "soul_reserve_seen": "魂魄储备" in raw_text,
         "refining_slots": refining_slots,
     }
-
-
-def _is_guard_one(heart_state):
-    return (heart_state or "").strip() == "守一"
-
-
-def _is_clear_heart(heart_state):
-    return (heart_state or "").strip() == "澄明"
 
 
 def _has_heart_state(heart_state):
@@ -2736,12 +2720,6 @@ def sync_lingxiao_trial_state(storage, db, profile_id, chat_id, payload=None):
     return get_session(db, chat_id, profile_id=profile_id), view
 
 
-def _daily_time_due(session, now=None):
-    now_text = _current_time_text(now)
-    run_text = session.get("daily_run_time") or "00:00"
-    return now_text >= run_text
-
-
 def ensure_tables(db):
     db.cur.execute(
         """
@@ -3686,56 +3664,6 @@ def set_enabled(db, chat_id, enabled, profile_id=None):
     )
 
 
-def stop_all_automation(db, chat_id, reason="", profile_id=None):
-    update_session(
-        db,
-        chat_id,
-        profile_id=profile_id,
-        enabled=0,
-        next_check_time=0,
-        next_check_source=reason or None,
-        auto_lingxiao_enabled=0,
-        auto_lingxiao_gangfeng_enabled=0,
-        auto_lingxiao_borrow_enabled=0,
-        auto_lingxiao_question_enabled=0,
-        auto_sect_checkin_enabled=0,
-        auto_sect_teach_enabled=0,
-        auto_yinluo_sacrifice_enabled=0,
-        auto_yinluo_blood_wash_enabled=0,
-        auto_yinluo_shadow_enabled=0,
-        auto_yinluo_refine_enabled=0,
-        auto_huangfeng_enabled=0,
-        auto_huangfeng_exchange_enabled=0,
-        auto_luoyun_enabled=0,
-        auto_yuanying_wendao_enabled=0,
-        auto_yuanying_retreat_enabled=0,
-        lingxiao_next_check_time=0,
-        lingxiao_gangfeng_next_check_time=0,
-        lingxiao_borrow_next_check_time=0,
-        lingxiao_question_next_check_time=0,
-        sect_checkin_next_check_time=0,
-        sect_teach_next_check_time=0,
-        yinluo_sacrifice_next_check_time=0,
-        yinluo_blood_wash_next_check_time=0,
-        yinluo_shadow_next_check_time=0,
-        yinluo_refine_next_check_time=0,
-        huangfeng_next_check_time=0,
-        luoyun_next_check_time=0,
-        yuanying_wendao_next_check_time=0,
-        yuanying_retreat_next_check_time=0,
-        yuanying_retreat_state=None,
-        auto_companion_assist_enabled=0,
-        companion_assist_next_check_time=0,
-        companion_assist_next_check_source=None,
-        companion_assist_pending_reply_msg_id=0,
-        companion_assist_pending_at=0,
-        companion_assist_pending_target_sender_id=0,
-        companion_assist_pending_target_username=None,
-        last_companion_assist_time=0,
-        last_summary=reason or None,
-    )
-
-
 def apply_sect_auto_guard(storage, db, session, profile_id=None, payload=None, now=None):
     now = now or time.time()
     if not session or not session.get("enabled"):
@@ -4119,38 +4047,6 @@ def clear_luoyun_batch(
         profile_id=profile_id,
         **updates,
     )
-
-
-def configure_luoyun_auto(db, chat_id, enabled, profile_id=None):
-    session = get_session(db, chat_id, profile_id=profile_id)
-    updates = {
-        "auto_luoyun_enabled": _normalize_bool(enabled),
-        "luoyun_next_check_time": 0,
-        "luoyun_next_check_source": (
-            "已开启落云宗灵树自动，等待首轮灵树检查" if enabled else "已关闭落云宗灵树自动"
-        ),
-        "luoyun_force_refresh": 1 if enabled else 0,
-        "next_check_time": 0
-        if enabled
-        else _recompute_overall_next_check(session, {"auto_luoyun_enabled": 0}, time.time()),
-        "next_check_source": (
-            "已开启落云宗灵树自动，等待首轮灵树检查" if enabled else "已关闭落云宗灵树自动"
-        ),
-        "luoyun_pending_commands": None,
-        "luoyun_pending_index": 0,
-        "luoyun_pending_msg_id": 0,
-        "luoyun_pending_retry": 0,
-        "luoyun_batch_just_completed": 0,
-        "luoyun_last_tree_text": None,
-        "luoyun_last_tree_state": None,
-        "luoyun_invasion_active": 0,
-        "luoyun_frozen_irrigation_ready_time": 0,
-        "last_action": None,
-        "last_action_time": 0,
-        "last_command_time": 0,
-        "last_command_msg_id": 0,
-    }
-    update_session(db, chat_id, profile_id=profile_id, **updates)
 
 
 def configure_yuanying_wendao_auto(db, chat_id, enabled, profile_id=None):

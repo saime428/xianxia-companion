@@ -33,7 +33,6 @@ from .world_boss_support import (
     MiniAppBeastError,
     MiniAppCircuitOpenError,
     _post_json,
-    miniapp_circuit_preflight,
     miniapp_origin,
     request_webview_init_data,
     WORLD_BOSS_HTTP_OBSERVATION_KEYS,
@@ -98,7 +97,6 @@ WORLD_BOSS_TURNSTILE_ERRORS = {
 # are revealed one at a time through /window (``afterWindowId`` paging), and every
 # /hit must carry a ``chargeTicket`` obtained from /charge-start. These mirror the
 # Mini App client's own pacing so the automation stays inside normal call rates.
-WORLD_BOSS_WINDOW_POLL_SECONDS = 0.36
 WORLD_BOSS_WINDOW_DRAIN_SECONDS = 0.05
 WORLD_BOSS_WINDOW_STALL_SECONDS = 20.0
 WORLD_BOSS_WINDOW_LIMIT = 64
@@ -159,8 +157,6 @@ WORLD_BOSS_DRIFT_HISTORY_SIZE = 5
 WORLD_BOSS_DRIFT_WEIGHT = 0.30
 WORLD_BOSS_DRIFT_LEGACY_WEIGHT = 0.5
 WORLD_BOSS_DRIFT_TOLERANCE_MS = 150
-# Alias kept for callers that describe this as an inference tolerance.
-WORLD_BOSS_DRIFT_INFERENCE_TOLERANCE_MS = WORLD_BOSS_DRIFT_TOLERANCE_MS
 # A 300–500 ms isolated request spike must not consume the next window's
 # remaining tolerance on top of its intentional offset.
 WORLD_BOSS_DRIFT_HIGH_RTT_MS = 150
@@ -422,11 +418,6 @@ def select_identity_choice(actor: Any, choices: Any, identity: str) -> int | Non
         except (TypeError, ValueError):
             return None
     return None
-
-
-def select_main_identity_choice(actor: Any, choices: Any) -> int | None:
-    """Backward-compatible main-soul selection helper."""
-    return select_identity_choice(actor, choices, WORLD_BOSS_IDENTITY)
 
 
 class _ProcessLease:
@@ -1264,10 +1255,6 @@ class WorldBossMonitor:
                 _error_code(exc),
             )
             return None
-
-    async def _main_player_id(self) -> int | None:
-        """Backward-compatible helper used by older tests/callers."""
-        return await self._identity_player_id(WORLD_BOSS_IDENTITY)
 
     async def _request(
         self,
@@ -3823,21 +3810,3 @@ class WorldBossMonitor:
         if diagnostic_summary:
             summary += f"；诊断：{diagnostic_summary}"
         return summary
-
-
-async def install_world_boss_monitor(
-    actor: Any,
-    account: str,
-    *,
-    logger: logging.Logger | None = None,
-    transport: Any = None,
-) -> WorldBossMonitor:
-    monitor = WorldBossMonitor(
-        actor,
-        account,
-        logger=logger,
-        transport=transport,
-    )
-    await monitor.install()
-    setattr(actor, "_world_boss_monitor", monitor)
-    return monitor

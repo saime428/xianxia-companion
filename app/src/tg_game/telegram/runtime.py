@@ -36,14 +36,9 @@ from tg_game.telegram.network_guard import (
     mark_network_send_failure,
 )
 from tg_game.telegram.resume_guard import (
-    TELEGRAM_LONG_RESUME_DEFER_SECONDS,
-    TELEGRAM_LONG_RESUME_SECONDS,
-    TELEGRAM_RESUME_COUNTDOWN_SPACING_SECONDS,
-    TELEGRAM_RESUME_MODE_SECONDS,
     TELEGRAM_RESUME_OFFLINE_GAP_SECONDS,
     TELEGRAM_RESUME_SETTLE_SECONDS,
     TELEGRAM_WORKER_HEARTBEAT_SECONDS,
-    defer_long_resume_countdowns,
     prepare_network_resume_if_ready,
     prepare_resume_protection,
     read_profile_worker_heartbeat,
@@ -128,15 +123,6 @@ def _prepare_resume_protection(
         now=now,
         gap_seconds=gap_seconds,
     )
-
-
-def _defer_long_resume_countdowns(
-    storage: Storage,
-    profile_id: int,
-    *,
-    now: float,
-) -> int:
-    return defer_long_resume_countdowns(storage, profile_id, now=now)
 
 
 def _prepare_network_resume_if_ready(

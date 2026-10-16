@@ -6,7 +6,7 @@ A target is anything the game resolves: @username, bare username, or bare Telegr
 (`.斗法 1000000022` resolved to @rival_beta). Use the bare user id for our own 小号 — 天机阁
 reports a `username` that is the game handle, not always a live Telegram username (乙真人
 demo_alt_old→demo_alt, 丁真人 demo_alt2), and an @ that no longer resolves burns 神念 for nothing.
-installed in the xianxia crontab on the VPS (system TZ is UTC, so 19:20 UTC = 03:20 Beijing):
+2026-09-26 用户叫停每日斗法，VPS 上这条 crontab 已删、目前没装；要再挂就照下面写（VPS 系统时区是 UTC，19:20 UTC = 北京 03:20）：
   20 19 * * * cd /opt/xianxia-companion && TZ=Asia/Shanghai PYTHONPATH=app/src .venv/bin/python tools/tianxing_duel_daily.py 2 15 10 1000000013 1000000014 >> data/tianxing_duel_daily.log 2>&1
   攻方 甲真人 (profile 2)；目标 1000000013 = 乙真人 (profile 3)、1000000014 = 丁真人 (profile 4)。
   不再打 @RivalAlpha。同一目标每天最多 5 场；只有两个小号时，有一个被跳过就凑不满 10 点神念。

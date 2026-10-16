@@ -80,20 +80,6 @@
         {% endif %}
         <p class="muted top-gap">自动化只执行服务端 `start → challenge`，不会自动“重铸道心”消耗重置成本，也不会发送 `.闯塔` 群命令。</p>
     </div>
-
-    <div class="detail-card wild-experience-card">
-        <div class="section-header compact">
-            <p>玩家对 NPC 的野外遭遇</p>
-            <h2>野外历练</h2>
-        </div>
-        <div class="stack-list compact-stack">
-            <div class="kv-row"><span>定位</span><strong>玩家对NPC的野外遭遇，不会匹配其他玩家。</strong></div>
-            <div class="kv-row"><span>当前状态</span><strong>{% if wild_experience_state.cooldown_target and not wild_experience_state.cooldown_ready %}{{ wild_experience_state.status_prefix }}<span class="countdown-text" data-countdown-target="{{ wild_experience_state.cooldown_target }}"></span>{% else %}{{ wild_experience_state.status_display }}{% endif %}</strong></div>
-            <div class="kv-row"><span>上次历练</span><strong>{{ wild_experience_state.last_experience_display }}</strong></div>
-        </div>
-
-        <p class="muted top-gap">群命令野外历练已失效。当前功能已迁移到“诸元神巡令”，统一选择谨慎、均衡或深入策略，并通过公共洞府 MiniApp 执行全部 Profile。</p>
-    </div>
         </section>
 
         <section class="detail-grid other-auto-grid">

@@ -84,6 +84,8 @@ class ConnectionRecoveryTests(unittest.TestCase):
                     payload = json.loads(request.content)
                     calls.append(path)
                     if path.endswith("/run/start") and calls.count(path) == 1:
+                        if error_type is httpx.ReadTimeout:
+                            used[payload["mode"]] = 1   # 读超时：请求到了服务器，开局已受理、次数已涨
                         raise error_type("simulated connection failure")
                     if path.endswith("/run/submit"):
                         used[payload["mode"]] = 1
@@ -121,8 +123,9 @@ class ConnectionRecoveryTests(unittest.TestCase):
                      patch.object(estate, "execute_estate_external_app_lookup", return_value=lookup):
                     result = tree.run_luoyun_spirit_tree_flow(estate_token="dwelling_offline123", init_data="offline",
                         transport=None, sleeper=lambda _: None)
-                self.assertEqual(result["status"], "settlement_unknown", result)
-                self.assertEqual(result["pending_submission"]["stage"], "starting")
+                # 连不上 = 请求没到服务器，重读赛况次数没涨：交给调度器稍后重开，不留待核对
+                self.assertEqual(result["status"], "retry_pending", result)
+                self.assertFalse(result["pending_submission"])
                 self.assertEqual(sum(path.endswith("/run/start") for path in calls), 2)
                 self.assertFalse(any(path.endswith("/run/submit") for path in calls))
                 self.assertEqual(len(self.clients), 1)

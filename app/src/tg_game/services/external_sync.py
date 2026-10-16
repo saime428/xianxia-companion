@@ -144,14 +144,6 @@ def clear_external_cookie_override_if_matches(
     storage.clear_external_cookie_override()
 
 
-def get_cultivator_username(profile) -> str:
-    return (
-        (profile.telegram_username or profile.account_name.lstrip("@") or "")
-        .strip()
-        .lstrip("@")
-    )
-
-
 def _normalize_name_like_candidate(value: object) -> str:
     candidate = str(value or "").strip().lstrip("@")
     if not candidate:
@@ -348,6 +340,9 @@ def _sync_sect_info(storage: Storage, profile_id: int, payload) -> None:
     from tg_game.web.biz_web_display_formatting import format_sect_position
 
     sect_name = str(payload.get("sect_name") or "").strip()
+    if not sect_name:
+        # 字段在但是空值同理：没入宗门天机阁回的是「散修」，空值只能是回包残缺
+        return
     sect_meta = SECT_METADATA.get(sect_name, {})
     storage.update_profile_sect_info(
         profile_id=profile_id,

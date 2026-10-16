@@ -3,7 +3,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 from tg_game.services.automation_switch import is_automation_paused
 from tg_game.services.external_sync import (
@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 
 FANREN_BOT_USERNAME = "fanrenxiuxian_bot"
-FANREN_BOT_IDS = set()
 FANREN_CHECK_COMMAND = cultivation_countdown.FANREN_CHECK_COMMAND
 FANREN_NORMAL_COMMAND = cultivation_countdown.FANREN_NORMAL_COMMAND
 FANREN_DEEP_COMMAND = cultivation_countdown.FANREN_DEEP_COMMAND
@@ -703,26 +702,6 @@ def set_enabled(db, chat_id, enabled, *, reset_failure=False, profile_id=None):
     if reset_failure:
         fields["failure_count"] = 0
     update_session(db, chat_id, profile_id=profile_id, **fields)
-
-
-def reset_runtime_state(db, chat_id, profile_id=None):
-    update_session(
-        db,
-        chat_id,
-        profile_id=profile_id,
-        next_check_time=0,
-        next_check_source=None,
-        last_event=None,
-        last_summary=None,
-        last_bot_text=None,
-        last_bot_msg_id=0,
-        last_command_msg_id=0,
-        last_action=None,
-        last_action_time=0,
-        last_command_time=0,
-        failure_count=0,
-        stopped_reason=None,
-    )
 
 
 def set_dry_run(db, chat_id, enabled, profile_id=None):

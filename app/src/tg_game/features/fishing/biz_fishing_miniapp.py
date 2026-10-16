@@ -15,9 +15,6 @@ from telethon import functions
 from tg_game.services.runtime_drain import tracked_flow
 from tg_game.features.estate import biz_estate_miniapp as estate_miniapp
 from tg_game.features.fishing.biz_fishing_miniapp_entry import (
-    MAX_FISHING_RESULT_TEXT_LENGTH,
-    MINIAPP_ENTRY_MARKER,
-    MINIAPP_SAFETY_BOUNDARY,
     _FISH_TOKEN_PATTERN,
     _host_from_url,
     _origin_from_url,
@@ -25,14 +22,10 @@ from tg_game.features.fishing.biz_fishing_miniapp_entry import (
     _safe_text,
     _start_param_kind,
     append_miniapp_entry_block,
-    default_miniapp_entry,
     describe_miniapp_button_debug,
     extract_fishing_miniapp_entry,
     extract_fishing_miniapp_launch,
-    format_miniapp_entry_block,
     looks_like_fishing_miniapp_prompt,
-    parse_miniapp_entry_block,
-    strip_miniapp_entry_block,
 )
 
 
@@ -524,55 +517,6 @@ def _start_param_from_url(url: str) -> str:
         }:
             return str(value or "").strip()
     return ""
-
-
-def extract_public_fishing_launch(data: object) -> dict:
-    root = _unwrap_data(data)
-    account = root.get("account") if isinstance(root.get("account"), dict) else {}
-    external_apps = (
-        account.get("externalApps")
-        if isinstance(account.get("externalApps"), dict)
-        else {}
-    )
-    groups = external_apps.get("groups") if isinstance(external_apps.get("groups"), list) else []
-    for group in groups:
-        apps = (
-            group.get("apps")
-            if isinstance(group, dict) and isinstance(group.get("apps"), list)
-            else []
-        )
-        for app in apps:
-            if not isinstance(app, dict) or not bool(app.get("available", True)):
-                continue
-            url = urljoin(
-                f"{FISHING_MINIAPP_DEFAULT_API_BASE_URL}/",
-                str(app.get("url") or "").strip(),
-            )
-            try:
-                parsed = urlsplit(url)
-            except ValueError:
-                continue
-            if parsed.path != FISHING_MINIAPP_WEB_PATH:
-                continue
-            token = _start_param_from_url(url)
-            if not _FISH_TOKEN_PATTERN.match(token):
-                continue
-            return {
-                "token": token,
-                "webview_url": url,
-                "entry": {
-                    "status": "captured",
-                    "button_text": _safe_text(
-                        app.get("buttonText") or app.get("title") or "灵溪垂钓",
-                        48,
-                    ),
-                    "host": (parsed.hostname or "").lower(),
-                    "path": parsed.path,
-                    "token_suffix": token[-4:],
-                    "token_digest": _safe_digest(token),
-                },
-            }
-    return {}
 
 
 def _js_number(value: object, default: float) -> float:

@@ -581,6 +581,17 @@ def _submit_run(request: dict, transport, acquire_token, sleeper) -> dict:
     return result
 
 
+def _start_not_counted(start_request: dict, transport, acquire_token, mode: str, used_before: int, sleeper) -> bool:
+    # run/start 一受理就把当天次数 +1；重读赛况次数没涨，就是服务器没开出这一局。
+    # 读超时时源站可能还在处理那条开局，先等一会再看，免得误判后补跑多开一局
+    sleeper(LUOYUN_SPIRIT_TREE_SUBMIT_RETRY_SECONDS[0])
+    fresh = execute_luoyun_spirit_tree_miniapp_request_with_turnstile(start_request, transport, acquire_token)
+    if not fresh.get("ok"):
+        return False
+    state = (_snapshot_from_data(fresh.get("data") or {}).get("daily") or {}).get(mode) or {}
+    return bool(state.get("quota_known")) and _int_or_zero(state.get("used")) <= int(used_before)
+
+
 def _refreshed_snapshot(start_request: dict, transport, acquire_token, snapshot: dict) -> dict:
     # run_submitted 的回包不带赛况，重读一次 start，免得次数、最好成绩停在旧值
     fresh = execute_luoyun_spirit_tree_miniapp_request_with_turnstile(start_request, transport, acquire_token)
@@ -871,6 +882,12 @@ def run_luoyun_spirit_tree_flow(
             if not run_start_result.get("ok"):
                 failure_status, failure_kind, keep_pending = classify_luoyun_submission_failure(run_start_result)
                 uncertain = failure_status == "settlement_unknown"
+                if uncertain and _start_not_counted(
+                    tree_start_request, transport, acquire_turnstile_token, game_mode, current["used"], sleeper
+                ):
+                    # 开局回包丢了（5xx/断线），但服务器上这一项的次数没涨 = 没开出局：稍后重开，
+                    # 别整天停下待核对（10-14 提交那一步已这样修过，开局这一步审查时补上）
+                    uncertain, failure_status = False, "retry_pending"
                 if not uncertain and checkpoint_callback:
                     checkpoint_callback({})
                 return _flow_result(

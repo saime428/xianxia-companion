@@ -320,33 +320,6 @@ async def _execute_pagoda_request_async(request: dict, transport) -> dict:
         return {"ok": False, "status_code": 0, "data": {}, "error": "http_timeout"}
 
 
-def run_pagoda_flow(*, token: str, init_data: str, transport, progress_callback=None) -> dict:
-    if progress_callback is not None:
-        progress_callback("start")
-    start_result = execute_pagoda_request(
-        build_pagoda_request("start", token=token, init_data=init_data),
-        transport,
-    )
-    state = sanitize_pagoda_state(start_result.get("data", {}).get("state"))
-    if not start_result.get("ok"):
-        return {"ok": False, "status": "failed", "state": state, "replay": {}, "error": start_result.get("error")}
-    if not state.get("canChallenge"):
-        return {
-            "ok": True,
-            "status": "skipped",
-            "state": state,
-            "replay": {},
-            "error": "今日已闯塔，服务端当前不可再次挑战。",
-        }
-    if progress_callback is not None:
-        progress_callback("challenge")
-    challenge_result = execute_pagoda_request(
-        build_pagoda_request("challenge", token=token, init_data=init_data),
-        transport,
-    )
-    return _finish_pagoda_challenge(state, challenge_result)
-
-
 async def run_pagoda_flow_with_reconciliation(
     *,
     token: str,

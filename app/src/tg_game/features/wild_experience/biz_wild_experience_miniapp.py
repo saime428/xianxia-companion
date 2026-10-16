@@ -85,7 +85,7 @@ def _wild_state(data: object) -> dict:
         if isinstance(journey.get("wildExperience"), dict)
         else {}
     )
-    limit = max(_int(wild.get("dailyLimit"), 2), 0)
+    limit = max(_int(wild.get("dailyLimit"), DAILY_LIMIT), 0)
     count = max(_int(wild.get("dailyCount")), 0)
     remaining = max(_int(wild.get("dailyRemaining"), limit - count), 0)
     cooldown = max(_int(wild.get("remainingSeconds")), 0)
@@ -127,7 +127,7 @@ def _attempt(value: object) -> dict:
         "outcome": _safe_text(result.get("outcome") or "unknown", 20),
         "strategy": normalize_strategy(mode.get("key") or mode.get("label")),
         "daily_count": max(_int(result.get("dailyCount")), 0),
-        "daily_limit": max(_int(result.get("dailyLimit"), 2), 0),
+        "daily_limit": max(_int(result.get("dailyLimit"), DAILY_LIMIT), 0),
         "cultivation_delta": _int(result.get("cultivationDelta")),
         "success_rate": max(_int(result.get("successRate")), 0),
         "roll": max(_int(result.get("roll")), 0),
@@ -169,7 +169,7 @@ def _result(
         "strategy": normalize_strategy(strategy),
         "day_key": _day_key(now),
         "daily_count": max(_int(state.get("daily_count")), 0),
-        "daily_limit": max(_int(state.get("daily_limit"), 2), 0),
+        "daily_limit": max(_int(state.get("daily_limit"), DAILY_LIMIT), 0),
         "daily_remaining": max(_int(state.get("daily_remaining")), 0),
         "ready_at": _float(state.get("ready_at")),
         "reset_at": _float(state.get("reset_at")),

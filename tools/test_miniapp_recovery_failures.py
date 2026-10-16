@@ -25,8 +25,10 @@ class RecoveryTests(unittest.TestCase):
                     calls.append(endpoint)
                     if endpoint == failed_endpoint:
                         raise TimeoutError("offline lost response")
+                    # 服务器其实收下了开局（次数 +1），只是回包丢了
+                    used = 1 if failed_endpoint == "run_start" and "run_start" in calls else 0
                     return 200, {"ok": True, "data": {"account": {"accountId": "1"},
-                        "seasonState": {"daily": {mode: {"used": 0, "limit": 3} for mode in ("fly", "jump")}},
+                        "seasonState": {"daily": {mode: {"used": used, "limit": 3} for mode in ("fly", "jump")}},
                         "run": {"runToken": "private-run", "seed": 42}}}
                 kwargs = dict(estate_token="dwelling_offline123", init_data="local", transport=transport,
                               checkpoint_callback=lambda value: checkpoints.append(deepcopy(value)), sleeper=lambda _: None)
@@ -54,6 +56,25 @@ class RecoveryTests(unittest.TestCase):
                         result = tree.run_luoyun_spirit_tree_flow(**kwargs, pending_submission=pending)
                         self.assertEqual(result["status"], "retry_pending")
                         self.assertEqual(set(calls), {"start", "run_submit"})
+
+    def test_tree_start_lost_but_not_counted_retries_instead_of_review(self):
+        # 开局回 502、重读赛况次数没涨 = 服务器没开出局：交给调度器稍后重开，不整天停下待核对
+        calls, checkpoints = [], []
+        def transport(request):
+            endpoint = request["safe_summary"]["endpoint"]
+            calls.append(endpoint)
+            if endpoint == "run_start":
+                return 502, "<html>502 Bad gateway</html>"
+            return 200, {"ok": True, "data": {"account": {"accountId": "1"},
+                "seasonState": {"daily": {mode: {"used": 0, "limit": 3} for mode in ("fly", "jump")}}}}
+        lookup = {"result": {"ok": True}, "launch": {"token": "tree_offline123"}}
+        with patch.object(estate, "execute_estate_external_app_lookup", return_value=lookup):
+            result = tree.run_luoyun_spirit_tree_flow(estate_token="dwelling_offline123", init_data="local", transport=transport,
+                                                      checkpoint_callback=checkpoints.append, sleeper=lambda _: None)
+        self.assertEqual(result["status"], "retry_pending", result)
+        self.assertFalse(result["pending_submission"])
+        self.assertEqual(checkpoints[-1], {})
+        self.assertEqual(calls, ["start", "run_start", "start"])
 
     def _tree_run(self, *, submit_replies=(), pending=None, season_start_days_ago=1, season_id="lyz-test"):
         """一天各 1 次的赛况，服务器记次数和最好成绩；submit_replies 依次替换 run/submit 的回包

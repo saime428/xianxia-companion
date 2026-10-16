@@ -13,10 +13,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app" / "src"))
 
-from tg_game.features.companion.biz_companion_cooldown import (  # noqa: E402
-    WILD_EXPERIENCE_FEATURE_KEY,
-    resolve_simple_cooldown_next_run_at,
-)
 from tg_game.features.tianxing import biz_tianxing_runtime as tx  # noqa: E402
 from tg_game.features.wild_experience import (  # noqa: E402
     biz_wild_experience_miniapp as wild,
@@ -38,19 +34,6 @@ def _payload(**wild_fields) -> dict:
     }
 
 
-def test_cooldown_is_three_hours():
-    last = datetime(2026, 9, 16, 1, 0, tzinfo=timezone.utc)
-    ready = resolve_simple_cooldown_next_run_at(
-        {"last_wild_experience_time": last.isoformat()}, WILD_EXPERIENCE_FEATURE_KEY
-    )
-    assert ready == last.timestamp() + 3 * 3600, ready
-    # 没跑过就当现在可跑；字段缺失返回 None（由调用方决定要不要开跑）
-    assert resolve_simple_cooldown_next_run_at(
-        {"last_wild_experience_time": ""}, WILD_EXPERIENCE_FEATURE_KEY
-    ) == 0.0
-    assert resolve_simple_cooldown_next_run_at({}, WILD_EXPERIENCE_FEATURE_KEY) is None
-
-
 def test_wild_state_tolerates_missing_daily_fields():
     # 冷却制回包：没有每日字段，只有剩余秒数
     cooling = wild._wild_state(_payload(remainingSeconds=10200))
@@ -59,6 +42,9 @@ def test_wild_state_tolerates_missing_daily_fields():
     # 同样没有每日字段但冷却已过 —— 不能当成"次数用尽"
     ready = wild._wild_state(_payload(remainingSeconds=0))
     assert ready["available"] is True, ready
+    # 有 dailyCount 没 dailyLimit：按每天 8 场算，别按老的 2 场判成打完（审查 10-16）
+    partial = wild._wild_state(_payload(dailyCount=2, remainingSeconds=0))
+    assert partial["available"] is True and partial["daily_limit"] == wild.DAILY_LIMIT, partial
     # 老的每日制回包仍然生效
     used_up = wild._wild_state(
         _payload(available=True, dailyLimit=2, dailyCount=2, dailyRemaining=0)
@@ -443,6 +429,35 @@ def test_global_wild_disable_is_per_profile():
     assert items[0]["reward"] == "该角色已关闭野外历练", items
     assert [call.args[1] for call in load.call_args_list] == [3, 4]
     storage.update_external_account_payload.assert_not_called()
+
+
+def test_deferred_tianxing_profile_does_not_block_the_others():
+    """10-16：大号被天星 gate 推迟到 14:09（别路推命没到期），两个小号跟着串行白等了一上午。"""
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+
+    deferred = {wild.STATE_KEY: {"request": {"status": "queued", "not_before": time.time() + 3600}}}
+    due = {wild.STATE_KEY: {"request": {"status": "queued", "not_before": 0}}}
+    payloads = {2: deferred, 3: {}, 4: {}}
+    storage = Mock()
+    storage.get_runtime_state.return_value = ""
+    storage.get_profile.side_effect = lambda profile_id: SimpleNamespace(id=profile_id)
+    storage.update_external_account_payload.side_effect = (
+        lambda profile_id, provider, update: payloads.__setitem__(profile_id, due) or due
+    )
+    target = {"status": "pending", "chat_id": -100, "thread_id": None, "chat_type": "group", "bot_username": "b"}
+    items = [{**target, "profile_id": 2, "status": "queued", "scheduled_at": time.time() - 60}]
+    items += [{**target, "profile_id": profile_id} for profile_id in (3, 4)]
+    with patch.object(age, "_load_external", side_effect=lambda _storage, pid: (None, payloads[pid])), patch.object(
+        age, "_profile_ready", return_value=True
+    ):
+        age._dispatch_next_wild_experience_item(storage, items, strategy="谨慎")
+        assert float(items[1].get("scheduled_at") or 0) > 0, items      # 大号推迟中：丙真人先打
+        assert not items[2].get("scheduled_at"), items                    # 丁真人仍排在丙真人后面
+        payloads[2] = due
+        items[1]["status"] = "success"
+        age._dispatch_next_wild_experience_item(storage, items, strategy="谨慎")
+        assert not items[2].get("scheduled_at"), items                    # 大号放行了：照旧占着串行位
 
 
 def main():

@@ -486,6 +486,12 @@ def _start_wild_experience_item(
         item["status"] = "failed"
 
 
+def _wild_experience_deferred(storage: Storage, item: dict) -> bool:
+    _account, payload = _load_external(storage, int(item.get("profile_id") or 0))
+    request = wild_experience_miniapp.get_active_request(payload)
+    return bool(request) and float(request.get("not_before") or 0) > time.time()
+
+
 def _dispatch_next_wild_experience_item(
     storage: Storage,
     items: list[dict],
@@ -496,6 +502,10 @@ def _dispatch_next_wild_experience_item(
         if item.get("status") in TERMINAL_STATUSES:
             continue
         if float(item.get("scheduled_at") or 0) > 0:
+            if _wild_experience_deferred(storage, item):
+                # 天星 gate 推迟中（别路推命/改命没到期，可能要好几小时）：不占串行位，后面的号先打。
+                # 10-16 大号被错记的「推命 斗法」推到 14:09，两个小号跟着白等了一上午。
+                continue
             return
         profile = storage.get_profile(int(item.get("profile_id") or 0))
         if profile is None:
@@ -508,7 +518,7 @@ def _dispatch_next_wild_experience_item(
             item,
             strategy=strategy,
         )
-        if item.get("status") not in TERMINAL_STATUSES:
+        if item.get("status") not in TERMINAL_STATUSES and not _wild_experience_deferred(storage, item):
             return
 
 

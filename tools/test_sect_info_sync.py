@@ -34,6 +34,11 @@ def check():
         # 残缺 payload（没有 sect_name 字段）不能把宗门冲成空
         refresh({"active_buffs": "{}"})
         assert storage.get_profile(pid).sect_name == "星宫"
+        # 字段在但是空值也一样：不然落云/星宫/万灵的自动任务会被当成退宗永久关掉（审查 10-16）
+        refresh({"sect_name": "", "is_sect_elder": False})
+        assert storage.get_profile(pid).sect_name == "星宫"
+        refresh({"sect_name": None})
+        assert storage.get_profile(pid).sect_name == "星宫"
         # 退宗照常写
         refresh({"sect_name": "散修", "is_sect_elder": False})
         profile = storage.get_profile(pid)

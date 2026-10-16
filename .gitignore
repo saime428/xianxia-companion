@@ -35,7 +35,6 @@ data/telegram_game_bot_schedule.log
 data/telegram_game_bot_launchd.stdout.log
 data/telegram_game_bot_launchd.stderr.log
 !data/.gitkeep
-/docs/
 logs/
 group_user.db
 *.db-wal

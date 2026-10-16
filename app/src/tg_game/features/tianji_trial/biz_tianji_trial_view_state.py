@@ -40,10 +40,6 @@ def _day_key_from_text(value: object) -> str:
     return ""
 
 
-def _current_day_key() -> str:
-    return _day_key_from_timestamp(time.time())
-
-
 def _tianji_trial_request_day_key(request: object) -> str:
     source = request if isinstance(request, dict) else {}
     return _day_key_from_timestamp(source.get("queued_at")) or _day_key_from_text(

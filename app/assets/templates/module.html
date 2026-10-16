@@ -47,10 +47,6 @@
     {% include 'modules/small_world.html' %}
 {% endif %}
 
-{% if module.key == 'market' %}
-    {% include 'modules/market.html' %}
-{% endif %}
-
 {% if module.key == 'tianxing' %}
     {% include 'modules/tianxing.html' %}
 {% endif %}
@@ -693,19 +689,6 @@
 .market-toolbar.inventory-search-toolbar .action-row {
     justify-content: flex-start;
 }
-.market-buy-form {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
-}
-.market-buy-form input[type='number'] {
-    width: 88px;
-}
-.market-buy-form input[type='text'] {
-    min-width: 200px;
-    flex: 1 1 220px;
-}
 .dungeon-tab-row {
     display: flex;
     flex-wrap: wrap;
@@ -941,12 +924,6 @@
 .stock-change.down {
     color: var(--success);
 }
-@media (min-width: 1081px) {
-    .other-core-grid > .wild-experience-card {
-        grid-column: 2;
-        grid-row: 1;
-    }
-}
 @media (max-width: 1080px) {
     .overview-stat-value {
         font-size: 28px;
@@ -1034,7 +1011,7 @@
 }
 </style>
 
-{% if module.key not in ['cultivation', 'sect', 'artifact', 'inventory', 'fishing', 'small_world', 'market', 'other', 'estate', 'dungeon', 'stock', 'tianxing'] %}
+{% if module.key not in ['cultivation', 'sect', 'artifact', 'inventory', 'fishing', 'small_world', 'other', 'estate', 'dungeon', 'stock', 'tianxing'] %}
 <section class="detail-grid">
     <div class="detail-card">
         <div class="section-header compact">
@@ -1054,7 +1031,7 @@
 </section>
 {% endif %}
 
-{% if module.key not in ['cultivation', 'sect', 'artifact', 'inventory', 'fishing', 'small_world', 'market', 'other', 'estate', 'dungeon', 'stock', 'tianxing'] %}
+{% if module.key not in ['cultivation', 'sect', 'artifact', 'inventory', 'fishing', 'small_world', 'other', 'estate', 'dungeon', 'stock', 'tianxing'] %}
 <section class="detail-grid">
     <div class="detail-card">
         <div class="section-header compact">
@@ -1081,7 +1058,7 @@
 </section>
 {% endif %}
 
-{% if module.key not in ['cultivation', 'sect', 'artifact', 'inventory', 'fishing', 'small_world', 'market', 'other', 'estate', 'dungeon', 'stock', 'tianxing'] %}
+{% if module.key not in ['cultivation', 'sect', 'artifact', 'inventory', 'fishing', 'small_world', 'other', 'estate', 'dungeon', 'stock', 'tianxing'] %}
 <section class="detail-grid">
     <div class="detail-card">
         <div class="section-header compact">
